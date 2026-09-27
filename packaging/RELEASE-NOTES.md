@@ -2,24 +2,25 @@
 
 ## 本版变更
 
-### 🔴 修复（PWD_LOCK 自锁死锁：Web UI 配置页打不开、自动登录停摆）
-- **`GET /api/config` 会永久挂起**：`api_get_config()` 在 `with PWD_LOCK:` 里又调了自带
-  `with PWD_LOCK` 的 `_get_password()` —— `PWD_LOCK` 是不可重入的 `threading.Lock`，同一线程
-  二次获取即死锁（v1.x 单文件版这里是直接读 `_PWD_VALUE`，模块化拆分时成了回归）。
-- 表现：配置页字段全空、徽标显示「状态未知」、**保存请求也一起卡死**（`_save_password_to_disk`
-  抢同一把锁），刷新后看着像"编辑完又没了"；**周期性自检线程同样卡在 `_get_password()` 上
-  → 自动登录实际已停摆**（`last_check_at` 不再推进）。
-- 修复：只调 `_get_password()`（加锁责任在它内部），并把这条约定写进注释；冒烟测试新增
-  3 条静态断言 + 真实调用 `api_get_config()` 的 3 秒超时回归（再犯即 FAIL）。
-- 已装机器：把 `web_api.py` 换成本版并 `Restart-Service DrcomAutoLogin` 即可，
-  `config.json` / `password.txt` 不受影响。
-
-### ✨ 安装器外观收口
-- **桌面快捷方式**：图标从 `{sys}\shell32.dll,13`（Windows 通用图标）换成品牌 `app.ico`
-  （7 个尺寸，256 → 16 px）；安装包新增分发 `{app}\branding\app.ico`。
-- **开始菜单项**：`.url` 补 `IconFile` / `IconIndex`，不再显示浏览器默认图标。
-- **「应用和功能」卸载项**：`UninstallDisplayIcon` 改用品牌图标。
-- 服务名、`AppId`、配置结构、CLI / API 一律未动，可直接覆盖安装（`SERIAL` +1）。
+### 🔴 修复（自动升级：installer 被 nssm 的 Job 连坐杀掉 —— 真机实证）
+- **现象**：v2.0.4.1 发布后本机自动升级一路"成功"（发现新版本 → 下载 11,310,892 B →
+  SHA256 通过 → `installer 已启动 PID=51704`），但 **`version.py` 不变、
+  `installer-silent.log` 压根没生成、服务停在 `StopPending`** → 自动登录直接停摆。
+- **根因**：`setup.iss` 的 `CurStepChanged(ssInstall)` 会 `nssm stop DrcomAutoLogin`，而 nssm
+  关闭自己的 Job Object 时会把**同 Job 的子进程一起杀掉** —— 由服务直启（`DETACHED_PROCESS`
+  `|CREATE_BREAKAWAY_FROM_JOB`）的 installer 在复制文件前就被带走。
+  对照组：**同一条命令行由不在该 Job 里的进程拉起 → 退出码 0、7.1 秒装完**。
+- **修复**：改为写一个 `.cmd` 执行器 + `schtasks /create /ru SYSTEM /rl HIGHEST` + `/run`
+  （由 Task Scheduler 托管，与 nssm 没有 Job 关系）；任务计划程序不可用时才退回旧的直启路径。
+- **顺带修好的三处**：
+  - **看门狗**：installer 跑完先查服务，没 `RUNNING` 就 `sc start`（升级失败不再"没人管"）。
+  - **可诊断性**：`%TEMP%\drcom_apply_update.rc` 落盘 installer 退出码，安装日志复制进
+    `{app}\logs\installer-silent.log`，启动钩子把两者写进 `upgrade.log`（此前失败无从查起）。
+  - **`desktopicon` 任务**：`/TASKS=` 补上，升级后公共桌面快捷方式才会刷新。
+- **另修两处误报/误判**：`AppExit` 改按 nssm 的真实结构（`Parameters\AppExit` 子键的
+  `(默认)` / `0` 子值）读写，不再每次开机误报「自愈失败」；升级成功只认
+  「尝试记录目标版本 == 当前版本」，不再因为"备份 hash 不同"把任何脚本改动误报成升级成功。
+- 接口、配置结构、服务名、`AppId` 未动，可直接覆盖安装（`SERIAL` +1）。
 
 ## 安装包信息
 
@@ -50,9 +51,11 @@ Get-Content "D:\Program Files\DrcomAutoLogin\logs\campus_login.log" -Tail 50 | S
 Get-Content "D:\Program Files\DrcomAutoLogin\logs\upgrade.log" -Tail 20
 ```
 
-**预期**：`Status=Running`；`/api/config` 立刻 200（死锁已修，配置页能读到值、保存立即生效）；
+**预期**：`Status=Running`；`/api/config` 立刻 200（配置页能读到值、保存立即生效）；
 stderr 无 `ModuleNotFoundError`；`campus_login.log` 无 `NameError`；
 `upgrade.log` 不再出现「几十秒一轮的下载 → 装 → 重启」死循环。
+自动升级过的话，`upgrade.log` 里还应看到
+`升级执行器结果：installer_rc=0 / service=RUNNING`（v2.0.4.2 新增的退出码与看门狗回报）。
 
 ## 校验
 

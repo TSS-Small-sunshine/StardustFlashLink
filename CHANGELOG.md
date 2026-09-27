@@ -5,6 +5,39 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.4.2 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 本版只修**自动升级链路**。真机实测 v2.0.4.1 发布后：`发现新版本 → 下载 → SHA256 通过 →
+> installer 已启动` 一路"成功"，**结果什么都没装上**，而且服务停在 `StopPending`、自动登录直接停摆。
+> 接口、配置结构、服务名、`AppId` 一律未动（`SERIAL` +1）。
+
+### 🔴 修复（自动升级：installer 被 nssm 的 Job 连坐杀掉）
+- `fix(auto_update)`: **改用「任务计划程序」拉起 installer**。根因：`setup.iss` 的
+  `CurStepChanged(ssInstall)` 会 `nssm stop DrcomAutoLogin`，而 nssm 关闭自己的 Job Object 时会把
+  **同 Job 的子进程一起杀掉** —— 直启（`DETACHED_PROCESS|CREATE_BREAKAWAY_FROM_JOB`）的 installer
+  在复制文件前就消失。真机证据：`installer-silent.log` 压根没生成、`version.py` 不变、服务停在
+  `StopPending`；而**同一条命令行由不在该 Job 里的进程拉起 → 7.1 秒装完**。现在改为写一个 `.cmd`
+  执行器（落在 `%TEMP%`）→ `schtasks /create /ru SYSTEM /rl HIGHEST` → `/run`；任务计划程序不可用
+  时才退回旧的直启路径。
+- `fix(auto_update)`: **升级执行器带看门狗** —— installer 跑完先查服务是否 `RUNNING`，没起来就
+  `sc start`。升级失败时这是唯一兜底（此前服务就那样一直停着，直到人工发现）。
+- `fix(auto_update)`: **installer 退出码不再丢失** —— 执行器把它写进
+  `%TEMP%\drcom_apply_update.rc`，启动钩子读出来写进 `upgrade.log`（此前失败只有一句
+  "installer 被拦截/挂起？"，无从查起）。
+- `fix(auto_update)`: **静默安装补上 `desktopicon` 任务** —— `/TASKS=startservice` 等于告诉 Inno
+  「公共桌面快捷方式那个任务未选中」，升级后桌面图标永远是旧的。
+- `fix(auto_update)`: **`AppExit` 读写在 nssm 的真实结构上** —— nssm 存的是
+  `Parameters\AppExit` 子键的 `(默认)` / `0` 子值，而代码读的是 `Parameters` 下的同名值（根本不存在）
+  → 每次开机误报「AppExit 自愈失败」；`nssm set … AppExit "Default Ignore"` 还把子参数与值拼成了
+  单个 argv（静默写错）。现在读子键、`set` 拆成 `subparam` + `value` 两个参数。
+- `fix(auto_update)`: **不再用「备份 hash 不同」宣告升级成功** —— 那条会把任何脚本改动（含手动热补丁）
+  误判成升级成功，真机上出现过"绿 banner 说已升级、实际还是旧版本"。成功一律以
+  「尝试记录的目标版本 == 当前 `VERSION`」为准（此时才点亮成功 banner）。
+- `chore(auto_update)`: 升级收尾清理 —— 删计划任务、执行器、结果文件，以及**已经装上的安装包**
+  （顺带清掉历史上堆在 `%TEMP%` 的旧包）。
+- `test`: 冒烟新增 11 条断言，其中 4 条是**行为级**：直接生成执行器脚本，断言「安装 + 落退出码 +
+  看门狗 + 自删」四要素齐全、CRLF 行尾、且不含任何凭据。
+
 ## v2.0.4.1 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 本版两件事：**① 修一个会把 Web UI 配置页和自动登录一起卡死的死锁**；

@@ -114,7 +114,8 @@ check("v2.0.4.0 启动钩子在 _attach 之后",
 # (3) AppExit：空值视为无效 + 自愈
 check("v2.0.4.0 AppExit 空值视为无效", "if not isinstance(value, str) or not value.strip():" in src_upd)
 check("v2.0.4.0 AppExit 自愈函数在位", "_ensure_nssm_appexit_sane" in src_upd and "AppExit 自愈" in src_upd)
-check("v2.0.4.0 AppExit 优先走 nssm.exe", 'NSSM_PATH, "set", SERVICE_NAME, "AppExit", value' in src_upd)
+check("v2.0.4.0 AppExit 优先走 nssm.exe",
+      'NSSM_PATH, "set", SERVICE_NAME, "AppExit", subparam.strip()' in src_upd)
 
 # (4) 升级熔断：同版本失败后冷却 / 上限
 check("v2.0.4.0 升级尝试记录落盘", "update_attempt.json" in src_upd and "_write_update_attempt" in src_upd)
@@ -175,6 +176,34 @@ _th.start()
 _th.join(3)
 check("v2.0.4.1 api_get_config 3 秒内返回（不再死锁）", "r" in _box, repr(_box.get("e", "")))
 check("v2.0.4.1 api_get_config 返回 password_status", _box.get("r", {}).get("password_status") in ("set", "missing"))
+
+# ---- v2.0.4.2：自动升级执行器（任务计划程序 + 看门狗 + 退出码）----
+# 真机证据：installer 直启时 nssm 一停服务就把它连同 Job 一起杀掉 →
+# installer-silent.log 都没生成、版本号不变、服务停在 StopPending。
+check("v2.0.4.2 installer 由任务计划程序拉起", "schtasks" in src_upd and '"/create"' in src_upd)
+check("v2.0.4.2 任务名单含 desktopicon",
+      "/TASKS=desktopicon,startservice" in src_upd)   # 只传 startservice 会漏掉公共桌面图标
+check("v2.0.4.2 包装脚本落盘 installer 退出码", "installer_rc=%ERRORLEVEL%" in src_upd)
+check("v2.0.4.2 启动钩子读执行器结果", "_report_update_runner_result()" in src_upd)
+check("v2.0.4.2 升级残留会被清理", "_cleanup_update_leftovers()" in src_upd)
+check("v2.0.4.2 不再用备份 hash 误判升级成功",
+      "升级完成（v{}）：当前脚本与备份不同" not in src_upd)
+check("v2.0.4.2 AppExit 按 nssm 子键结构读取",
+      "APPEXIT_SUBKEY" in src_upd and "QueryValueEx(k, APPEXIT_DEFAULT_VALUE)" in src_upd)
+check("v2.0.4.2 nssm set AppExit 拆成两个 argv",
+      '"AppExit", subparam.strip(), value.strip()' in src_upd)
+
+# 行为级：包装脚本内容必须同时具备「装 + 落退出码 + 看门狗 + 自删」
+au = importlib.import_module("auto_update")
+_wrap = au._build_update_wrapper(
+    r"C:\T\DrcomAutoLogin-Setup-v9.9.9.exe", r"D:\App", r"C:\T\l.log", r"C:\T\r.txt", "MyTask")
+check("v2.0.4.2 包装脚本四要素齐全",
+      all(s in _wrap for s in ("/VERYSILENT", "TASKS=desktopicon,startservice", "installer_rc=",
+                               "sc.exe\" start", "schtasks.exe\" /delete", "del /f /q \"%~f0\"")))
+check("v2.0.4.2 包装脚本 CRLF 行尾", _wrap.endswith("\r\n") and "\r\n" in _wrap)
+check("v2.0.4.2 包装脚本带看门狗（服务没起来就 sc start）",
+      (" start %s" % au.SERVICE_NAME) in _wrap and "service=RUNNING" in _wrap)
+check("v2.0.4.2 包装脚本不外泄密码/凭据", "password" not in _wrap.lower() and "PWD" not in _wrap)
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -278,7 +307,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.4.1", version.VERSION == "2.0.4.1", version.VERSION)
+check("版本 = 2.0.4.2", version.VERSION == "2.0.4.2", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

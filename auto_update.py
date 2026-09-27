@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """auto_update.py — 自动升级（v1.3 新增）业务层。
 
 职责范围：
@@ -51,6 +51,29 @@ SERVICE_NAME = "DrcomAutoLogin"
 UPGRADE_HISTORY_MAX_LINES = 50
 UPGRADE_SUCCESS_TTL_SEC = 5 * 60  # 成功后绿 banner 仅保留 5 分钟
 BACKUP_RETENTION_DAYS = 7
+
+# ============================================================
+# v2.0.4.2：自动升级执行器（任务计划程序 + .cmd 包装脚本）
+#
+# 为什么不能再用 DETACHED_PROCESS 直启 installer：
+#   setup.iss 的 CurStepChanged(ssInstall) 会 `nssm stop DrcomAutoLogin`；
+#   nssm 关闭自己的 Job Object 时会把**同 Job 的子进程一起杀掉** ——
+#   直启的 installer 会在复制文件前就消失。真机实测（v2.0.4.1 → 2.0.4.1 那次）：
+#   installer-silent.log 压根没生成、版本号不变、服务还停在 StopPending。
+#   同一条命令行由**不在该 Job 里**的进程拉起 → 7.1 秒装完。
+# 于是改成：写一个 .cmd 包装脚本，注册成「一次性 + SYSTEM」计划任务再 /run。
+#   任务由 Task Scheduler 服务托管 → 与 nssm 无 Job 关系 → 服务被停也不连坐。
+#   包装脚本负责：跑 installer → 落盘退出码 → 看门狗拉起服务 → 收尾自删。
+# ============================================================
+UPDATE_TASK_NAME = "DrcomAutoLogin-AutoUpdate"
+UPDATE_WRAPPER_NAME = "drcom_apply_update.cmd"
+UPDATE_RC_NAME = "drcom_apply_update.rc"
+UPDATE_LOG_NAME = "drcom-installer-silent.log"
+SCHTASKS_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe")
+SC_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "sc.exe")
+# nssm 的 AppExit 是**子键 + 子值**：Default 存在子键的 (默认) 值里，0 存在名为 "0" 的值里
+APPEXIT_SUBKEY = NSSM_PARAMETERS_PATH + r"\AppExit"
+APPEXIT_DEFAULT_VALUE = ""
 
 # GitHub 镜像（国内加速；首个 None 表示主源，按顺序 fallback）
 # 镜像格式：prefix + 原始 URL；原始 URL 必须是 https://... 开头以避免双斜杠。
@@ -369,16 +392,22 @@ def _backup_service_py():
 
 
 def _read_nssm_appexit():
-    """从注册表读 AppExit 值；不存在 / **为空** / 权限不足返回 None。
+    """读 nssm 的 AppExit 策略（Default 子值）；不存在 / 为空 / 权限不足返回 None。
 
-    v2.0.4.0：空串也是无效值。真机实测该值被写成空字符串后，NSSM 每次启停
-    服务都会往 stderr 刷 `Parameter "AppExit" requires a subparameter!`，
-    并且失去"退出即忽略"的策略（升级期间进程自杀后被立刻拉起的循环就是这么来的）。
+    v2.0.4.2 修：nssm 的存储结构是**子键 + 子值** ——
+
+        HKLM\\SYSTEM\\CurrentControlSet\\Services\\<svc>\\Parameters\\AppExit
+            (默认)  REG_SZ  Ignore     ← nssm set <svc> AppExit Default Ignore
+            0       REG_SZ  Ignore     ← nssm set <svc> AppExit 0 Ignore
+
+    v2.0.4.1 及以前读的是 `Parameters` 下的**同名值** `AppExit` —— 那儿根本没有这个值，
+    于是每次启动都误报「AppExit 自愈失败（仍是空值）」，并且白白往 `Parameters`
+    写了一个 nssm 不认的非法值。真机日志里那行 WARN 就是这么来的。
     """
     try:
         import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, NSSM_PARAMETERS_PATH) as k:
-            value, _ = winreg.QueryValueEx(k, "AppExit")
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, APPEXIT_SUBKEY) as k:
+            value, _ = winreg.QueryValueEx(k, APPEXIT_DEFAULT_VALUE)
     except (OSError, ImportError):
         return None
     if not isinstance(value, str) or not value.strip():
@@ -387,36 +416,42 @@ def _read_nssm_appexit():
 
 
 def _write_nssm_appexit(value):
-    """直写 AppExit 到注册表（仅作为 nssm.exe 不可用时的兜底）。失败抛 OSError。"""
+    """直写 AppExit 子键的 (默认) 值（仅作为 nssm.exe 不可用时的兜底）。失败抛 OSError。"""
     if not isinstance(value, str) or not value.strip():
         # 绝不允许把空值写进注册表：NSSM 会因此报错并失去退出策略
         raise ValueError("AppExit 不能为空")
     import winreg
-    with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, NSSM_PARAMETERS_PATH) as k:
-        winreg.SetValueEx(k, "AppExit", 0, winreg.REG_SZ, value.strip())
+    with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, APPEXIT_SUBKEY) as k:
+        winreg.SetValueEx(k, APPEXIT_DEFAULT_VALUE, 0, winreg.REG_SZ, value.strip())
 
 
-def _set_nssm_appexit(value):
-    """设 AppExit。**优先 nssm.exe**（由 NSSM 决定注册表值的类型/结构），
-    失败才退回注册表直写。空值直接拒绝（v2.0.4.0）。
+def _set_nssm_appexit(subparam, value):
+    """设 AppExit 的某个子参数：`nssm set <svc> AppExit <subparam> <value>`。
+
+    v2.0.4.2 修：subparam 与 value 必须是**两个独立 argv**。此前把 "Default Ignore"
+    拼成单个参数传进去，nssm 会把整串当成子参数名 → 写进去的策略是错的（且返回码仍是 0，
+    静默失败）。subparam 取 `Default` / `0`（与 setup.iss RegisterService 一致）。
     """
+    if not isinstance(subparam, str) or not subparam.strip():
+        return False
     if not isinstance(value, str) or not value.strip():
         return False
-    value = value.strip()
     if os.path.isfile(NSSM_PATH):
         try:
             proc = subprocess.run(
-                [NSSM_PATH, "set", SERVICE_NAME, "AppExit", value],
+                [NSSM_PATH, "set", SERVICE_NAME, "AppExit", subparam.strip(), value.strip()],
                 timeout=15,
                 check=False,
             )
             if proc.returncode == 0:
                 return True
-            logger.warning("nssm set AppExit %s 返回码 %s", value, proc.returncode)
+            logger.warning("nssm set AppExit %s %s 返回码 %s", subparam, value, proc.returncode)
         except (OSError, subprocess.TimeoutExpired) as exc:
             logger.warning("nssm set AppExit 调用失败: %s", exc)
     else:
         logger.warning("nssm.exe 不在 %s，改用注册表直写", NSSM_PATH)
+    if subparam.strip().lower() != "default":
+        return False  # 注册表兜底只能写 (默认) 值，子参数 0 罕见，跳过
     try:
         _write_nssm_appexit(value)
         return True
@@ -426,18 +461,19 @@ def _set_nssm_appexit(value):
 
 
 def _ensure_nssm_appexit_sane():
-    """AppExit 为空 / 缺失时自愈为与 setup.iss 一致的值（v2.0.4.0）。
+    """AppExit 为空 / 缺失时自愈为与 setup.iss 一致的值（v2.0.4.0；v2.0.4.2 修读取方式）。
 
     返回当前（修复后）的值，失败返回 None。
     """
     cur = _read_nssm_appexit()
     if cur:
+        # 已有合法策略（Ignore）→ 什么都不做，也**不该**报"自愈失败"（v2.0.4.2 修的误报）
         return cur
     if not os.path.isfile(NSSM_PATH):
         _log_upgrade("WARN", "AppExit 无效（空/缺失）且找不到 nssm.exe，跳过自愈")
         return None
-    ok_default = _set_nssm_appexit("Default Ignore")
-    ok_zero = _set_nssm_appexit("0 Ignore")
+    ok_default = _set_nssm_appexit("Default", "Ignore")
+    ok_zero = _set_nssm_appexit("0", "Ignore")
     fixed = _read_nssm_appexit()
     if fixed:
         _log_upgrade("INFO", "AppExit 自愈完成：此前为空/缺失 → 现为 {}（Default Ignore={} / 0 Ignore={}）".format(
@@ -541,13 +577,111 @@ def _nssm_stop_service(timeout_sec=30):
         return False
 
 
-def _launch_installer(installer_path):
-    """用 Inno Setup 静默参数启动 installer，返回 Popen 对象或抛异常。
+def _update_tmp_dir():
+    """升级相关临时文件目录（服务的 TEMP = C:\\Windows\\TEMP，System 身份可写）。"""
+    return os.environ.get("TEMP", ".") or "."
 
-    关键：用 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB 让
-    子进程完全脱离父 Python 服务的进程生命周期。这样 Python 服务被 NSSM 杀掉时，
-    installer 不会被连累，能继续完成安装（停止旧服务 → 复制文件 → PostInstall 启动新服务）。
+
+def _wrapper_path():
+    return os.path.join(_update_tmp_dir(), UPDATE_WRAPPER_NAME)
+
+
+def _rc_path():
+    return os.path.join(_update_tmp_dir(), UPDATE_RC_NAME)
+
+
+def _installer_log_path():
+    return os.path.join(_update_tmp_dir(), UPDATE_LOG_NAME)
+
+
+def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name, svc_name=SERVICE_NAME,
+                          sc_path=None, schtasks_path=None):
+    """生成升级执行器的 .cmd 内容（纯函数，便于单测）。
+
+    包装脚本要在一个「不在 NSSM Job 里」的进程里完成这些事：
+      1. 静默跑 installer —— **任务列表必须带上 desktopicon**（只传 startservice 时
+         Inno 会认为公共桌面快捷方式那个任务未选中，桌面图标就不会被更新）；
+      2. 把 installer 退出码落盘（此前完全丢失，失败时无从查起）；
+      3. 把 installer 日志复制到安装目录 logs\\ 下，方便用户 / Web UI 查看；
+      4. **看门狗**：服务没跑起来就 sc start —— 升级失败时这是唯一的兜底
+         （v2.0.4.1 真机：装不上 + 服务停在 StopPending，自动登录直接停摆）；
+      5. 收尾：删计划任务、删自己。
     """
+    sc = sc_path or SC_PATH
+    schtasks = schtasks_path or SCHTASKS_PATH
+    lines = [
+        "@echo off",
+        "rem === 星尘闪连 自动升级执行器（由 auto_update.py 生成；跑完自删）===",
+        "rem 由「任务计划程序」以 SYSTEM 身份拉起：不在 NSSM 的 Job Object 里，",
+        "rem 所以安装器停掉服务时不会被连带杀死（v2.0.4.2 修）。",
+        "setlocal",
+        'set "LOG=' + log_path + '"',
+        'set "RC=' + rc_path + '"',
+        "rem ---- 1) 静默安装（任务：桌面图标 + 启动服务）----",
+        '"' + installer_path + '" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL'
+        ' /CLOSEAPPLICATIONS /TASKS=desktopicon,startservice /LOG="%LOG%"',
+        'echo installer_rc=%ERRORLEVEL%>"%RC%"',
+        "rem ---- 2) 安装日志归档到安装目录 ----",
+        'if exist "%LOG%" copy /y "%LOG%" "' + app_dir + '\\logs\\installer-silent.log" >nul 2>&1',
+        "rem ---- 3) 看门狗：服务没起来就拉起来（用 ping 当 sleep：SYSTEM 会话里没有 timeout 的控制台）----",
+        '"' + sc + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
+        'if errorlevel 1 "' + sc + '" start ' + svc_name + ' >nul 2>&1',
+        'ping -n 6 127.0.0.1 >nul 2>&1',
+        '"' + sc + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
+        'if errorlevel 1 (echo service=STOPPED>>"%RC%") else (echo service=RUNNING>>"%RC%")',
+        "rem ---- 4) 收尾：删任务、删自己 ----",
+        '"' + schtasks + '" /delete /tn "' + task_name + '" /f >nul 2>&1',
+        'del /f /q "%~f0" >nul 2>&1',
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _launch_installer(installer_path):
+    """启动 installer，返回 {"mode": ..., "pid": ...}；抛 OSError 表示全都失败。
+
+    v2.0.4.2 修（真机证据见文件头注释）：优先用**任务计划程序**拉起包装脚本 ——
+    installer 由 Task Scheduler 服务托管，不在 nssm 的 Job Object 里，所以
+    setup.iss 在 ssInstall 阶段 `nssm stop` 服务时不会把它连带杀死。
+    任务计划程序不可用时才退回旧的 DETACHED_PROCESS 直启（保持旧行为）。
+    """
+    log_path = _installer_log_path()
+    wrapper = _wrapper_path()
+    rc_path = _rc_path()
+    try:
+        if os.path.isfile(rc_path):
+            os.remove(rc_path)  # 清掉上次结果，避免下次启动读到陈旧数据
+    except OSError:
+        pass
+
+    try:
+        with open(wrapper, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(_build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME))
+    except OSError as exc:
+        _log_upgrade("WARN", "写升级执行器失败：{}（退回直启）".format(exc))
+        wrapper = None
+
+    if wrapper:
+        try:
+            create = subprocess.run(
+                [SCHTASKS_PATH, "/create", "/tn", UPDATE_TASK_NAME, "/tr", wrapper,
+                 "/sc", "once", "/st", "00:00", "/ru", "SYSTEM", "/rl", "HIGHEST", "/f"],
+                timeout=20,
+                check=False,
+            )
+            if create.returncode == 0:
+                run = subprocess.run(
+                    [SCHTASKS_PATH, "/run", "/tn", UPDATE_TASK_NAME],
+                    timeout=20,
+                    check=False,
+                )
+                if run.returncode == 0:
+                    return {"mode": "schtasks", "pid": None}
+                _log_upgrade("WARN", "schtasks /run 返回 {}（退回直启）".format(run.returncode))
+            else:
+                _log_upgrade("WARN", "schtasks /create 返回 {}（退回直启）".format(create.returncode))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log_upgrade("WARN", "任务计划程序拉起失败：{}（退回直启）".format(exc))
+
     args = [
         installer_path,
         "/SP-",
@@ -559,15 +693,18 @@ def _launch_installer(installer_path):
         "/NORESTART",
         "/NOCANCEL",
         "/CLOSEAPPLICATIONS",
-        "/TASKS=startservice",
-        "/LOG=" + os.path.join(LOG_DIR, "installer-silent.log"),
+        # v2.0.4.2：补 desktopicon —— 与计划任务路径保持一致（否则公共桌面快捷方式
+        # 会被 Inno 当成「未选中」，升级后桌面图标还是旧的）
+        "/TASKS=desktopicon,startservice",
+        "/LOG=" + log_path,
     ]
     # Windows 进程创建标志（详见 MSDN CreateProcess dwCreationFlags）
     DETACHED_PROCESS          = 0x00000008  # 子进程无控制台、不继承父 console
     CREATE_NEW_PROCESS_GROUP   = 0x00000200  # 子进程属于新 process group，不响应父 Ctrl+C/Ctrl+Break
     CREATE_BREAKAWAY_FROM_JOB  = 0x01000000  # 子进程脱离父进程的 Job Object（NSSM/服务宿主常用 Job）
     flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB
-    return subprocess.Popen(args, close_fds=True, creationflags=flags)
+    proc = subprocess.Popen(args, close_fds=True, creationflags=flags)
+    return {"mode": "detached", "pid": proc.pid}
 
 
 # ============================================================
@@ -711,9 +848,9 @@ def _do_update_now():
         prev_count = int(prev_attempt.get("count") or 0) if prev_attempt.get("target") == remote_ver else 0
         _write_update_attempt(remote_ver, count=prev_count + 1, state="attempted")
         try:
-            proc = _launch_installer(installer_path)
-            _log_upgrade("INFO", "installer 已启动 PID={}（DETACHED_PROCESS，第 {} 次尝试）".format(
-                proc.pid, prev_count + 1))
+            launch = _launch_installer(installer_path)
+            _log_upgrade("INFO", "installer 已启动（方式={}，PID={}，第 {} 次尝试）".format(
+                launch.get("mode"), launch.get("pid"), prev_count + 1))
         except OSError as exc:
             # 启动失败：不让 Python 退出，保持服务运行 + Web UI 显示 error
             _write_update_attempt(remote_ver, count=prev_count + 1, state="failed")
@@ -872,15 +1009,11 @@ def _post_upgrade_startup():
         current_hash = _h(os.path.join(BASE_DIR, "联网_service.py"))
         backup_hash = _h(newest)
         if current_hash and backup_hash and current_hash != backup_hash:
-            _log_upgrade("INFO", "升级完成（v{}）：当前脚本与备份不同".format(VERSION))
-            _set_update_state(
-                update_state="success",
-                update_progress=100,
-                update_progress_message="已升级到 v{}".format(VERSION),
-                update_target_version=VERSION,
-                update_success_at=_now_iso(),
-                update_last_error=None,
-            )
+            # v2.0.4.2：**不再**据此宣告"升级完成"。备份是升级前随手落的，
+            # 拿它比 hash 会把"任何一次脚本改动（含手动热补丁）"误判成"升级成功" ——
+            # 真机上就出现过"绿 banner 说已升级，实际还是旧版本"（22:41 那次日志）。
+            # 成功与否一律由下面的尝试记录（目标版本 vs 当前版本）判定。
+            _log_upgrade("INFO", "启动钩子：联网_service.py 与最近备份不同（可能是升级，也可能只是本地改动）")
         else:
             _log_upgrade("INFO", "启动钩子：未检测到脚本变更")
 
@@ -905,10 +1038,23 @@ def _post_upgrade_startup():
             if _compare_versions(VERSION, target) == 0:
                 _log_upgrade("INFO", "升级成功确认：已运行 v{}（目标 {}，尝试 {} 次）".format(VERSION, target, count))
                 _clear_update_attempt()
+                # v2.0.4.2：成功 banner 改由「真装上了」点亮（此前由备份 hash 误判点亮）
+                _set_update_state(
+                    update_state="success",
+                    update_progress=100,
+                    update_progress_message="已升级到 v{}".format(VERSION),
+                    update_target_version=VERSION,
+                    update_success_at=_now_iso(),
+                    update_last_error=None,
+                )
             else:
                 _log_upgrade("WARN", "上次自动升级未生效：目标 {}，当前仍为 {}（installer 被拦截/挂起？见 logs/installer-silent.log）".format(target, VERSION))
                 _write_update_attempt(target, count=count, state="failed")
                 _set_update_state(update_last_error="上次自动升级未生效（目标 {}）".format(target))
+
+        # —— v2.0.4.2：读升级执行器留下的结果（退出码 / 服务状态）并清掉残留 ——
+        _report_update_runner_result()
+        _cleanup_update_leftovers()
 
         # AppExit 策略归**安装器**所有（P0-7）：setup.iss / install.bat 统一设
         # `Default Ignore` + `0 Ignore`（防端口冲突时 NSSM 死循环重启）。
@@ -922,6 +1068,69 @@ def _post_upgrade_startup():
             _log_upgrade("INFO", "AppExit 现状：{}".format(appexit))
     except Exception as exc:  # noqa: BLE001
         _log_upgrade("WARN", "启动钩子异常: {}".format(exc))
+
+
+def _report_update_runner_result():
+    """读升级执行器（任务计划程序里的 .cmd）落盘的结果，写进 upgrade.log。
+
+    v2.0.4.2 新增：此前 installer 的退出码完全丢失 —— 装不上时日志里只有一句
+    "installer 被拦截/挂起？"，无从查起。现在至少有 installer_rc 与服务状态两条。
+    """
+    rc = _rc_path()
+    if not os.path.isfile(rc):
+        return
+    try:
+        with open(rc, "r", encoding="utf-8", errors="replace") as f:
+            lines = [l.strip() for l in f if l.strip()]
+    except OSError:
+        return
+    if not lines:
+        return
+    detail = " / ".join(lines)
+    failed = any(("installer_rc=" in l and not l.endswith("=0")) for l in lines)
+    if failed:
+        _log_upgrade("WARN", "升级执行器结果：{}（installer 非 0 退出码，详见 logs/installer-silent.log）".format(detail))
+    else:
+        _log_upgrade("INFO", "升级执行器结果：{}".format(detail))
+
+
+def _cleanup_update_leftovers():
+    """清掉升级残留：计划任务 / 包装脚本 / 结果文件 / 已装上的安装包。
+
+    v2.0.4.2 新增。安装包只在「文件名里的版本 == 当前运行版本」时才删，
+    避免把别的东西误删（也顺手清掉历史上堆在 %TEMP% 的旧包）。
+    """
+    # 1) 计划任务兜底（正常路径由包装脚本自删）
+    if os.path.isfile(SCHTASKS_PATH):
+        try:
+            subprocess.run(
+                [SCHTASKS_PATH, "/delete", "/tn", UPDATE_TASK_NAME, "/f"],
+                timeout=15, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    # 2) 包装脚本 / 结果文件
+    for p in (_wrapper_path(), _rc_path()):
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError:
+            pass
+    # 3) 已经装上的安装包
+    try:
+        for name in os.listdir(_update_tmp_dir()):
+            if not (name.startswith("DrcomAutoLogin-Setup-v") and name.endswith(".exe")):
+                continue
+            ver = name[len("DrcomAutoLogin-Setup-v"):-len(".exe")]
+            if _compare_versions(VERSION, ver) == 0:
+                try:
+                    os.remove(os.path.join(_update_tmp_dir(), name))
+                    _log_upgrade("INFO", "清理已安装的安装包：{}".format(name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 def _schedule_success_clear():
