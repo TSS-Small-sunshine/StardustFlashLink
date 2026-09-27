@@ -2,16 +2,14 @@
 
 ## 本版变更
 
-### ✨ 安装向导外观（多尺寸品牌图，与验证用 mock 参数一致）
-- **向导左侧大图改用多尺寸 PNG**：`WizardImageFile` 列 5 档（202×386 → 430×824），Inno 6 会按当前
-  DPI 自动挑最合适的一张。此前只写了一张 `wizard.bmp`，2K/4K 屏是放大插值的，而且那张图里
-  还印着过期的 `v2.0.0`。
-- **新增右上角小图** `WizardSmallImageFile`，同样 5 档多尺寸（58×58 → 124×124）。
-- **暗色向导 + 放大尺寸**：`WizardStyle=modern dark includetitlebar hidebevels`、`WizardSizePercent=110`。
-- **补回欢迎页**（`DisableWelcomePage=no`），欢迎 / 完成页文案与验证用 mock 对齐。
-- 只动向导弹与打包资源：接口、配置结构、服务名、`AppId` 未动，可直接覆盖安装（`SERIAL` +1）。
-- 参数与 `_ui_redesign/flashlink-mock.iss` 上真机逐页验证过的一致；本机 ISCC 6 直接编译真包通过
-  （`Successful compile`）。
+### 🔧 技术债收口（三处小问题）
+- **`protocol.run_once` 的"忙判定"是死逻辑**：原代码 `with _RUN_LOCK:` 之后才判 `login_in_progress`，
+  而 `_RUN_LOCK` 已把并发串行化 → 那个判断**永远为假** → 连点「立即登录」会排队跑 N 次完整检查。
+  现在改**非阻塞抢锁**：抢不到立即返回（Web UI 收到 `already_in_progress`），锁用 `try/finally` 释放。
+- **`config.json` / `password.txt` 原子写改用唯一 tmp 名**（带 pid）：原先固定 `xxx.tmp`，
+  两个写者会往同一文件交错写，极端情况落盘半截 JSON；现在并发只会"最后写入者胜"。
+- **安装器弃用 API**：`IsTaskSelected` → `WizardIsTaskSelected`（ISCC 编译提示项）。
+- 只动实现细节与打包脚本：接口、配置结构、服务名、`AppId` 未动，可直接覆盖安装（`SERIAL` +1）。
 
 ## 安装包信息
 

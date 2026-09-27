@@ -273,11 +273,15 @@ def run_once(reason):
 
     与原 联网_service.py:run_once 行为完全一致；仅将全局状态读写改为注入对象。
     """
-    with _RUN_LOCK:
+    # v2.0.4.5 修：改成**非阻塞**抢锁 —— 原先写的是 `with _RUN_LOCK:` 之后再判
+    # `login_in_progress`，而 _RUN_LOCK 本身已经把并发串行化了，那个判断**永远为假**
+    # （死逻辑）→ 连点「立即登录」会排队执行 N 次完整检查。真正的"忙"应当以锁为准：
+    # 抢不到就立即返回，Web UI 那边收到 already_in_progress。
+    if not _RUN_LOCK.acquire(blocking=False):
+        _log("已有检查在进行中，跳过本次 (reason=%s)", reason)
+        return
+    try:
         with _STATE_LOCK:
-            if _STATE["login_in_progress"]:
-                _log("已有检查在进行中，跳过本次 (reason=%s)", reason)
-                return
             _STATE["login_in_progress"] = True
 
         cfg = None
@@ -357,3 +361,7 @@ def run_once(reason):
                     _STATE["next_check_at"] = (
                         datetime.now() + timedelta(minutes=next_min)
                     ).isoformat(timespec="seconds")
+    finally:
+        # v2.0.4.5：RUN_LOCK 现在是手工非阻塞 acquire 的，必须自己释放
+        # （原来靠 `with _RUN_LOCK:` 自动释放；用 try/finally 保证任何 return / 异常都释放）
+        _RUN_LOCK.release()
