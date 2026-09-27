@@ -497,6 +497,89 @@ def _ensure_nssm_appexit_sane():
 
 
 # ============================================================
+# 托盘自启项自愈（v2.0.6.2）
+#
+# 为什么非得在服务里做：**新任务没法靠旧版本传** —— 自动升级的执行器是上一个版本自己的
+# auto_update.py，v2.0.4.4 只会传 `/TASKS=desktopicon,startservice`；升级到 v2.0.6.x 时
+# Inno 就把新加的 `trayicon` 当成"未选中"，`Tasks: trayicon` 的 Run 项根本不会写。
+# 真机实测：从 2.0.4.4 升到 2.0.6.1 后，HKLM\...\Run 里没有 DrcomAutoLoginTray。
+# 服务以 SYSTEM 运行、有管理员权限，于是每次启动对齐一次 —— 任何升级路径都能自愈。
+# ============================================================
+TRAY_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+TRAY_RUN_VALUE = "DrcomAutoLoginTray"
+TRAY_PREF_KEY = r"SOFTWARE\DrcomAutoLogin"
+TRAY_PREF_VALUE = "TrayAutostart"
+
+
+def tray_autostart_action(want, script_exists, run_value, expected):
+    """纯函数：算出「托盘自启项」该怎么对齐（便于单测，不碰注册表）。
+
+    - ``want``          安装器记下的开关（读不到时按 True 处理 = 默认开）
+    - ``script_exists`` `{app}\\tray.py` 在不在
+    - ``run_value``     注册表现值（None = 不存在）
+    - ``expected``      期望的命令行
+    返回 ``"create"`` / ``"delete"`` / ``"keep"``。
+    """
+    if not want or not script_exists:
+        return "keep" if run_value is None else "delete"
+    return "keep" if run_value == expected else "create"
+
+
+def _tray_autostart_pref():
+    """读安装器写下的开关（HKLM\\SOFTWARE\\DrcomAutoLogin\\TrayAutostart）。读不到 → True。"""
+    try:
+        import winreg
+    except ImportError:            # 与其它注册表代码同一套路：非 Windows 上也能 import 本模块
+        return True
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, TRAY_PREF_KEY) as key:
+            return bool(winreg.QueryValueEx(key, TRAY_PREF_VALUE)[0])
+    except OSError:
+        return True
+
+
+def _tray_autostart_current():
+    """读 HKLM Run 里托盘的现值（None = 不存在）。"""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, TRAY_RUN_KEY) as key:
+            return winreg.QueryValueEx(key, TRAY_RUN_VALUE)[0]
+    except OSError:
+        return None
+
+
+def _ensure_tray_autostart_sane(dry_run=False):
+    """把「托盘随登录启动」项与安装器记下的开关对齐。返回 dict；``dry_run`` 只算不动手。"""
+    script = os.path.join(BASE_DIR, "tray.py")
+    exe = os.path.join(BASE_DIR, "python", "pythonw.exe")
+    want = _tray_autostart_pref()
+    expected = '"{}" "{}"'.format(exe, script)
+    current = _tray_autostart_current()
+    action = tray_autostart_action(want, os.path.isfile(script), current, expected)
+    info = {"action": action, "want": want, "current": current, "expected": expected}
+    if action == "keep" or dry_run:
+        return info
+    try:
+        import winreg
+        with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, TRAY_RUN_KEY, 0,
+                                winreg.KEY_SET_VALUE) as key:
+            if action == "create":
+                winreg.SetValueEx(key, TRAY_RUN_VALUE, 0, winreg.REG_SZ, expected)
+            else:
+                winreg.DeleteValue(key, TRAY_RUN_VALUE)
+    except (OSError, ImportError) as exc:
+        info["error"] = str(exc)
+        _log_upgrade("WARN", "托盘自启项对齐失败（{}）：{}".format(action, exc))
+        return info
+    _log_upgrade("INFO", "托盘自启项已{}（此前：{}）".format(
+        "写入" if action == "create" else "移除", current or "不存在"))
+    return info
+
+
+# ============================================================
 # 升级尝试记录 + 熔断（v2.0.4.0）
 #
 # 背景：静默升级是"启动 installer → Python 立即退出"。若 installer 因任何
@@ -1082,6 +1165,12 @@ def _post_upgrade_startup():
         appexit = _ensure_nssm_appexit_sane()
         if appexit:
             _log_upgrade("INFO", "AppExit 现状：{}".format(appexit))
+
+        # v2.0.6.2：托盘自启项自愈 —— 新任务没法靠旧版本的 /TASKS 传，
+        # 只能由服务每次启动自己对齐（详见 _ensure_tray_autostart_sane 的注释）
+        tray = _ensure_tray_autostart_sane()
+        _log_upgrade("INFO", "托盘自启项：action={} want={} 现值={}".format(
+            tray.get("action"), tray.get("want"), tray.get("current") or "不存在"))
     except Exception as exc:  # noqa: BLE001
         _log_upgrade("WARN", "启动钩子异常: {}".format(exc))
 

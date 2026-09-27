@@ -278,6 +278,24 @@ check("v2.0.6.0 classify 四态齐全",
       == ["ok", "off", "unknown", "down"])
 check("v2.0.6.0 拿不到服务时的判定文案", _tray.status_text({"_reachable": False}) == "服务未响应")
 
+# ---- v2.0.6.2：托盘自启项自愈（升级路径保证不了 Inno 任务被"选中"）----
+_au = importlib.import_module("auto_update")
+# BASE_DIR 平时由 _attach() 注入，导入时是 None —— 测试里指到仓库根（那儿有 tray.py）
+_au.BASE_DIR = os.getcwd()
+_act = _au.tray_autostart_action
+_EXP = '"C:\\app\\python\\pythonw.exe" "C:\\app\\tray.py"'
+check("v2.0.6.2 缺自启项 → 建", _act(True, True, None, _EXP) == "create")
+check("v2.0.6.2 已经正确 → 不动", _act(True, True, _EXP, _EXP) == "keep")
+check("v2.0.6.2 值不对（旧路径 / 被人改过）→ 修回来", _act(True, True, '"x" "y"', _EXP) == "create")
+check("v2.0.6.2 用户关掉开关 → 删掉", _act(False, True, _EXP, _EXP) == "delete")
+check("v2.0.6.2 关掉且本来就没有 → 不瞎写", _act(False, True, None, _EXP) == "keep")
+check("v2.0.6.2 tray.py 不在（没装托盘）→ 清理掉", _act(True, False, _EXP, _EXP) == "delete")
+check("v2.0.6.2 dry-run 不碰注册表且结论合法",
+      _au._ensure_tray_autostart_sane(dry_run=True)["action"] in ("create", "keep", "delete"))
+check("v2.0.6.2 安装器把开关记进 HKLM（供服务对齐）",
+      "TrayAutostart" in _iss_src and "WizardIsTaskSelected('trayicon')" in _iss_src)
+check("v2.0.6.2 启动钩子会调用自愈", "_ensure_tray_autostart_sane()" in _au_src)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -462,7 +480,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.6.1", version.VERSION == "2.0.6.1", version.VERSION)
+check("版本 = 2.0.6.2", version.VERSION == "2.0.6.2", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
