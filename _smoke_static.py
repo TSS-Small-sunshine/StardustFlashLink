@@ -10,6 +10,16 @@ import tempfile
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# 控制台编码兜底：CI（cp1252）或任何非 UTF-8 终端下，print 中文断言名会抛 UnicodeEncodeError
+# —— 那会把「断言失败」变成「脚本崩溃」，CI 里只看得到编码错误、看不到真正的失败项。
+# 这里只改错误处理方式（不改成 utf-8，免得 GBK 终端变乱码）。
+try:
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sys.stderr.reconfigure(errors="backslashreplace")
+except (AttributeError, ValueError):
+    pass
+
 FAILS = []
 TOTAL = [0]
 
