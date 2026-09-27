@@ -5,6 +5,35 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.5.0 (feat) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> B1：**网络位置守卫** —— 只在校园网里才干活。接口向后兼容（`PATCH` +1，配置**新增**字段）。
+
+### ✨ 新增
+- `feat(guard)`: **Wi-Fi 名（SSID）+ 网段（CIDR）白名单**。开启后（`network_guard_enabled: true`），
+  只有「当前 Wi-Fi 名命中 `guard_allowed_ssids`」**或**「本机 IP 落在 `guard_allowed_subnets`」时才
+  执行登录检查；其余情况直接跳过并写一行日志，**且不计入失败、不触发退避**。
+  典型收益：笔记本带回家 / 连手机热点 / 挂 VPN 时不再空跑认证，日志不再刷「校园网不可达」。
+- 配置页（「自动化」卡片）新增开关 + 两个输入框（`cfg-guard-enabled` / `cfg-guard-ssids` /
+  `cfg-guard-subnets`）；状态页「网络可达性」副标题会显示当前 Wi-Fi 名，被守卫拦下时补一句
+  「不在校园网」。
+- 状态 API 增加 `current_ssid` / `guard_allowed` 两个字段（老客户端忽略即可，向后兼容）。
+
+### 🛡️ 判定原则（写在代码注释里，也是测试用例）
+1. **默认关闭** —— 不开启则行为与 v2.0.4.x 完全一致；
+2. **fail-open** —— 两个白名单都留空、或压根读不到 Wi-Fi 名与 IP（有线 / 无 WLAN 网卡）→ **放行**；
+   对一个"自动登录"工具来说，宁可多试一次，也不能因为读不到 Wi-Fi 名就静默不干活；
+3. 无线走 `netsh wlan show interfaces`（中文 Windows 的 GBK 输出也能解析，并排除 `BSSID` 行）；
+   网段匹配用标准库 `ipaddress`，校验期就会拦下非法 CIDR。
+
+### 🔧 实现
+- `protocol.py`：新增 `get_current_ssid()` / `get_local_ips()` / `guard_allows()`（**纯函数**，便于单测）+ `run_once` 里第 1.5 步的守卫 hook。
+- `联网_service.py`：`DEFAULT_CONFIG` 增 3 个字段；`_validate_config` 增类型 / 长度 / CIDR 合法性校验；`STATE` 增 `current_ssid` / `guard_allowed`。
+- `web_api.py`：配置页表单 + 回填 / 收集 + 状态副标题（`api_get_config` 按 `DEFAULT_CONFIG` 整体返回，新字段自动生效）。
+
+### 🧪 测试
+- 冒烟新增 15 条：8 条**行为级**守卫判定（命中 / 不命中 / 空配置 / fail-open / 中文逗号 / 有线）+ 3 条配置校验 + 4 条接线检查。
+
 ## v2.0.4.5 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 技术债收口（C 组）：三处"不致命但迟早咬人"的小问题，外加把 PR 自动检查闸门装上。

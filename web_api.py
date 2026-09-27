@@ -1659,6 +1659,26 @@ code.path {
         <div class="hint">每次检查等待校园网可达的最长时间，10-300 秒</div>
         <div class="err" id="err-timeout" role="alert"></div>
       </div>
+      <!-- v2.0.5.0 新增：网络位置守卫 -->
+      <div class="field">
+        <label class="switch" for="cfg-guard-enabled">
+          <input type="checkbox" id="cfg-guard-enabled">
+          <span class="track" aria-hidden="true"></span>
+          <span class="switch-label">只在校园网内登录（网络位置守卫）</span>
+        </label>
+        <div class="hint">开启后，只有 Wi-Fi 名或本机网段命中下面任一白名单时才执行登录检查；带回家 / 连热点时不再白跑</div>
+      </div>
+      <div class="field">
+        <label for="cfg-guard-ssids">允许的 Wi-Fi 名称（SSID）</label>
+        <input type="text" id="cfg-guard-ssids" class="cfg-lg" placeholder="例如 Campus-WiFi,Dorm-WiFi" autocomplete="off">
+        <div class="hint">逗号分隔（中英文逗号都认）；留空 = 不按 Wi-Fi 判断</div>
+      </div>
+      <div class="field">
+        <label for="cfg-guard-subnets">允许的网段（CIDR）</label>
+        <input type="text" id="cfg-guard-subnets" class="cfg-lg" placeholder="例如 172.16.0.0/12,10.0.0.0/8" autocomplete="off">
+        <div class="hint">逗号分隔；宿舍有线也适用。留空 = 不按网段判断</div>
+        <div class="err" id="err-guard" role="alert"></div>
+      </div>
       <!-- v1.3 新增：自动升级字段 -->
       <div class="field">
         <label class="switch" for="cfg-auto-update-enabled">
@@ -2122,7 +2142,10 @@ code.path {
       text($('kpi-net-text'), '未知');
       $('kpi-net').className = 'kpi-value tone-muted';
     }
-    text($('kpi-net-sub'), '上次检查 ' + fmtTimeOnly(s.last_check_at));
+    var _netSub = '上次检查 ' + fmtTimeOnly(s.last_check_at);
+    if (s.current_ssid) _netSub += ' · Wi-Fi: ' + s.current_ssid;
+    if (s.guard_allowed === false) _netSub += ' · 不在校园网';
+    text($('kpi-net-sub'), _netSub);
 
     /* —— 在线状态 —— */
     if (s.online === true) {
@@ -2301,6 +2324,10 @@ code.path {
       $('cfg-auto-interval').value = String(c.auto_check_interval_min || 30);
       $('cfg-network-timeout').value = c.network_wait_timeout_sec || 60;
       $('cfg-ui-port').value = c.ui_port || 8848;
+      /* v2.0.5.0：网络位置守卫 */
+      $('cfg-guard-enabled').checked = !!c.network_guard_enabled;
+      $('cfg-guard-ssids').value = c.guard_allowed_ssids || '';
+      $('cfg-guard-subnets').value = c.guard_allowed_subnets || '';
       setPwdBadge(c.password_status);
       clearErrors();
       text($('config-state'), '已从服务端读取，修改后点击保存');
@@ -2318,7 +2345,11 @@ code.path {
       auto_check_enabled: $('cfg-auto-enabled').checked,
       auto_check_interval_min: parseInt($('cfg-auto-interval').value, 10),
       network_wait_timeout_sec: parseInt($('cfg-network-timeout').value, 10),
-      ui_port: parseInt($('cfg-ui-port').value, 10)
+      ui_port: parseInt($('cfg-ui-port').value, 10),
+      /* v2.0.5.0：网络位置守卫 */
+      network_guard_enabled: $('cfg-guard-enabled').checked,
+      guard_allowed_ssids: $('cfg-guard-ssids').value.trim(),
+      guard_allowed_subnets: $('cfg-guard-subnets').value.trim()
     };
   }
 
