@@ -1,8 +1,8 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.1
+;   版本: v2.0.2.4
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.1.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.2.4.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
