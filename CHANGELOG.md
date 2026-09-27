@@ -5,6 +5,27 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.4.4 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 安装向导外观收口：把 `_ui_redesign/flashlink-mock.iss` 上真机逐页验证过的多尺寸品牌图接进真包。
+> 只动 `setup.iss` 的向导段与打包资源，接口 / 配置 / 服务名未动（`SERIAL` +1）。
+
+### ✨ 安装向导
+- `fix(installer)`: **向导图改成多尺寸 PNG** —— `WizardImageFile` 列 5 档左侧大图
+  （202×386 → 430×824），并新增 `WizardSmallImageFile` 列 5 档右上角小图（58×58 → 124×124），
+  Inno 6 会按当前 DPI 自动挑最合适的一张。此前只有一张 `wizard.bmp`，高 DPI 下是放大插值的，
+  而且那张图里还印着过期的 `v2.0.0`。
+- `fix(installer)`: **暗色向导 + 放大的整体尺寸** —— `WizardStyle=modern dark includetitlebar hidebevels`、
+  `WizardSizePercent=110`（与 mock 上验证过的参数一致）。
+- `fix(installer)`: **补回欢迎页** —— `DisableWelcomePage=no`（Inno 6 默认 `yes`，平时看不到那一页），
+  并把 `[Messages]` 的欢迎 / 完成文案与 mock 对齐。
+- `chore(installer)`: 删掉已被取代的单张 `branding\wizard.bmp`（154 KB）。
+- `test`: 冒烟新增 4 条断言（大图 / 小图多尺寸列表、暗色 + 欢迎页、旧 bmp 不再被引用且已从仓库移除）。
+
+### 🧪 编译校验
+本机 ISCC 6 直接编译真包：`Successful compile (1.328 sec)` →
+`StardustFlashLink-Setup-v2.0.4.4.exe`（2.76 MB，含内嵌占位的校验构建）。
+
 ## v2.0.4.3 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 承接 v2.0.4.2：升级链路已经真能装上了（真机 v2.0.4.1 → 2.0.4.2 一次成功），本版收掉它剩下的

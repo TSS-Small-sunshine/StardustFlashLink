@@ -142,6 +142,21 @@ check("v2.0.4.1 不再回退到 shell32 通用图标",
 check("v2.0.4.1 卸载项图标用品牌 ico", "UninstallDisplayIcon={app}\\branding\\app.ico" in _iss_src)
 check("v2.0.4.1 .url 带 IconFile", "'IconFile=' + ExpandConstant('{app}\\branding\\app.ico')" in _iss_src)
 
+# ---- v2.0.4.4：安装向导改用多尺寸品牌图（不再单张 wizard.bmp）----
+# 参数与 _ui_redesign/flashlink-mock.iss 上真机验证过的一致。
+check("v2.0.4.4 向导大图多尺寸列表已接入",
+      "WizardImageFile=branding\\wizard-left-202x386.png" in _iss_src
+      and "branding\\wizard-left-430x824.png" in _iss_src)
+check("v2.0.4.4 向导小图多尺寸列表已接入",
+      "WizardSmallImageFile=branding\\wizard-small-58x58.png" in _iss_src
+      and "branding\\wizard-small-124x124.png" in _iss_src)
+check("v2.0.4.4 向导暗色风格 + 欢迎页",
+      "WizardStyle=modern dark includetitlebar hidebevels" in _iss_src
+      and "WizardSizePercent=110" in _iss_src and "DisableWelcomePage=no" in _iss_src)
+check("v2.0.4.4 旧的单张 wizard.bmp 已不再被引用",
+      "WizardImageFile=branding\\wizard.bmp" not in _iss_src
+      and not pathlib.Path("packaging/branding/wizard.bmp").exists())
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -326,7 +341,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.4.3", version.VERSION == "2.0.4.3", version.VERSION)
+check("版本 = 2.0.4.4", version.VERSION == "2.0.4.4", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
