@@ -1,0 +1,46 @@
+name: PR Checks
+
+# A1：给 PR 装一道「自动检查闸门」。
+#
+# 与 build-installer.yml 的分工（这是重点）：
+#   - build-installer.yml：只在 push→main 时跑，干的是**编译 + 发布 release**（发布后
+#     所有客户端会自动升级）—— 它是"上膛的枪"，绝不能挂到 PR 上。
+#   - 本工作流：只在 PR 上跑检查，**绝不发布任何东西**（permissions 只要 contents: read）。
+#
+# 检查项都是仓库里已有的东西（纯 Python 标准库，无需安装依赖）：
+#   1) compileall     —— 全部 .py 语法能不能过；
+#   2) _smoke_static.py —— 101 条静态/行为断言（安全项、版本一致性、升级链路、隐私守卫）；
+#   3) _smoke_http.py   —— 9 条请求拦截层断言（Host 白名单 / 写接口自定义头 / Origin / 品牌路由）。
+#
+# 它拦不住的：需要真机 + 真实 NSSM 服务/安装器才会现形的缺陷（例如"installer 被 nssm 的
+# Job 连坐杀死"），那类仍然只能靠真机验证。
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: 语法 + 冒烟
+    # 目标平台是 Windows（代码里有 winreg / nssm 相关路径），且测试会起本地 HTTP 服务，
+    # 用同类环境最省心（公开仓免费，一次约 1 分钟）。
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12（与安装包内嵌运行时对齐）
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 语法检查（compileall）
+        run: python -m compileall -q .
+
+      - name: 静态冒烟（安全项 / 版本一致性 / 升级链路 / 隐私守卫）
+        run: python _smoke_static.py
+
+      - name: HTTP 冒烟（Host 白名单 / 自定义头 / Origin / 品牌路由）
+        run: python _smoke_http.py
