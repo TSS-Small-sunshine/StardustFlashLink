@@ -1,7 +1,13 @@
 name: Package Handover Bundle
 
-# 交接材料封包：把 handover/<快照>/ 打成交付 ZIP + 校验文件，发到 Release 附件。
-# 所有「封包」动作都在 GitHub 上完成，本地不再手工 Compress-Archive（避免"本地有、CI 没有"）。
+# 交接包封包：把 handover/<快照>/ 打成交付 ZIP + .sha256，发到 Release 附件。
+# 所有「封包」动作都在 GitHub 上完成 —— 本地不再手工 Compress-Archive
+#（避免"本地有、CI 没有"的不可追溯版本）。
+#
+# 实测注意（2026-09-27）：
+#   1) GitHub 会把 release 附件名里的非 ASCII 字符剥掉（实测 `交接包-x.zip` -> `-x.zip`），
+#      所以 ZIP 文件名刻意用 ASCII：`handover-<快照>.zip`；中文只出现在 Release 说明里。
+#   2) Release 说明从 `handover/RELEASE-NOTES.md`（UTF-8）读取，代入 {{SNAPSHOT}}/{{SHA}}/{{RUN}}。
 on:
   push:
     paths:
@@ -35,24 +41,31 @@ jobs:
           "SNAPSHOT=$snap" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "快照目录: handover/$snap"
 
-      # 凭据守卫：交接材料里出现私钥/口令类文件或明文口令形态 -> 直接拒绝封包
-      - name: Guard (no credentials in bundle)
+      # 凭据守卫：材料里出现私钥类文件、或明文口令形态 -> 直接拒绝封包
+      - name: Guard (凭据不得入包)
         shell: pwsh
         run: |
           $dir = "handover/$env:SNAPSHOT"
+
           $bad = Get-ChildItem $dir -Recurse -File | Where-Object {
             $_.Extension -in '.p12','.jks','.keystore','.pfx','.pem','.key' -or $_.Name -match '(?i)credential|secret|\.env'
           }
           if ($bad) {
-            $bad | ForEach-Object { Write-Host "::error file=$($_.FullName)::凭据类文件不得进入交接材料" }
+            $bad | ForEach-Object { Write-Host "::error file=$($_.FullName)::凭据类文件不得随交接材料分发" }
             throw "交接材料内含凭据类文件"
           }
-          $hits = Select-String -Path (Join-Path $dir '*') -Pattern '口令\s*[:：]\s*[0-9a-fA-F]{32,}' -ErrorAction SilentlyContinue
+
+          # 明文口令形态：`口令 : <32 位以上十六进制>`
+          $pattern = '口令\s*[:\uFF1A]\s*[0-9a-fA-F]{32,}'
+          $sample  = '口令     : 0123456789abcdef0123456789abcdef'
+          if ($sample -notmatch $pattern) { throw "守卫自检失败：正则未命中样本（脚本编码/解析异常）" }
+
+          $hits = Select-String -Path (Join-Path $dir '*') -Pattern $pattern -ErrorAction SilentlyContinue
           if ($hits) {
             $hits | ForEach-Object { Write-Host "::error file=$($_.Path),line=$($_.LineNumber)::疑似明文口令" }
             throw "交接材料内含明文口令"
           }
-          Write-Host "凭据守卫: OK"
+          Write-Host "凭据守卫: OK（无密钥文件 / 无明文口令）"
 
       - name: Package ZIP
         shell: pwsh
@@ -60,7 +73,9 @@ jobs:
           $dir   = "handover/$env:SNAPSHOT"
           $files = Get-ChildItem $dir -File | Sort-Object Name
           if ($files.Count -lt 5) { throw "交接材料不足（$($files.Count) 个文件）" }
-          $out = "交接包-$env:SNAPSHOT.zip"
+
+          # 文件名用 ASCII（见文件头实测注意 1）
+          $out = "handover-$env:SNAPSHOT.zip"
           if (Test-Path $out) { Remove-Item $out -Force }
           Compress-Archive -Path $files.FullName -DestinationPath $out -CompressionLevel Optimal
 
@@ -72,11 +87,13 @@ jobs:
 
           $size = (Get-Item $out).Length
           if ($size -lt 10000) { throw "ZIP 过小（$size 字节），疑似封包不完整" }
-          $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
-          "$sha  交接包-$env:SNAPSHOT.zip" | Out-File "$out.sha256" -Encoding ascii
-          "ZIP_PATH=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "ZIP 条目: $($names -join ', ')"
-          Write-Host "产物: $out  $size 字节"
+          $leaf = Split-Path $out -Leaf
+          $sha  = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+          "$sha  $leaf" | Out-File "$out.sha256" -Encoding ascii
+          "ZIP_PATH=$out"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ASSET_NAME=$leaf" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "ZIP 条目: $($names.Count) 个"
+          Write-Host "产物: $leaf  $size 字节"
           Write-Host "SHA256: $sha"
 
       - name: Upload artifact
@@ -84,8 +101,8 @@ jobs:
         with:
           name: handover-bundle-${{ env.SNAPSHOT }}
           path: |
-            交接包-*.zip
-            交接包-*.zip.sha256
+            *.zip
+            *.zip.sha256
           if-no-files-found: error
 
       - name: Publish Release
@@ -96,21 +113,15 @@ jobs:
           $snap = $env:SNAPSHOT
           $zip  = $env:ZIP_PATH
           $tag  = "handover-$snap"
-          $notes = @"
-          交接包 **$snap**（GitHub Actions 自动封包）。
-
-          | 项 | 值 |
-          | --- | --- |
-          | 内容 | ``handover/$snap/`` 全部材料（入口 ``交接说明.md``） |
-          | 构建提交 | ``${{ github.sha }}`` |
-          | 构建编号 | #${{ github.run_number }} |
-          | 校验 | 见附件 ``.sha256`` |
-
-          校验：``certutil -hashfile 交接包-$snap.zip SHA256``，与 ``.sha256`` 附件比对。
-
-          > 本 Release 每次推送 ``handover/`` 后由 CI 自动覆盖更新（tag 固定 ``$tag``）。
-          "@
+          $tpl  = "handover/RELEASE-NOTES.md"
+          if (Test-Path $tpl) {
+            # 以 UTF-8 读取，保证中文说明正确
+            $body = (Get-Content $tpl -Raw -Encoding utf8).Trim()
+            $body = $body.Replace('{{SNAPSHOT}}', $snap).Replace('{{SHA}}', "${{ github.sha }}").Replace('{{RUN}}', "${{ github.run_number }}")
+          } else {
+            $body = "Handover bundle $snap (auto-packaged by GitHub Actions)."
+          }
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) { gh release delete $tag --yes --cleanup-tag }
-          gh release create $tag "$zip" "$zip.sha256" --title "交接包 $snap" --notes $notes --prerelease --target "$env:GITHUB_SHA"
-          gh release view $tag --json url,tagName,name,isPrerelease,assets
+          gh release create $tag "$zip" "$zip.sha256" --title "交接包 $snap" --notes $body --prerelease --target "$env:GITHUB_SHA"
+          gh release view $tag --json url,tagName,assets

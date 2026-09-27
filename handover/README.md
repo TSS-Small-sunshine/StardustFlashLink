@@ -5,7 +5,7 @@
 | 项 | 位置 |
 | --- | --- |
 | 快照目录 | [`handover/20260927/`](20260927/) —— 入口 [`交接说明.md`](20260927/交接说明.md) |
-| 交接包 ZIP（CI 封包） | Release [`handover-20260927`](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/tag/handover-20260927)（附 `.sha256`） |
+| 交接包 ZIP（CI 封包） | Release [`handover-20260927`](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/tag/handover-20260927) → `handover-20260927.zip` + `.sha256` |
 | 另一份同内容快照 | Android 仓库 `TSS-Small-sunshine/DrcomAutoLogin` → `handover/20260927/` |
 
 ## 本仓库（Windows）的封包通道
