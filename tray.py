@@ -245,6 +245,7 @@ class TrayApp(object):
         self.nid = None
         self.kind = None            # 上一次的 kind（None = 还没轮询过）
         self.down_streak = 0
+        self.missing_streak = 0     # 连续几次找不到自己的脚本（用来识别"已卸载"）
         self.last_status = {}
         self._proc = None           # WNDPROC 必须留引用，否则被 GC 掉会崩
         self.kernel32, self.user32, self.shell32 = _libs()
@@ -399,6 +400,17 @@ class TrayApp(object):
 
     # —— 轮询 ——
     def _poll(self):
+        # 卸载后自己退出：安装目录里的 tray.py 没了（连续两次轮询都找不到）→ 撤图标退出，
+        # 免得卸载后留下一个永远"服务未响应"的孤儿图标。**用两次而不是一次**是有意的：
+        # 升级时安装器会替换这个文件，撞上被删的那一瞬间就退出反而糟糕。
+        if not os.path.isfile(os.path.join(APP_DIR, "tray.py")):
+            self.missing_streak += 1
+            if self.missing_streak >= 2:
+                _log("安装目录里已经没有 tray.py（多半是已卸载），托盘退出")
+                self.user32.DestroyWindow(self.hwnd)
+                return
+        else:
+            self.missing_streak = 0
         status = poll_status()
         kind = classify(status)
         self.down_streak = self.down_streak + 1 if kind == "down" else 0
