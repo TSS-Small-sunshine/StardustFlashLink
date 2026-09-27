@@ -69,11 +69,24 @@ UPDATE_TASK_NAME = "DrcomAutoLogin-AutoUpdate"
 UPDATE_WRAPPER_NAME = "drcom_apply_update.cmd"
 UPDATE_RC_NAME = "drcom_apply_update.rc"
 UPDATE_LOG_NAME = "drcom-installer-silent.log"
+UPDATE_LEFTOVER_STALE_SEC = 5 * 60  # 只清"陈旧"的执行器残留（正在跑的那次绝不碰）
 SCHTASKS_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe")
 SC_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "sc.exe")
 # nssm 的 AppExit 是**子键 + 子值**：Default 存在子键的 (默认) 值里，0 存在名为 "0" 的值里
 APPEXIT_SUBKEY = NSSM_PARAMETERS_PATH + r"\AppExit"
 APPEXIT_DEFAULT_VALUE = ""
+# winreg 的键路径**不能带 "HKLM\\" 前缀**（HKLM 是通过 HKEY_LOCAL_MACHINE 常量传的）。
+# v2.0.4.3 修：v2.0.4.0～v2.0.4.2 一直把 "HKLM\\SYSTEM\\..." 原样传给 winreg.OpenKey →
+# FileNotFoundError 被 `except OSError: return None` 吞掉 → `_read_nssm_appexit()` 永远返回 None
+# → 每次开机误报「AppExit 自愈失败（仍是空值）」。
+_HKLM_PREFIX = "HKLM\\"
+
+
+def _hklm_subpath(key_path):
+    """把 'HKLM\\SYSTEM\\...' 转成 winreg 需要的 'SYSTEM\\...'（大小写不敏感，幂等）。"""
+    if key_path.upper().startswith(_HKLM_PREFIX.upper()):
+        return key_path[len(_HKLM_PREFIX):]
+    return key_path
 
 # GitHub 镜像（国内加速；首个 None 表示主源，按顺序 fallback）
 # 镜像格式：prefix + 原始 URL；原始 URL 必须是 https://... 开头以避免双斜杠。
@@ -406,7 +419,7 @@ def _read_nssm_appexit():
     """
     try:
         import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, APPEXIT_SUBKEY) as k:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _hklm_subpath(APPEXIT_SUBKEY)) as k:
             value, _ = winreg.QueryValueEx(k, APPEXIT_DEFAULT_VALUE)
     except (OSError, ImportError):
         return None
@@ -421,7 +434,7 @@ def _write_nssm_appexit(value):
         # 绝不允许把空值写进注册表：NSSM 会因此报错并失去退出策略
         raise ValueError("AppExit 不能为空")
     import winreg
-    with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, APPEXIT_SUBKEY) as k:
+    with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, _hklm_subpath(APPEXIT_SUBKEY)) as k:
         winreg.SetValueEx(k, APPEXIT_DEFAULT_VALUE, 0, winreg.REG_SZ, value.strip())
 
 
@@ -1053,7 +1066,9 @@ def _post_upgrade_startup():
                 _set_update_state(update_last_error="上次自动升级未生效（目标 {}）".format(target))
 
         # —— v2.0.4.2：读升级执行器留下的结果（退出码 / 服务状态）并清掉残留 ——
-        _report_update_runner_result()
+        # v2.0.4.3：带 8 秒宽限 —— 服务是安装器在 ssPostInstall 拉起来的，
+        # 那一刻执行器还在等 installer 退出（随后才写 rc），立刻读会读空。
+        _report_update_runner_result(wait_sec=8)
         _cleanup_update_leftovers()
 
         # AppExit 策略归**安装器**所有（P0-7）：setup.iss / install.bat 统一设
@@ -1070,13 +1085,17 @@ def _post_upgrade_startup():
         _log_upgrade("WARN", "启动钩子异常: {}".format(exc))
 
 
-def _report_update_runner_result():
+def _report_update_runner_result(wait_sec=0):
     """读升级执行器（任务计划程序里的 .cmd）落盘的结果，写进 upgrade.log。
 
-    v2.0.4.2 新增：此前 installer 的退出码完全丢失 —— 装不上时日志里只有一句
-    "installer 被拦截/挂起？"，无从查起。现在至少有 installer_rc 与服务状态两条。
+    v2.0.4.2 新增；v2.0.4.3 加 `wait_sec` —— 服务是由安装器在 `ssPostInstall` 拉起来的，
+    那一刻执行器还在等 installer 进程退出（随后才写 rc），立刻读会读空。
+    所以发现执行器还在时，最多等 `wait_sec` 秒（只在刚升级完的那一次启动发生）。
     """
     rc = _rc_path()
+    deadline = time.time() + max(0, int(wait_sec or 0))
+    while not os.path.isfile(rc) and os.path.isfile(_wrapper_path()) and time.time() < deadline:
+        time.sleep(1.0)
     if not os.path.isfile(rc):
         return
     try:
@@ -1095,13 +1114,35 @@ def _report_update_runner_result():
 
 
 def _cleanup_update_leftovers():
-    """清掉升级残留：计划任务 / 包装脚本 / 结果文件 / 已装上的安装包。
+    """清掉升级残留：包装脚本 / 结果文件 / 计划任务 / 已装上的安装包。
 
-    v2.0.4.2 新增。安装包只在「文件名里的版本 == 当前运行版本」时才删，
-    避免把别的东西误删（也顺手清掉历史上堆在 %TEMP% 的旧包）。
+    v2.0.4.2 新增；v2.0.4.3 修一个"自己造出来"的 bug：服务是安装器在 `ssPostInstall`
+    就拉起来的，此时执行器 `.cmd` **还在跑**（它在等 installer 进程退出，然后才归档日志、
+    写 rc）。旧实现上来就把执行器删掉 → 它后面的步骤全部没执行（真机实测：rc 与
+    `logs\\installer-silent.log` 都没了）。现在只清**陈旧**残留，并顺手把安装日志归档回安装目录。
     """
-    # 1) 计划任务兜底（正常路径由包装脚本自删）
-    if os.path.isfile(SCHTASKS_PATH):
+    stale_before = time.time() - UPDATE_LEFTOVER_STALE_SEC
+    # 1) 安装日志归档回安装目录（执行器也做这件事；两边都做保证不丢）
+    try:
+        src = _installer_log_path()
+        if LOG_DIR:
+            dst = os.path.join(LOG_DIR, "installer-silent.log")
+            if os.path.isfile(src) and (
+                not os.path.isfile(dst) or os.path.getmtime(src) > os.path.getmtime(dst)
+            ):
+                shutil.copy2(src, dst)
+                _log_upgrade("INFO", "已归档安装日志：{}".format(dst))
+    except OSError as exc:
+        logger.warning("归档 installer 日志失败: %s", exc)
+    # 2) 包装脚本 / 结果文件：只清陈旧的（刚跑完那次的交给执行器自己收尾）
+    for p in (_wrapper_path(), _rc_path()):
+        try:
+            if os.path.isfile(p) and os.path.getmtime(p) < stale_before:
+                os.remove(p)
+        except OSError:
+            pass
+    # 3) 计划任务：只有执行器已经不在了（跑完自删）才兜底删；正在跑就别动
+    if os.path.isfile(SCHTASKS_PATH) and not os.path.isfile(_wrapper_path()):
         try:
             subprocess.run(
                 [SCHTASKS_PATH, "/delete", "/tn", UPDATE_TASK_NAME, "/f"],
@@ -1110,14 +1151,7 @@ def _cleanup_update_leftovers():
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
-    # 2) 包装脚本 / 结果文件
-    for p in (_wrapper_path(), _rc_path()):
-        try:
-            if os.path.isfile(p):
-                os.remove(p)
-        except OSError:
-            pass
-    # 3) 已经装上的安装包
+    # 4) 已经装上的安装包
     try:
         for name in os.listdir(_update_tmp_dir()):
             if not (name.startswith("DrcomAutoLogin-Setup-v") and name.endswith(".exe")):
