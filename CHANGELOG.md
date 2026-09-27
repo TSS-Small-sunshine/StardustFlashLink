@@ -5,6 +5,45 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.3.0 (feature) — 2026-09-27
+
+> 本版把 Web UI 从「AI 味渐变卡片」换成 Apple 风格的亚克力玻璃界面，并修掉顶栏
+> logo / favicon 一直 404 的破图问题。**前端仍然全部内联在 `web_api.py`（零新增静态文件依赖）**。
+
+### ✨ 界面（重做）
+- `feat(ui)`: 设计令牌化 —— 亮/暗两套语义变量（画布 / 亚克力材质 / 系统灰填充 /
+  发丝描边 / 单一强调色 / 三级文字灰），层级改用「字号 + 字重 + 灰度」表达，
+  不再靠高饱和渐变堆砌。
+- `feat(ui)`: 亚克力材质统一为 `backdrop-filter: saturate(180%) blur(30px)` +
+  1px 发丝描边 + 内侧高光；顶栏、卡片、说明条、保存条、弹窗、Toast 同一套语言。
+- `feat(ui)`: 字体栈改为系统字体优先（`-apple-system` / `SF Pro Text` / `PingFang SC` /
+  `Microsoft YaHei UI`），数字与日志用等宽字体 + `tabular-nums`（倒计时不再抖动）。
+- `feat(ui)`: 顶栏品牌区改两行锁排（`星尘闪连` + 副标题），分段控件（Segmented Control）
+  取代旧页签，图标由 emoji 换成 1.7 描边线性 SVG（各系统渲染一致）。
+- `feat(ui)`: 按钮改为胶囊形（主操作 Apple 蓝、次操作系统灰填充、危险操作红字），
+  开关改为 iOS 样式（48×29，绿色 on），输入框加聚焦光圈，弹窗/Toast 加升降动效。
+- `feat(ui)`: 新增 ≤720px / ≤480px 两档响应式（窄屏单列 + 全宽主按钮 + 保存条竖排），
+  并遵循 `prefers-reduced-motion`。
+
+### 🔴 修复
+- `fix(web_api)`: **顶栏 logo 与 favicon 404** —— 页面引用 `branding/*.png` 但服务端只有
+  `/` 与 `/api/*` 路由，且这些 png 压根没进安装包。新增 `/branding/<name>` 静态路由：
+  文件名白名单 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(png|ico|svg|jpe?g|webp|gif)$`（结构性
+  阻断路径穿越）+ 目录按「安装目录 → `packaging/branding`」顺序查找 + `nosniff` + 1h 缓存。
+- `fix(packaging)`: `setup.iss` 新增 `branding\web-logo-*.png → {app}\branding`，
+  卸载时一并清理；装完即能显示 logo / 站点图标。
+- `fix(ui)`: logo 兜底 —— 图片加载失败时用内联星芒标记替换，杜绝破图图标。
+- `fix(ui)`: `pollUpdate` 里 `banner.hidden` 的 `ReferenceError`（P3-4，被 catch 吞掉），
+  升级成功横幅的 7 秒自动隐藏此前一直失效。
+- `fix(ui)`: `ensureChangelogShortcut` 引用了不存在的 `--primary` 变量，快捷链接颜色改 `--accent`。
+
+### 其它
+- 版本字面量统一：`version.py` / `setup.iss MyAppVersion` / NSSM 描述 / `install.bat` /
+  `uninstall.bat` / `packaging/build.ps1` / 模块 docstring。
+- 安装包产物名 `StardustFlashLink-Setup-v2.0.3.0.exe`（不变量 I9）。
+- 新增冒烟断言：品牌图片路由（200 / 404 / 路径穿越 / 非图片扩展名）、页面无 emoji、
+  亚克力令牌在位、旧网格底纹已移除。
+
 ## v2.0.2.4 (fix/security) — 2026-09-27
 
 > 本版把「4 个升级相关按钮点了就崩」和几处安全口子一起修掉，并改掉发布策略。
