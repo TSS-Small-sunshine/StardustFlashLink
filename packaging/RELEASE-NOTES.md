@@ -2,21 +2,16 @@
 
 ## 本版变更
 
-### 🔴 修复（v2.0.4.2 之后的两处收尾）
-- **`AppExit` 自愈从 v2.0.4.0 起一直在误报**：`winreg.OpenKey` 的键路径**不能带 `HKLM\` 前缀**
-  （HKLM 由 `HKEY_LOCAL_MACHINE` 常量给出），而代码一直传
-  `HKLM\SYSTEM\...\Parameters\AppExit` → `FileNotFoundError` 被 `except OSError: return None`
-  吞掉 → 每次开机都记一行「AppExit 自愈失败（仍是空值）」。真机对照：那个子键里
-  `(默认)=Ignore`、`0=Ignore`，**策略一直是对的**。现在统一经 `_hklm_subpath()` 去前缀
-  （幂等、大小写不敏感）。
-- **升级执行器的结果不再被误删**：服务是安装器在 `ssPostInstall` 就拉起来的，那一刻 `.cmd`
-  执行器**还在跑**（它在等 installer 进程退出，然后才归档日志、写 rc），而启动钩子上来就把它删掉
-  → 后续步骤全部没执行（真机实测：`drcom_apply_update.rc` 与 `logs\installer-silent.log` 都没出现）。
-  现在只清**陈旧**残留（默认 5 分钟），计划任务只在执行器已自删后才兜底删；执行器结果读取带
-  8 秒宽限，并把安装日志**归档回 `{app}\logs\installer-silent.log`**。
-- **上一版（v2.0.4.2）的自动升级链路已真机走通**：v2.0.4.1 → 2.0.4.2 一次成功 ——
-  `方式=schtasks` → 4 秒装完 → `升级成功确认：已运行 v2.0.4.2`。
-- 接口、配置结构、服务名、`AppId` 未动，可直接覆盖安装（`SERIAL` +1）。
+### ✨ 安装向导外观（多尺寸品牌图，与验证用 mock 参数一致）
+- **向导左侧大图改用多尺寸 PNG**：`WizardImageFile` 列 5 档（202×386 → 430×824），Inno 6 会按当前
+  DPI 自动挑最合适的一张。此前只写了一张 `wizard.bmp`，2K/4K 屏是放大插值的，而且那张图里
+  还印着过期的 `v2.0.0`。
+- **新增右上角小图** `WizardSmallImageFile`，同样 5 档多尺寸（58×58 → 124×124）。
+- **暗色向导 + 放大尺寸**：`WizardStyle=modern dark includetitlebar hidebevels`、`WizardSizePercent=110`。
+- **补回欢迎页**（`DisableWelcomePage=no`），欢迎 / 完成页文案与验证用 mock 对齐。
+- 只动向导弹与打包资源：接口、配置结构、服务名、`AppId` 未动，可直接覆盖安装（`SERIAL` +1）。
+- 参数与 `_ui_redesign/flashlink-mock.iss` 上真机逐页验证过的一致；本机 ISCC 6 直接编译真包通过
+  （`Successful compile`）。
 
 ## 安装包信息
 

@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.4.3
+;   版本: v2.0.4.4
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.4.3.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.4.4.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.4.3"
+  #define MyAppVersion "2.0.4.4"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -35,10 +35,24 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\branding\app.ico
 SetupIconFile=branding\app.ico
-WizardImageFile=branding\wizard.bmp
+; —— 向导外观（与 _ui_redesign\flashlink-mock.iss 上验证过的参数一致）——
+; 多尺寸 PNG：Inno 6 会按当前 DPI 自动挑最合适的一张，2K/4K 屏不再糊；
+; 此前只写了一张 wizard.bmp（v2.0.4.3 及以前），在高 DPI 下是放大插值的。
+WizardStyle=modern dark includetitlebar hidebevels
+WizardSizePercent=110
+WizardImageFile=branding\wizard-left-202x386.png,branding\wizard-left-269x515.png,branding\wizard-left-336x643.png,branding\wizard-left-403x772.png,branding\wizard-left-430x824.png
+WizardSmallImageFile=branding\wizard-small-58x58.png,branding\wizard-small-77x77.png,branding\wizard-small-97x97.png,branding\wizard-small-116x116.png,branding\wizard-small-124x124.png
+; 带欢迎页（左侧大品牌图那一页）—— Inno 6 默认 DisableWelcomePage=yes，是没有这一页的
+DisableWelcomePage=no
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+
+; 文案与 mock 保持一致（WelcomeLabel2 只在 DisableWelcomePage=no 时显示）
+[Messages]
+WelcomeLabel1=欢迎安装 [name]
+WelcomeLabel2=即将在你的电脑上安装 [name/ver]。%n%n本程序会在后台守护校园网连接，掉线自动重新认证。%n%n继续前请先阅读使用许可。
+FinishedLabel=[name] 已安装完成。%n%n服务会在后台自动运行，双击桌面上的「Dr.COM 校园网自动登录」即可打开控制台。
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
@@ -232,7 +246,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.4.3）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.4.4）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
