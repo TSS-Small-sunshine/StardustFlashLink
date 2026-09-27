@@ -8,6 +8,11 @@ on:
       - '.gitignore'
       - '.gitattributes'
   workflow_dispatch:
+    inputs:
+      title:
+        description: '版本化 release 的标题（留空 = 沿用现有标题，仍为空则用 v{版本}）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -211,9 +216,15 @@ jobs:
           > 本 release 是**自动升级通道**（非 prerelease）：客户端读 ``/releases/latest``
           > 取版本号与 asset digest（fail-closed 校验）。固定下载链接仍见 prerelease ``installer``。
           "@
+          # 标题策略：优先 workflow_dispatch 的 title；其次沿用现有 release 的人工标题（避免 CI 覆盖）；
+          # 都没有才退回 v{版本}。这样发布列表里始终是可读的「vX.Y.Z — 简述」。
+          $title = "v$env:APP_VERSION"
+          $old = gh release view $tag --json name 2>$null | ConvertFrom-Json
+          if ($old -and $old.name) { $title = $old.name }
+          if ("${{ github.event.inputs.title }}" -ne "") { $title = "${{ github.event.inputs.title }}" }
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag
           }
-          gh release create $tag $exe.FullName --title "v$env:APP_VERSION" --notes $notes --target "$env:GITHUB_SHA"
+          gh release create $tag $exe.FullName --title $title --notes $notes --target "$env:GITHUB_SHA"
           gh release view $tag --json url,tagName,isPrerelease,assets
