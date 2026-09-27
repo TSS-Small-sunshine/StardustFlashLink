@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.4.5）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.5.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -39,6 +39,7 @@ from http.server import ThreadingHTTPServer
 # ============================================================
 # 常量
 # ============================================================
+import ipaddress  # noqa: E402  v2.0.5.0：校验 guard_allowed_subnets 里的 CIDR
 from version import VERSION, CODENAME  # noqa: E402  保持原行号兼容：VERSION 原本在 line 51
 BACKOFF_LEVELS = [5, 10, 20, 40, 60]  # 分钟，索引 = 连续失败次数，封顶 60
 
@@ -50,6 +51,13 @@ DEFAULT_CONFIG = {
     "auto_check_enabled": True,
     "auto_check_interval_min": 30,
     "network_wait_timeout_sec": 60,
+    # —— 网络位置守卫（v2.0.5.0 新增；默认**关闭**，保持旧行为）——
+    # 背景：笔记本带回家 / 连热点时，服务会照样去探测校园网关，白跑认证请求（日志刷"校园网不可达"）。
+    # 开启后：只在「当前 Wi-Fi 名命中 SSID 白名单」**或**「本机 IP 落在允许的网段里」时才检查。
+    # 两个白名单都留空 = 等于没配 → 放行（并写一行日志提示）。
+    "network_guard_enabled": False,
+    "guard_allowed_ssids": "",      # 逗号分隔（中英文逗号都认），如 Campus-WiFi,Dorm-WiFi
+    "guard_allowed_subnets": "",    # 逗号分隔 CIDR，如 172.16.0.0/12,10.0.0.0/8（有线也适用）
     "ui_port": 8848,
     # —— 自动升级字段（v1.3 新增）——
     # P1-3：默认关闭。升级链路走第三方镜像 + SHA256 可绕过（P1-2 已修），
@@ -105,6 +113,9 @@ STATE = {
     "next_check_at": None,
     "next_check_in_sec": None,
     "current_account": "",
+    # —— 网络位置守卫（v2.0.5.0）：当前 Wi-Fi 名 / 本次是否通过守卫（None=未启用）——
+    "current_ssid": None,
+    "guard_allowed": None,
     "login_in_progress": False,
     "service_uptime_sec": 0,
     # —— 自动升级字段（v1.3 新增）——
@@ -199,7 +210,7 @@ def _get_password():
 
 
 def _save_password_to_disk(password):
-    """写入 password.txt（原子写：唯一 tmp → replace，v2.0.4.5 起 tmp 名带 pid）。"""
+    """写入 password.txt（原子写：唯一 tmp → replace，v2.0.5.0 起 tmp 名带 pid）。"""
     global _PWD_VALUE
     if not isinstance(password, str) or len(password) < 1:
         raise ValueError("password 必须是非空字符串")
@@ -270,6 +281,29 @@ def _validate_config(cfg):
     if not isinstance(ui_port, int) or isinstance(ui_port, bool) or not (1024 <= ui_port <= 65535):
         errors.append("ui_port 必须是 1024-65535 之间的整数")
 
+    # —— 网络位置守卫（v2.0.5.0 新增）——
+    guard_on = cfg.get("network_guard_enabled")
+    if not isinstance(guard_on, bool):
+        errors.append("network_guard_enabled 必须是布尔值")
+
+    ssids = cfg.get("guard_allowed_ssids")
+    if not isinstance(ssids, str):
+        errors.append("guard_allowed_ssids 必须是字符串（逗号分隔的 Wi-Fi 名）")
+    elif len(ssids) > 500:
+        errors.append("guard_allowed_ssids 过长（≤500 字符）")
+
+    subnets = cfg.get("guard_allowed_subnets")
+    if not isinstance(subnets, str):
+        errors.append("guard_allowed_subnets 必须是字符串（逗号分隔的 CIDR）")
+    elif len(subnets) > 500:
+        errors.append("guard_allowed_subnets 过长（≤500 字符）")
+    else:
+        for item in [x.strip() for x in subnets.replace("，", ",").split(",") if x.strip()]:
+            try:
+                ipaddress.ip_network(item, strict=False)
+            except ValueError:
+                errors.append("guard_allowed_subnets 里有非法网段：{}".format(item))
+
     # —— 自动升级字段（v1.3 新增）——
     auto_upd = cfg.get("auto_update_enabled")
     if not isinstance(auto_upd, bool):
@@ -320,7 +354,7 @@ def _load_config():
 def _save_config_raw(cfg):
     """原子写：唯一 tmp 名 → replace。
 
-    v2.0.4.5：tmp 名带上 pid —— 原先固定用 `config.json.tmp`，两个写者（例如服务 + 手动
+    v2.0.5.0：tmp 名带上 pid —— 原先固定用 `config.json.tmp`，两个写者（例如服务 + 手动
     跑的实例，或两个并发 POST）会往同一个文件里交错写，最终可能落盘一个半截 JSON。
     带上 pid + 原子 replace 后，并发只会是"最后写入者胜"，不会写出损坏文件。
     """

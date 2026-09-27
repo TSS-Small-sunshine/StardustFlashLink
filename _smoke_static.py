@@ -192,6 +192,51 @@ check("v2.0.4.5 已占用时非阻塞抢锁立即返回 False（不排队）", _
 if _got1:
     _pl._RUN_LOCK.release()
 
+# ---- v2.0.5.0：网络位置守卫（SSID / 网段白名单）----
+_g = _pl.guard_allows
+check("v2.0.5.0 守卫未启用 → 放行", _g({"network_guard_enabled": False}, "Home", ["192.168.1.5"])[0] is True)
+check("v2.0.5.0 SSID 命中白名单 → 放行",
+      _g({"network_guard_enabled": True, "guard_allowed_ssids": "Campus-WiFi,Dorm"}, "Dorm", ["192.168.1.5"])[0] is True)
+check("v2.0.5.0 网段命中 → 放行（有线也适用）",
+      _g({"network_guard_enabled": True, "guard_allowed_subnets": "172.16.0.0/12"}, "Home", ["172.20.3.9"])[0] is True)
+check("v2.0.5.0 有线无 SSID 但网段命中 → 放行",
+      _g({"network_guard_enabled": True, "guard_allowed_ssids": "Campus",
+          "guard_allowed_subnets": "10.0.0.0/8"}, None, ["10.20.30.40"])[0] is True)
+check("v2.0.5.0 两个白名单都不命中 → 拒绝",
+      _g({"network_guard_enabled": True, "guard_allowed_ssids": "Campus",
+          "guard_allowed_subnets": "172.16.0.0/12"}, "Home", ["192.168.1.5"])[0] is False)
+check("v2.0.5.0 开了守卫但白名单为空 → 放行（等于没配）",
+      _g({"network_guard_enabled": True, "guard_allowed_ssids": "", "guard_allowed_subnets": ""},
+         "Home", ["192.168.1.5"])[0] is True)
+check("v2.0.5.0 读不到 SSID/IP → fail-open 放行",
+      _g({"network_guard_enabled": True, "guard_allowed_ssids": "Campus"}, None, [])[0] is True)
+check("v2.0.5.0 中文逗号也能当分隔符",
+      _g({"network_guard_enabled": True, "guard_allowed_ssids": "Campus，Dorm"}, "Dorm", ["1.2.3.4"])[0] is True)
+
+# 配置层：默认配置能过校验、非法 CIDR 被拦
+_good = dict(svc.DEFAULT_CONFIG)
+_good["account"] = "20230001"
+check("v2.0.5.0 默认配置（含守卫字段）校验通过", svc._validate_config(_good) == [], svc._validate_config(_good))
+_bad = dict(_good)
+_bad["guard_allowed_subnets"] = "172.16.0.0/12,not-a-cidr"
+check("v2.0.5.0 非法网段被拦", any("非法网段" in e for e in svc._validate_config(_bad)))
+_bad2 = dict(_good)
+_bad2["network_guard_enabled"] = "yes"
+check("v2.0.5.0 守卫开关必须是布尔值", any("network_guard_enabled" in e for e in svc._validate_config(_bad2)))
+check("v2.0.5.0 配置页有守卫开关 + 两个白名单输入",
+      all(x in src_web for x in ("cfg-guard-enabled", "cfg-guard-ssids", "cfg-guard-subnets")))
+check("v2.0.5.0 前端提交时带上守卫字段",
+      "network_guard_enabled: $('cfg-guard-enabled').checked" in src_web
+      and "guard_allowed_ssids: $('cfg-guard-ssids').value.trim()" in src_web
+      and "guard_allowed_subnets: $('cfg-guard-subnets').value.trim()" in src_web)
+check("v2.0.5.0 run_once 真的接上了守卫", "guard_allows(cfg, _ssid, _ips)" in _src_proto)
+_guard_slice = "\n".join(
+    l for l in _src_proto.split("1.5 网络位置守卫")[1].split("host = cfg")[0].splitlines()
+    if not l.strip().startswith("#")
+)
+check("v2.0.5.0 守卫不触发退避（跳过不等于失败）",
+      "不调 _set_backoff" in _src_proto and "_set_backoff" not in _guard_slice)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -376,7 +421,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.4.5", version.VERSION == "2.0.4.5", version.VERSION)
+check("版本 = 2.0.5.0", version.VERSION == "2.0.5.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
