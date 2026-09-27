@@ -74,16 +74,21 @@
 
 ## 📸 截图
 
-> ⚠️ 截图占位 — 正式版会补上。
+**Web UI 主界面（亮色）** — `http://127.0.0.1:8848`
 
-- 安装向导
-- Web UI 主界面
-- 配置面板
+<p align="center">
+  <img src="docs/screenshot-webui.png" alt="Web UI 亮色主题" width="760"/>
+</p>
 
-<!-- 后续会加入：
+**Web UI 主界面（暗色）** — 右上角可一键切换，或跟随系统 `prefers-color-scheme`
+
+<p align="center">
+  <img src="docs/screenshot-webui-dark.png" alt="Web UI 暗色主题" width="760"/>
+</p>
+
+<!-- 待补：
 <p align="center">
   <img src="docs/screenshot-install.png" alt="安装向导" width="600"/>
-  <img src="docs/screenshot-webui.png" alt="Web UI" width="600"/>
 </p>
 -->
 
@@ -417,9 +422,12 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | **v1.3.4** | **日志分级**：Web UI「日志」面板顶部新增等级筛选 chip（全部 / INFO / WARN / ERROR），后端 `GET /api/log_tail` 新增可选 `level` query 参数（`info` / `warning` / `error` / `debug` / `critical`），按等级过滤返回行。响应体新增 `level_filter` 字段（向后兼容：旧客户端忽略未知字段）。无效 level 返回 400。**保持单文件日志**（不拆多个 log 文件），通过前端 chip 切换实现产品级「按等级筛选」体验。 |
 | **v1.4.0** | **项目重命名为「星尘闪连 (Stardust Flash Link)」**，沿用 `DrcomAutoLogin` NSSM 服务名、`AppId` 与全部 API 路径（保证旧版可正常卸载 / 升级）。安装包新增 `branding\app.ico`（应用图标，256/128/64/48/32/24/16 多尺寸 ICO）与 `branding\wizard.bmp`（164×314 24-bit 安装器左侧品牌横幅），由 Inno Setup `SetupIconFile` / `WizardImageFile` 引入；Python 脚本头部、L37 install.bat 标题、L31 uninstall.bat 标题、build.ps1 头部与 banner 同步更新。 |
 | **v1.3.5** | **GitHub 国内镜像加速** + **手动触发更新**：(1) `_check_github_latest` 和 `_download_installer` 按 `GITHUB_API_MIRRORS` 列表（`None` 主源 + `https://gh-proxy.com` / `ghfast.top` / `mirror.ghproxy.com` 三个镜像）串行 fallback；主源超时/失败时自动尝试镜像，避免国内机器上 `api.github.com` 不可达导致自动升级静默失效。(2) Web UI「配置」面板「自动化」card 末尾新增「🔍 立即检查更新」和「⬆️ 立即升级」两个按钮，调用 v1.3 已有的 `/api/update/check` 和 `/api/update/install` 端点（零新增 API），升级按钮带 confirm 确认对话框。 |
-| **v2.0.0** | **当前版本。进入 2.0 时代**：从 v1.4 之前的自做 logo 改用**纯生成的蔚蓝档案（Blue Archive）经典蓝渐变背景**（`#A0D8EF` → `#3D7DC9` → `#1B3A6B`），164×314 24-bit BMP 嵌入安装器左侧 164×314 横幅；新增 **EULA 协议**（`packaging/branding/EULA.rtf`，ISCC `LicenseFile` 原生支持）—— 9 节完整条款（服务范围 / 许可 / 使用方责任 / 免责声明 / 隐私 / 第三方组件 / 协议修改 / 终止 / 适用法律）。**主版本号 bump** 是视觉 / 法务姿态升级（视觉重做 + 协议引入），技术栈不变。 |
+| **v2.0.0** | **进入 2.0 时代**：从 v1.4 之前的自做 logo 改用**纯生成的蔚蓝档案（Blue Archive）经典蓝渐变背景**（`#A0D8EF` → `#3D7DC9` → `#1B3A6B`），164×314 24-bit BMP 嵌入安装器左侧 164×314 横幅；新增 **EULA 协议**（`packaging/branding/EULA.rtf`，ISCC `LicenseFile` 原生支持）—— 9 节完整条款（服务范围 / 许可 / 使用方责任 / 免责声明 / 隐私 / 第三方组件 / 协议修改 / 终止 / 适用法律）。**主版本号 bump** 是视觉 / 法务姿态升级（视觉重做 + 协议引入），技术栈不变。 |
+| **v2.0.1 – v2.0.2.3** | 稳定性与打包链路修复：安装器升级前自动停服务、端口占用不再死循环重启、`version.py` 缺失时 CI 直接 `exit 1`、版本字面量全链路收口（详见 [`CHANGELOG.md`](CHANGELOG.md)）。 |
+| **v2.0.2.4** | 安全加固与发布策略：修 4 个「点了就崩」的升级按钮（未定义裸名 `NameError`）、安装器 SHA256 校验改 **fail-closed**、`password.txt` 跳过注释行、Host 白名单 + 写接口自定义头 + `Origin` 同源校验、静默升级**默认关闭**、API 镜像停用（元数据只信主源）、配置导出不再含明文密码；安装包改为**版本化非 prerelease release**（tag `v{版本}`），`/releases/latest` 才能拿到版本。 |
+| **v2.0.3.0** | **当前版本。Web UI 全部重做为 Apple 风格亚克力玻璃界面**：设计令牌化（亮 / 暗两套语义变量）、`backdrop-filter` 毛玻璃材质 + 发丝描边、系统字体栈（`-apple-system` / `SF Pro Text` / `PingFang SC`）、两行品牌锁排、分段控件、1.7 描边线性 SVG 图标（取代 emoji）、iOS 样式开关、聚焦光圈、≤720px / ≤480px 响应式；同时**修复顶栏 logo 与 favicon 一直 404 的破图问题** —— 新增 `/branding/<name>` 白名单静态路由（结构性阻断路径穿越），安装包随包拷贝 `branding\web-logo-*.png`，前端另有星芒标记兜底。 |
 
-> **版本号说明**：本项目从 `1.x` 进入 `2.x` 公开版本线，**当前版本为 `2.0.0`**。
+> **版本号说明**：本项目从 `1.x` 进入 `2.x` 公开版本线，**当前版本以 [`version.py`](version.py) 的 `VERSION` 常量为唯一来源**（README 徽章、`packaging/setup.iss` 的 `MyAppVersion`、`install.bat` / `uninstall.bat` / `packaging/build.ps1` 的字面量都与之保持一致，`_smoke_static.py` 会校验）；
 > - `联网_service.py` 的 `VERSION` 常量（显示在日志与「关于」页）、Inno Setup 安装包版本、安装 / 卸载脚本与构建脚本中的版本字样，**全部是同一个 `2.0.0`**，不再存在多套并存的编号；
 > - 历史上曾短暂并存过 `2.0` / `2.1` 内部代号（由「命令行脚本 → Web UI 版」的迭代历史沿用而来），该套编号已废弃；
 > - **GitHub Release 标签 `v1.0`** 是本项目的**首次公开发布**记录，属于历史事实，保持不变；

@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.2.4
+;   版本: v2.0.3.0
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.2.4.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.3.0.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.2.4"
+  #define MyAppVersion "2.0.3.0"
 #endif
 #define MyAppPublisher "星尘闪连"
 #define MyAppExeName "联网_service.py"
@@ -46,6 +46,8 @@ Source: "..\protocol.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\eula.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\web_api.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
+; Web UI 品牌图片：服务端 /branding/* 静态路由从这里读取（顶栏 logo + favicon）
+Source: "branding\web-logo-*.png"; DestDir: "{app}\branding"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.json.template"; DestDir: "{app}"; DestName: "config.json"; Flags: ignoreversion onlyifdoesntexist
@@ -65,6 +67,7 @@ Name: "{commondesktop}\Dr.COM 校园网自动登录"; Filename: "{app}\启动UI.
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\tools"
+Type: filesandordirs; Name: "{app}\branding"
 
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c ""{app}\tools\nssm.exe"" stop DrcomAutoLogin"; Flags: runhidden; RunOnceId: "StopDrcomAutoLogin"
@@ -214,7 +217,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.2.4）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.3.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

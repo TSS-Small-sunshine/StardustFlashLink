@@ -2,18 +2,23 @@ Windows 安装程序 **v{{VERSION}}**（Inno Setup 自动构建 · 安装包已�
 
 ## 本版变更
 
-### 🔴 P0（阻断级）
-- **P0-1** `web_api.py` 6 个未定义裸名修复 —— 「立即检查更新 / 立即升级 / 升级开关 / 升级历史」4 个功能恢复可用（修前运行时必 `NameError`）
-- **P0-2** 自动升级 SHA256 校验改 **fail-closed**：`digest` 缺失即拒绝安装并删除已下载的安装器
-- **P0-3** `password.txt` 读取跳过 `#` 注释行 + 模板内容清空（新装机不再把模板提示当密码去登录）
-- **P0-7** `AppExit` 三处统一为 `Ignore`；`_post_upgrade_startup` 不再写回 `Restart`；「重启服务」改走 `nssm restart`
+### ✨ 界面（重做）
+- **Web UI 换成 Apple 风格亚克力玻璃界面**：亮 / 暗两套设计令牌、`backdrop-filter: saturate(180%) blur(30px)` 毛玻璃材质 + 发丝描边 + 内侧高光
+- 系统字体栈（`-apple-system` / `SF Pro Text` / `PingFang SC` / `Microsoft YaHei UI`），数字与日志用等宽 + `tabular-nums`（倒计时不抖动）
+- 两行品牌锁排 + 分段控件（Segmented Control）+ 胶囊按钮 + iOS 样式开关 + 聚焦光圈
+- 图标由 emoji 换成 1.7 描边线性 SVG，各系统渲染一致；新增 ≤720px / ≤480px 响应式与 `prefers-reduced-motion`
 
-### 🟠 安全（P1）
-- **P1-1（部分）** Web UI 加 `Host` 白名单（挡 DNS rebinding）+ 写接口强制 `X-Requested-With: DrcomUI` + `Origin` 同源校验
-- **P1-2** 升级 `digest` 只信主源 `api.github.com`（删除 API 镜像 fallback）
-- **P1-3** 静默自动升级**默认关闭** + 远端版本串白名单
-- **P1-4** `/api/config/export` 不再打包明文密码
-- **P1-5** 发布改**版本化非 prerelease** release，修复自动升级可用性
+### 🔴 修复
+- **顶栏 logo 与 favicon 404（破图）**：新增 `/branding/<name>` 静态路由 —— 文件名白名单
+  `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.(png|ico|svg|jpe?g|webp|gif)$`（结构性阻断路径穿越）+ `nosniff` + 1h 缓存
+- 安装包随包拷贝 `branding\web-logo-*.png` 到 `{app}\branding`，卸载时清理
+- 前端 logo 加载失败时用内联星芒标记兜底，不再出现破图图标
+- 修 `pollUpdate` 中 `banner` 未定义导致的 `ReferenceError`（升级成功横幅 7 秒自动隐藏此前一直失效）
+- 修 `ensureChangelogShortcut` 引用不存在的 `--primary` 变量（快捷链接颜色）
+
+### 其它
+- 版本字面量统一到 `2.0.3.0`（`version.py` / `setup.iss` / NSSM 描述 / `install.bat` / `uninstall.bat` / `build.ps1`）
+- README 补上真实 Web UI 截图（亮色 / 暗色），此前 `docs/screenshot-*.png` 缺失导致 README 图片也是破图
 
 ## 安装包信息
 

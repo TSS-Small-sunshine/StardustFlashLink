@@ -7,4 +7,4 @@
     `uninstall.bat`、`packaging/build.ps1` 与模块 docstring 里的版本必须同步更新。
 """
 
-VERSION = "2.0.2.4"
+VERSION = "2.0.3.0"

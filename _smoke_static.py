@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""静态/单元冒烟测试（v2.0.2.4 修复项）。
+"""静态/单元冒烟测试（v2.0.3.0 修复项）。
 
 跑法：python _smoke_static.py（在 DrcomAutoLogin-Windows 目录下）
 """
@@ -70,11 +70,28 @@ check("P1-1 Host 白名单", "allowed_hosts" in src_web)
 check("P1-1 写请求要求自定义头", '"X-Requested-With") != "DrcomUI"' in src_web)
 check("P1-1 do_GET/do_POST 都调用 _check_request", src_web.count("if not self._check_request():") == 2)
 
+# ---- v2.0.3.0：Apple 风格前端 + 品牌图片静态路由 ----
+check("v2.0.3.0 /branding 路由已挂载", 'if path.startswith("/branding/")' in src_web)
+check("v2.0.3.0 _serve_branding 方法", "def _serve_branding(self, path)" in src_web)
+check("v2.0.3.0 文件名白名单正则", "_BRANDING_NAME_RE = re.compile(" in src_web)
+check("v2.0.3.0 favicon 用绝对路径", 'href="/branding/web-logo-32.png"' in src_web)
+check("v2.0.3.0 顶栏 logo 用绝对路径", 'src="/branding/web-logo-64.png"' in src_web)
+check("v2.0.3.0 logo 失败兜底 bindBrand", "function bindBrand()" in src_web and "bindBrand();" in src_web)
+check("v2.0.3.0 pollUpdate banner 作用域已修", "var bnr = $('update-banner');" in src_web)
+check("v2.0.3.0 toast 改内联 SVG 图标", "_ICO.check" in src_web and "_ICO.warn" in src_web)
+check("v2.0.3.0 顶栏亚克力玻璃材质", "--blur: saturate(180%) blur(30px)" in src_web and "backdrop-filter: var(--blur)" in src_web)
+check("v2.0.3.0 旧网格底纹已移除", "background-size: 40px 40px" not in src_web)
+check("v2.0.3.0 品牌区两行锁排", 'class="brand-sub"' in src_web)
+_page = src_web.split('_HTML_PAGE = r"""', 1)[1]
+_left = sorted(set(__import__("re").findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]", _page)))
+check("v2.0.3.0 页面内无 emoji 图标", not _left, "残留=%s" % _left)
+
 # ---- 版本一致性 ----
+
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.2.4", version.VERSION == "2.0.2.4", version.VERSION)
+check("版本 = 2.0.3.0", version.VERSION == "2.0.3.0", version.VERSION)
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))
 sys.exit(1 if FAILS else 0)
