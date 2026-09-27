@@ -11,6 +11,13 @@ from http.server import ThreadingHTTPServer
 
 import web_api
 
+# 控制台编码兜底（CI 的 cp1252 会让中文断言名把脚本打印崩掉；只改错误处理，不改编码）
+try:
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sys.stderr.reconfigure(errors="backslashreplace")
+except (AttributeError, ValueError):
+    pass
+
 PORT = 18748
 HOST = "127.0.0.1:%d" % PORT
 results = []
