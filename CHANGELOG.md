@@ -5,6 +5,34 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.6.2 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 真机升级验证时抓到：从 **2.0.4.4 自动升级到 2.0.6.1** 后，托盘文件装上了，但
+> `HKLM\...\Run` 里的启动项**没有落地** —— 也就是说：手动装的人有托盘，**自动升级上来的人没有**。
+
+### 🔧 修复：托盘自启项改由服务启动时对齐
+根因是「**新任务没法靠旧版本传**」：自动升级的执行器是**上一个版本自己的** `auto_update.py`
+（v2.0.4.4 只会传 `/TASKS=desktopicon,startservice`），Inno 于是把 v2.0.6.0 新加的 `trayicon`
+当成「未选中」→ `Tasks: trayicon` 的注册表项被直接跳过 ✗。（和 v2.0.4.2 时 `desktopicon`
+被摘掉是同一个坑，只是方向反了。）
+
+修法两条腿 ——
+1. **安装器**在 `ssPostInstall` 把「是否随开机启动托盘」写进
+   `HKLM\SOFTWARE\DrcomAutoLogin\TrayAutostart`（按 `WizardIsTaskSelected('trayicon')`，
+   静默安装一样有效；卸载时整键清掉）；
+2. **服务**每次启动读这个开关，把 `HKLM\...\Run\DrcomAutoLoginTray` 对齐：
+   缺了建、路径不对修、开关关闭删、托盘文件不存在清 —— 于是**任何升级路径都能自愈**
+   （包括从很老的版本升上来、以及这台机器上已经出现的那种状态）。
+
+判定逻辑抽成纯函数 `tray_autostart_action(want, script_exists, run_value, expected)`，
+create / keep / delete 三条走向都有单测；`_ensure_tray_autostart_sane(dry_run=True)`
+可以只看结论不碰注册表（排障用）。
+
+### 🧪 测试
+- 冒烟新增 9 条（6 条纯函数行为 + dry-run + 安装器开关 + 启动钩子接线），合计 **150/150**。
+- 真机：`_ensure_tray_autostart_sane(dry_run=True)`（BASE_DIR = 安装目录）判 `action=create`、
+  `want=True`、`current=None` —— 与实测的「启动项确实没落地」完全一致。
+
 ## v2.0.6.1 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 修 v2.0.6.0 里一个**只有真机升级才会暴露**的漏洞：托盘装上了，但真实用户登录时不会自启。
