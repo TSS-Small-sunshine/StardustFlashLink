@@ -99,7 +99,7 @@
 
 ## 🏷 项目状态
 
-**当前版本**：`v2.0.4.0 "Sirius"`（天狼星，2026-09-27） · **状态**：🟢 积极维护
+**当前版本**：`v2.0.4.1 "Sirius"`（天狼星，2026-09-27） · **状态**：🟢 积极维护
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -310,7 +310,7 @@ DrcomAutoLogin-Windows/
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.4.0.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.4.1.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -444,7 +444,8 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | --- | --- | --- |
 | **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
 | **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
-| **v2.0.4.0（当前）** | `Sirius` 天狼星 | 修「自动升级反复重装却始终装不上」的整套死循环：启动钩子终于生效、`AppExit` 空值自愈、失败熔断（3 次 / 6 小时冷却）、静默安装不再弹窗挂起、`/VERYSILENT` + `/LOG`；修「`#` 开头的密码被当成注释整行吃掉」；「查看更新日志」随包分发，缺失时给中文提示与仓库链接。 |
+| **v2.0.4.1（当前）** | `Sirius` 天狼星 | 安装器外观收口：桌面 / 开始菜单 / 「应用和功能」卸载项的图标改用品牌 `app.ico`（此前桌面是 `shell32.dll` 的 Windows 通用图标），`app.ico` 随包分发到 `{app}\branding`；接口、配置、服务名未动。 |
+| v2.0.4.0 | `Sirius` 天狼星 | 修「自动升级反复重装却始终装不上」的整套死循环：启动钩子终于生效、`AppExit` 空值自愈、失败熔断（3 次 / 6 小时冷却）、静默安装不再弹窗挂起、`/VERYSILENT` + `/LOG`；修「`#` 开头的密码被当成注释整行吃掉」；「查看更新日志」随包分发，缺失时给中文提示与仓库链接。 |
 | 后续版本线 | 见候选表 | 代号按 `MAJOR.MINOR` 走，候选星名表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。 |
 
 > **版本号唯一来源**： [`version.py`](version.py) 的 `VERSION` / `CODENAME` / `CODENAME_CN`。

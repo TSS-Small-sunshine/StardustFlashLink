@@ -163,8 +163,12 @@ def api_get_status():
 def api_get_config():
     cfg = _load_config()
     cfg = {k: cfg[k] for k in DEFAULT_CONFIG if k in cfg}
-    with PWD_LOCK:
-        pwd_set = _get_password() is not None
+    # ⚠️ 不要在这里套 `with PWD_LOCK:` —— _get_password() 内部已经加锁了。
+    # PWD_LOCK 是不可重入的 threading.Lock，同一线程二次获取 = 永久死锁：
+    #   GET /api/config 会挂住不返回（配置页字段全空、徽标「状态未知」、保存请求也一起卡住），
+    #   而且周期性自检线程同样卡在 _get_password() 上 → 自动登录停摆。
+    # v1.x 单文件版这里是直接读 _PWD_VALUE；模块化拆分后成了回归，v2.0.4.1 修。
+    pwd_set = _get_password() is not None
     return {
         **cfg,
         "password_status": "set" if pwd_set else "missing",

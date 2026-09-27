@@ -131,6 +131,50 @@ check("v2.0.4.0 setup.iss 静默不弹 MsgBox", "if WizardSilent then" in _iss_s
 # (6) CHANGELOG 随包分发 + 多路径查找（真机弹窗报 "No such file or directory"）
 _src_eula = pathlib.Path("eula.py").read_text(encoding="utf-8")
 check("v2.0.4.0 CHANGELOG 已随包打包", 'Source: "..\\CHANGELOG.md"' in _iss_src)
+
+# ---- v2.0.4.1：快捷方式 / 开始菜单 / 卸载项图标改用品牌 app.ico ----
+check("v2.0.4.1 app.ico 随包分发", 'Source: "branding\\app.ico"' in _iss_src)
+check("v2.0.4.1 快捷方式图标用品牌 ico",
+      'IconFilename: "{app}\\branding\\app.ico"' in _iss_src)
+check("v2.0.4.1 不再回退到 shell32 通用图标",
+      'IconFilename: "{sys}\\shell32.dll"' not in _iss_src)   # 注释里提到历史做法不算
+check("v2.0.4.1 卸载项图标用品牌 ico", "UninstallDisplayIcon={app}\\branding\\app.ico" in _iss_src)
+check("v2.0.4.1 .url 带 IconFile", "'IconFile=' + ExpandConstant('{app}\\branding\\app.ico')" in _iss_src)
+
+# ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
+_apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
+# 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
+_apicfg_code = "\n".join(l for l in _apicfg.splitlines() if not l.strip().startswith("#"))
+check("v2.0.4.1 api_get_config 不再自锁 PWD_LOCK", "with PWD_LOCK" not in _apicfg_code)
+check("v2.0.4.1 api_get_config 仍读密码状态", "_get_password()" in _apicfg)
+check("v2.0.4.1 加锁责任在 _get_password 内部",
+      "def _get_password():" in src_svc and "with PWD_LOCK:" in
+      src_svc.split("def _get_password():")[1].split("def ")[0])
+
+# 行为级回归：真跑一次 api_get_config()，2 秒内必须返回（死锁时会永远卡住）
+import threading as _threading
+_wa = importlib.import_module("web_api")
+_cfg_tmp = os.path.join(tmp, "config.json")
+svc.CONFIG_FILE = _cfg_tmp
+_wa._load_config = svc._load_config
+_wa._get_password = svc._get_password
+_wa.DEFAULT_CONFIG = svc.DEFAULT_CONFIG
+_wa.PWD_LOCK = svc.PWD_LOCK
+_box = {}
+
+
+def _call_get_config():
+    try:
+        _box["r"] = _wa.api_get_config()
+    except Exception as exc:  # noqa: BLE001 —— 测试里只看有没有结果
+        _box["e"] = exc
+
+
+_th = _threading.Thread(target=_call_get_config, daemon=True)
+_th.start()
+_th.join(3)
+check("v2.0.4.1 api_get_config 3 秒内返回（不再死锁）", "r" in _box, repr(_box.get("e", "")))
+check("v2.0.4.1 api_get_config 返回 password_status", _box.get("r", {}).get("password_status") in ("set", "missing"))
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -234,7 +278,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.4.0", version.VERSION == "2.0.4.0", version.VERSION)
+check("版本 = 2.0.4.1", version.VERSION == "2.0.4.1", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

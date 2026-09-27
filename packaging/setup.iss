@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.4.0
+;   版本: v2.0.4.1
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.4.0.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.4.1.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.4.0"
+  #define MyAppVersion "2.0.4.1"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -33,7 +33,7 @@ OutputDir=output
 Compression=lzma2/ultra64
 SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayIcon={app}\branding\app.ico
 SetupIconFile=branding\app.ico
 WizardImageFile=branding\wizard.bmp
 
@@ -53,6 +53,9 @@ Source: "..\web_api.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
 ; Web UI 品牌图片：服务端 /branding/* 静态路由从这里读取（顶栏 logo + favicon）
 Source: "branding\web-logo-*.png"; DestDir: "{app}\branding"; Flags: ignoreversion
+; 品牌图标：桌面/开始菜单快捷方式的图标从这里取
+; （v2.0.4.0 之前 [Icons] 写的是 {sys}\shell32.dll,13 的 Windows 通用图标，桌面上是个灰扑扑的默认图标）
+Source: "branding\app.ico"; DestDir: "{app}\branding"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 ; 更新日志：Web UI「关于 → 查看更新日志」直接读 {app}\CHANGELOG.md。
 ; v2.0.4.0 补打包 —— 之前没随包拷贝，弹窗必然报 "No such file or directory"。
@@ -67,10 +70,10 @@ Source: "..\python\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubd
 Name: "{app}\logs"
 
 [Icons]
-Name: "{group}\Dr.COM 校园网自动登录"; Filename: "{app}\启动UI.bat"; IconFilename: "{sys}\shell32.dll"; IconIndex: 13
+Name: "{group}\Dr.COM 校园网自动登录"; Filename: "{app}\启动UI.bat"; IconFilename: "{app}\branding\app.ico"; IconIndex: 0
 Name: "{group}\查看日志"; Filename: "{app}\logs"
 Name: "{group}\卸载 Dr.COM 校园网自动登录"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\Dr.COM 校园网自动登录"; Filename: "{app}\启动UI.bat"; Tasks: desktopicon; IconFilename: "{sys}\shell32.dll"; IconIndex: 13
+Name: "{commondesktop}\Dr.COM 校园网自动登录"; Filename: "{app}\启动UI.bat"; Tasks: desktopicon; IconFilename: "{app}\branding\app.ico"; IconIndex: 0
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\logs"
@@ -156,7 +159,11 @@ procedure CreateURLFile(const FilePath, URL: string);
 var
   Content: AnsiString;
 begin
-  Content := '[InternetShortcut]' + #13#10 + 'URL=' + URL;
+  // 图标一并写成品牌图，别再让开始菜单显示浏览器的默认图标
+  // （.url 的这个字段按 ANSI 写盘：安装路径若含中文，这行会失效，但快捷方式本身仍然可用）
+  Content := '[InternetShortcut]' + #13#10 + 'URL=' + URL + #13#10 +
+             'IconFile=' + ExpandConstant('{app}\branding\app.ico') + #13#10 +
+             'IconIndex=0';
   SaveStringToFile(FilePath, Content, False);
 end;
 
@@ -225,7 +232,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.4.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.4.1）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
