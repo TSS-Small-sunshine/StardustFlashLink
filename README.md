@@ -86,6 +86,9 @@
   <img src="docs/screenshot-webui-dark.png" alt="Web UI 暗色主题" width="760"/>
 </p>
 
+> **截图里的账号已脱敏**（渲染为 `2023******@yd`）：这两张图是用假数据渲染的界面预览，不含任何真实账号 / 密码。
+> 重拍方式见 [`AGENTS.md`](AGENTS.md)「截图规范」——**禁止**用真机页面直接截图。
+
 <!-- 待补：
 <p align="center">
   <img src="docs/screenshot-install.png" alt="安装向导" width="600"/>
@@ -96,11 +99,30 @@
 
 ## 🏷 项目状态
 
-**当前版本**：v2.0.1（2026-09-20） · **状态**：🟢 积极维护
+**当前版本**：`v2.0.4.0 "Sirius"`（天狼星，2026-09-27） · **状态**：🟢 积极维护
+
+> 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
 [最新 Release](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/latest) ·
-[更新日志](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases) ·
+[更新日志](CHANGELOG.md) ·
 [问题反馈](https://github.com/TSS-Small-sunshine/StardustFlashLink/issues)
+
+---
+
+## 🧱 模块划分
+
+v2.0.2 起由单文件拆成 6 个纯标准库模块（**内嵌 Python 运行时下同样是这 6 个文件**）：
+
+| 文件 | 职责 | 关键符号 |
+| --- | --- | --- |
+| `联网_service.py` | 入口 / 生命周期：路径与常量、配置读写与校验、密码读写、日志、状态与退避、NSSM 重启、`main()` | `DEFAULT_CONFIG`、`_load_config`、`_validate_config`、`_save_config`、`_load_password_from_disk`、`_get_password`、`_save_password_to_disk`、`STATE`、`BACKOFF`、`_startup_trigger`、`run_periodic`、`main` |
+| `protocol.py` | 认证协议层：等网络 → 查在线 → 登录；网络发现 | `run_once`、`wait_network`、`is_online`、`login`、`discover_network` |
+| `web_api.py` | HTTP 路由层：`/`（内联单页）、`/branding/*`、全部 `/api/*`、Host / Origin / 自定义头校验 | `_Handler`、`api_get_status`、`api_post_config`、`api_post_password`、`api_post_login`、`api_post_restart`、`api_get_log_tail`、`_HTML_PAGE` |
+| `auto_update.py` | 自动升级：GitHub 探测、下载与 SHA256 校验、静默安装、升级熔断、启动钩子 | `_check_github_latest`、`_download_installer`、`_do_update_now`、`_auto_update_loop`、`_post_upgrade_startup`、`_ensure_nssm_appexit_sane` |
+| `eula.py` | EULA 与 CHANGELOG 读取 | `api_get_changelog` |
+| `version.py` | **版本号 + 代号唯一来源** | `VERSION`、`CODENAME`、`CODENAME_CN`、`VERSION_FULL` |
+
+> 依赖方向：`联网_service.py` → 其余 5 个模块；其余模块之间**不互相 import**（共享对象由 `_attach()` 注入）。
 
 ---
 
@@ -120,20 +142,6 @@
 ---
 
 ## 架构说明
-
-### 内部模块（`联网_service.py`）
-
-| 区块 | 关键符号 | 职责 |
-| --- | --- | --- |
-| 常量与路径 | `VERSION`、`DEFAULT_CONFIG`、`BASE_DIR`、`CONFIG_FILE`、`PASSWORD_FILE`、`LOG_FILE` | 版本号、默认配置、文件位置解析（全部相对脚本目录） |
-| 配置读写 | `_load_config`、`_validate_config`、`_save_config` | 读 `config.json`，缺失/损坏时自动生成默认值并校验合法性 |
-| 密码管理 | `_load_password_from_disk`、`_get_password`、`_save_password_to_disk` | 从 `password.txt` 读取密码，仅存内存 + 文件，**不写日志、不回传 API** |
-| 运行状态 | `STATE`、`BACKOFF`、`_set_state`、`_snapshot_state`、`_set_backoff`、`_reset_backoff` | 线程间共享状态（带锁）与退避计数 |
-| 网络探测 | `wait_network`、`discover_network` | 等网关可达；获取用于登录表单的本机 IP / MAC |
-| 认证协议 | `is_online`、`login` | 查询在线状态（chkstatus）、提交登录（eportal） |
-| 调度 | `run_once`、`_startup_trigger`、`run_periodic` | 一次完整「等网络 → 查在线 → 登录」，以及启动触发 / 周期触发 |
-| Web API | `api_get_status`、`api_get_config`、`api_post_config`、`api_post_password`、`api_post_login`、`api_get_log_tail`、`api_get_log_download`、`api_get_about`、`api_post_restart` | 供页面调用的 JSON 接口 |
-| HTTP 服务 | `_Handler`(`BaseHTTPRequestHandler`)、`main()` | 静态页面 + API 路由，主线程阻塞在 `serve_forever()` |
 
 ### 线程模型
 
@@ -168,19 +176,23 @@ run_once(原因)
 | 项 | 说明 |
 | --- | --- |
 | 退避档位 | `5 → 10 → 20 → 40 → 60` 分钟（`BACKOFF_LEVELS`），60 分钟封顶 |
-| 触发条件 | 登录失败或连续检测异常 |
+| 触发条件 | 登录失败、连续检测异常、**网关不可达**（视为「不在校园网」，同样计入退避） |
 | 重置条件 | 检测到已在线 / 登录成功 |
-| 实际等待 | `max(自检间隔, 剩余退避时间)`，Web UI「状态」页显示「下次检查」倒计时 |
-| 离线静默 | 网关完全不可达时视为「不在校园网」，不刷错误、不拉长退避 |
+| 实际等待 | 周期线程取 **`min(自检间隔, 剩余退避时间)`**：退避已到期 → 立即重试；退避小于间隔 → 按退避等待；退避大于间隔 → 仍按自检间隔（不会被退避无限推迟）。v2.0.2 之前误用 `max`，表现为开机后 30 分钟没有任何登录尝试 |
+| 密码未设置 | 记 `last_error=密码未设置`，**不计入退避**（属于用户操作问题，不是网络问题） |
 
 ### 数据与持久化
 
 | 内容 | 位置 | 说明 |
 | --- | --- | --- |
-| 配置 | `<脚本目录>\config.json` | 缺失时自动生成默认值 |
-| 密码 | `<脚本目录>\password.txt` | UTF-8 单行纯文本，需自行创建 |
+| 配置 | `<脚本目录>\config.json` | 缺失时自动生成默认值；**升级 / 重装不会覆盖**（安装器 `onlyifdoesntexist`） |
+| 密码 | `<脚本目录>\password.txt` | UTF-8 单行纯文本；除空行与安装包自带的模板提示行外，**整行都是密码原文（可以包含 `#`）** |
 | 业务日志 | `<脚本目录>\logs\campus_login.log` | 认证过程日志，持续追加**不自动轮转**，可随时手动清理 |
+| 升级日志 | `<脚本目录>\logs\upgrade.log` | 每次检查 / 下载 / 安装 / 熔断的流水；Web UI「查看升级历史」看的就是它 |
+| 升级尝试记录 | `<脚本目录>\logs\update_attempt.json` | 记录"正在升到哪个版本 / 第几次尝试 / 是否生效"，失效的自动重试靠它熔断 |
+| 静默安装日志 | `<脚本目录>\logs\installer-silent.log` | 自动升级时安装器的 `/LOG` 输出，排查"升级没装上"看这里 |
 | 服务输出 | `<脚本目录>\logs\service_stdout.log` / `service_stderr.log` | NSSM 捕获的标准输出 / 错误，1 MB 轮转 |
+| 品牌图片 | `<脚本目录>\branding\web-logo-*.png` | Web UI 顶栏 logo 与站点图标，由 `/branding/*` 只读路由提供 |
 
 ---
 
@@ -237,21 +249,34 @@ GET http://{HOST}:801/eportal/portal/login?callback=dr{随机数}&login_method=1
 
 ```
 DrcomAutoLogin-Windows/
-├── 联网_service.py            # 主程序：认证调度 + Web UI（Python 标准库，单文件）
+├── 联网_service.py            # 入口：配置 / 密码 / 状态 / 退避 / 线程调度 / main()
+├── protocol.py                # 认证协议：等网络 → 查在线 → 登录、网络发现
+├── web_api.py                 # HTTP 路由 + 内联单页 Web UI（HTML/CSS/JS 全在 _HTML_PAGE）
+├── auto_update.py             # 自动升级：探测 / 下载 / 校验 / 静默安装 / 熔断 / 启动钩子
+├── eula.py                    # EULA 与 CHANGELOG 读取
+├── version.py                 # 版本号 + 版本代号（唯一来源）
 ├── install.bat                # 一键安装：注册并启动 Windows 服务
 ├── uninstall.bat              # 一键卸载：停止并移除服务
 ├── README.md                  # 本文件
+├── CHANGELOG.md               # 逐版本变更（README 只留摘要）
 ├── LICENSE                    # MIT 许可证
-├── .gitignore                 # 排除凭据 / 运行数据 / 构建产物
-├── python/                    # 内嵌 Python 运行时（CI 构建时下载，不随仓库分发）
+├── docs/
+│   ├── VERSIONING.md          # 版本号规则 / 版本线代号表
+│   ├── screenshot-webui.png       # Web UI 截图（亮色）
+│   └── screenshot-webui-dark.png  # Web UI 截图（暗色）
+├── AGENTS.md                  # AI / 协作者编辑规范（改代码前请读）
+├── _smoke_static.py           # 静态冒烟测试（python _smoke_static.py）
+├── _smoke_http.py             # HTTP 层冒烟测试（python _smoke_http.py）
 ├── .github/workflows/build-installer.yml  # 自动构建安装程序并发布 Release
 └── packaging/                 # 【可选】打包成安装程序
     ├── build.bat              # 构建入口（双击运行）
     ├── build.ps1              # 构建逻辑（自动准备 NSSM / Inno Setup）
     ├── setup.iss              # Inno Setup 6 脚本
+    ├── RELEASE-NOTES.md       # Release 说明模板（CI 渲染占位符）
     ├── LICENSE.txt            # 安装包内附的许可证
-    ├── config.json.template   # 默认配置模板（安装时复制为 config.json）
-    ├── password.txt.template  # 密码文件占位模板（安装时复制为 password.txt）
+    ├── config.json.template   # 默认配置模板（安装时复制为 config.json，已存在则不覆盖）
+    ├── password.txt.template  # 密码文件占位模板（内容为空）
+    ├── branding/              # app.ico / wizard.bmp / EULA.rtf / web-logo-*.png
     └── README.md              # 打包与安装包使用说明
 ```
 
@@ -263,7 +288,7 @@ DrcomAutoLogin-Windows/
 
 ### 🎯 路径 0：直接下载安装程序（最省事，推荐）
 
-打开 <https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/tag/installer> → 下载 `DrcomAutoLogin-Setup-v*.exe` → 双击安装。
+打开 <https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/tag/installer> → 下载 `StardustFlashLink-Setup-v*.exe` → 双击安装。
 
 > 安装包**已内嵌 Python 运行时**，目标机无需预先安装 Python。
 
@@ -285,7 +310,7 @@ DrcomAutoLogin-Windows/
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.1.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.4.0.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -382,6 +407,8 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 - **接口不返回密码**：状态接口只返回 `password_status`（`set` / `missing`），永不返回密码原文
 - **日志脱敏**：密码不写入任何日志文件；`config.json` 也不保存密码
 - **权限建议**：`password.txt` 所在目录建议只授予本机账户访问权限（服务以系统账户运行，注意共享机器的风险）
+- **提交前的自动隐私守卫**：`python _smoke_static.py` 会把本机 `password.txt` / `config.json` 里的账号拿去和**所有入库文件**比对，命中即测试失败。想连安装目录一起查，先设 `$env:DRCOM_DATA_DIR = 'D:\Program Files\DrcomAutoLogin'`（CI 上没有这些文件，该项自动跳过）；`logs\*`、`update_attempt.json`、`installer-silent.log`、`config-export-*.zip` 等运行期产物全部在 `.gitignore` 内
+- **截图必须脱敏**：README 截图由 `_ui_redesign/preview.py` 的假数据渲染（账号打码成 `2023******`），**禁止**提交真机界面截图 —— 规则见 [`AGENTS.md`](AGENTS.md)
 
 ---
 
@@ -410,25 +437,16 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 
 ## 版本记录
 
-| 版本 | 说明 |
-| --- | --- |
-| **v1.0** | 首个公开发布版本。Windows 校园网自动登录：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包。 |
-| **v1.1** | 安装包内嵌 Python 3.12 运行时（终端用户无需预装，也不再受架构差异影响）；GitHub Actions 自动构建流水线（push 后自动产出 `.exe` 并发布到 `installer` Release）；Web UI 现代化重设计（亮 / 暗主题、KPI 卡片、分段控件、终端日志、Toast）。修复 `.panel.active` 白屏（动画未推进时永久停在 `opacity:0`，补静态兜底）。 |
-| **v1.2** | Web UI 重设计为 **DeepSeek 风格**（极简、淡蓝 / 淡紫渐变背景、细腻网格底纹、大圆角、柔和阴影、大字号 KPI、pill 按钮、状态点呼吸动效、顶部细提示条）；配置页密码字段标注为「账户登录密码」（明确这是校园网认证密码，而非系统登录密码）；安装器在升级时**自动先停服务再覆盖文件**——避免旧 Python 进程持有 `联网_service.py` 句柄导致新版本装不上；统一版本号到 `1.x` 公开版本线（废弃之前并存的 `2.0` / `2.1` 内部代号）。 |
-| **v1.3** | **静默自动升级**：服务后台定期检查 GitHub `/releases/latest` —— 本机版本落后则自动下载安装器、校验 SHA256、备份当前脚本、调 Inno Setup 静默安装、服务自动重启；升级全程无需操作，失败立即写日志并显示红色横幅 + 升级历史。Web UI 状态面板顶部新增升级状态横幅；配置面板「自动化」card 新增「启用自动升级」开关与「检查间隔」下拉；关于面板新增「查看升级历史」按钮（弹窗显示 `logs/upgrade.log`）。配置面板布局调整：「账户与登录密码」card（账号 + 运营商 + 密码）整体上移到顶部。 |
-| **v1.3.1** | 修复 v1.3 引入的**前后端字段没收口**问题 —— `_save_config` 在校验前 merge 默认值（兜底），老 config.json 缺 `update_min_free_disk_mb` 等 v1.3 字段时不再报错；Web UI 自动升级 card 增加「下载前最小剩余磁盘」输入框。同时修复**版本比较 bug**：`_parse_version` 不识别 `-fix` / `-rc1` 等非数字后缀，`_parse_version("1.3-fix")` 与 `1.3` 比较时错误地返回 0（"已是最新"），导致 v1.3 服务无法识别并升级到 `v1.3-fix` / `v1.3.1`；重写解析逻辑，遇非数字后缀追加 sentinel `999`，使 hotfix 版本严格大于同主版本号。 |
-| **v1.3.2** | 修复 v1.3.1 自动升级流程的**两个关键 bug**：(1) `_launch_installer` 启动 installer 时**未用 `DETACHED_PROCESS` flag** —— installer 进程继承父 Python 的 console handle + process group，Python 被 NSSM 杀掉时 installer 被**连带杀掉**，升级半途而废。修复：用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB` 让 installer 完全脱离父进程生命周期；`_do_update_now` 步骤 10 改用 `os._exit(0)` 立即退出，不调 `subprocess.run(nssm stop)`（之前那种调用会触发恶性循环）。(2) 升级期间 `_set_nssm_appexit("Disabled")` 写了一个**NSSM 非法值**（AppExit 合法值只有 `Default | Exit | Success | Failure | Codes`），导致升级后服务无法启动（`nssm start` 报 `OpenService 0x424`，`sc start` 报 `Access is denied`）。修复：升级透明策略 —— 不再写 AppExit，保留用户原值，升级完由 `_post_upgrade_startup` 钩子做幂等恢复。 |
-| **v1.3.3** | 新增**配置导入/导出**：Web UI「配置」面板新增「📤 导出配置」和「📥 导入配置」两个按钮。导出把 `config.json` + `password.txt`（如有）+ `manifest.json` 打包成 `config-export-<时间戳>.zip` 下载；导入上传 zip 后做合法性校验（manifest schema_version、config 字段校验、password 非空），通过后原子写入磁盘并返回 `{need_restart: true}`，由用户手动点「重启服务」按钮应用新配置。**纯标准库实现**（`zipfile` + `io`），不引入新依赖。`POST /api/config/import` 路由必须放在 JSON 解析**之前**分发（zip 是二进制 body 会被现有 `json.loads` 拦截）。 |
-| **v1.3.4** | **日志分级**：Web UI「日志」面板顶部新增等级筛选 chip（全部 / INFO / WARN / ERROR），后端 `GET /api/log_tail` 新增可选 `level` query 参数（`info` / `warning` / `error` / `debug` / `critical`），按等级过滤返回行。响应体新增 `level_filter` 字段（向后兼容：旧客户端忽略未知字段）。无效 level 返回 400。**保持单文件日志**（不拆多个 log 文件），通过前端 chip 切换实现产品级「按等级筛选」体验。 |
-| **v1.4.0** | **项目重命名为「星尘闪连 (Stardust Flash Link)」**，沿用 `DrcomAutoLogin` NSSM 服务名、`AppId` 与全部 API 路径（保证旧版可正常卸载 / 升级）。安装包新增 `branding\app.ico`（应用图标，256/128/64/48/32/24/16 多尺寸 ICO）与 `branding\wizard.bmp`（164×314 24-bit 安装器左侧品牌横幅），由 Inno Setup `SetupIconFile` / `WizardImageFile` 引入；Python 脚本头部、L37 install.bat 标题、L31 uninstall.bat 标题、build.ps1 头部与 banner 同步更新。 |
-| **v1.3.5** | **GitHub 国内镜像加速** + **手动触发更新**：(1) `_check_github_latest` 和 `_download_installer` 按 `GITHUB_API_MIRRORS` 列表（`None` 主源 + `https://gh-proxy.com` / `ghfast.top` / `mirror.ghproxy.com` 三个镜像）串行 fallback；主源超时/失败时自动尝试镜像，避免国内机器上 `api.github.com` 不可达导致自动升级静默失效。(2) Web UI「配置」面板「自动化」card 末尾新增「🔍 立即检查更新」和「⬆️ 立即升级」两个按钮，调用 v1.3 已有的 `/api/update/check` 和 `/api/update/install` 端点（零新增 API），升级按钮带 confirm 确认对话框。 |
-| **v2.0.0** | **进入 2.0 时代**：从 v1.4 之前的自做 logo 改用**纯生成的蔚蓝档案（Blue Archive）经典蓝渐变背景**（`#A0D8EF` → `#3D7DC9` → `#1B3A6B`），164×314 24-bit BMP 嵌入安装器左侧 164×314 横幅；新增 **EULA 协议**（`packaging/branding/EULA.rtf`，ISCC `LicenseFile` 原生支持）—— 9 节完整条款（服务范围 / 许可 / 使用方责任 / 免责声明 / 隐私 / 第三方组件 / 协议修改 / 终止 / 适用法律）。**主版本号 bump** 是视觉 / 法务姿态升级（视觉重做 + 协议引入），技术栈不变。 |
-| **v2.0.1 – v2.0.2.3** | 稳定性与打包链路修复：安装器升级前自动停服务、端口占用不再死循环重启、`version.py` 缺失时 CI 直接 `exit 1`、版本字面量全链路收口（详见 [`CHANGELOG.md`](CHANGELOG.md)）。 |
-| **v2.0.2.4** | 安全加固与发布策略：修 4 个「点了就崩」的升级按钮（未定义裸名 `NameError`）、安装器 SHA256 校验改 **fail-closed**、`password.txt` 跳过注释行、Host 白名单 + 写接口自定义头 + `Origin` 同源校验、静默升级**默认关闭**、API 镜像停用（元数据只信主源）、配置导出不再含明文密码；安装包改为**版本化非 prerelease release**（tag `v{版本}`），`/releases/latest` 才能拿到版本。 |
-| **v2.0.3.0** | **当前版本。Web UI 全部重做为 Apple 风格亚克力玻璃界面**：设计令牌化（亮 / 暗两套语义变量）、`backdrop-filter` 毛玻璃材质 + 发丝描边、系统字体栈（`-apple-system` / `SF Pro Text` / `PingFang SC`）、两行品牌锁排、分段控件、1.7 描边线性 SVG 图标（取代 emoji）、iOS 样式开关、聚焦光圈、≤720px / ≤480px 响应式；同时**修复顶栏 logo 与 favicon 一直 404 的破图问题** —— 新增 `/branding/<name>` 白名单静态路由（结构性阻断路径穿越），安装包随包拷贝 `branding\web-logo-*.png`，前端另有星芒标记兜底。 |
+> 这里只留**版本线**（`MAJOR.MINOR`）级别的摘要，逐版本、逐条目的完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+> 版本线代号的命名规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
-> **版本号说明**：本项目从 `1.x` 进入 `2.x` 公开版本线，**当前版本以 [`version.py`](version.py) 的 `VERSION` 常量为唯一来源**（README 徽章、`packaging/setup.iss` 的 `MyAppVersion`、`install.bat` / `uninstall.bat` / `packaging/build.ps1` 的字面量都与之保持一致，`_smoke_static.py` 会校验）；
-> - `联网_service.py` 的 `VERSION` 常量（显示在日志与「关于」页）、Inno Setup 安装包版本、安装 / 卸载脚本与构建脚本中的版本字样，**全部是同一个 `2.0.0`**，不再存在多套并存的编号；
-> - 历史上曾短暂并存过 `2.0` / `2.1` 内部代号（由「命令行脚本 → Web UI 版」的迭代历史沿用而来），该套编号已废弃；
-> - **GitHub Release 标签 `v1.0`** 是本项目的**首次公开发布**记录，属于历史事实，保持不变；
-> - 后续公开发布在 `2.x` 线上递增（`2.0.0` → `2.0.1` → `2.1` → …）。
+| 版本线 | 代号 | 摘要 |
+| --- | --- | --- |
+| **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
+| **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
+| **v2.0.4.0（当前）** | `Sirius` 天狼星 | 修「自动升级反复重装却始终装不上」的整套死循环：启动钩子终于生效、`AppExit` 空值自愈、失败熔断（3 次 / 6 小时冷却）、静默安装不再弹窗挂起、`/VERYSILENT` + `/LOG`；修「`#` 开头的密码被当成注释整行吃掉」；「查看更新日志」随包分发，缺失时给中文提示与仓库链接。 |
+| 后续版本线 | 见候选表 | 代号按 `MAJOR.MINOR` 走，候选星名表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。 |
+
+> **版本号唯一来源**： [`version.py`](version.py) 的 `VERSION` / `CODENAME` / `CODENAME_CN`。
+> 安装包 `MyAppVersion`、NSSM 服务描述、`install.bat` / `uninstall.bat` 标题、`packaging/build.ps1` banner
+> 全部与它保持一致，`_smoke_static.py` 会把这些不一致直接判为失败。

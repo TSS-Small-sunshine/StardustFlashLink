@@ -29,7 +29,7 @@ import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 
-from version import VERSION
+from version import VERSION, VERSION_FULL, CODENAME, CODENAME_CN
 import eula as _eula_mod
 
 
@@ -296,6 +296,9 @@ def api_get_about():
     s = _snapshot_state()
     return {
         "version": VERSION,
+        "version_full": VERSION_FULL,
+        "codename": CODENAME,
+        "codename_cn": CODENAME_CN,
         "service_started_at": s.get("service_started_at"),
         "service_uptime_sec": s.get("service_uptime_sec"),
         "data_dir": BASE_DIR,
@@ -1576,7 +1579,7 @@ code.path {
       <div class="field">
         <label for="cfg-account">账号</label>
         <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
-        <div class="hint">仅支持数字，例如 2023123456</div>
+        <div class="hint">仅支持数字（学号 / 工号），不含运营商后缀</div>
         <div class="err" id="err-account" role="alert"></div>
       </div>
       <div class="field">
@@ -1895,6 +1898,12 @@ code.path {
   font-size: 12.5px; line-height: 1.65; white-space: pre-wrap;
   color: var(--text); background: transparent;
 }
+/* v2.0.4.0：更新日志缺失时的兜底链接（后端返回 url 字段时才出现） */
+.changelog-link {
+  display: inline-block; margin-top: 12px;
+  color: var(--accent); font-weight: 500; text-decoration: none;
+}
+.changelog-link:hover { text-decoration: underline; }
 </style>
 
 <script>
@@ -2484,8 +2493,9 @@ code.path {
   function loadAbout() {
     return API.about().then(function (r) {
       if (!r || typeof r !== 'object') return;
-      text($('ver-badge'), 'v' + (r.version || '-'));
-      text($('about-version'), r.version || '-');
+      text($('ver-badge'), 'v' + (r.version || '-') + (r.codename ? ' ' + r.codename : ''));
+      if (r.version_full) $('ver-badge').setAttribute('title', r.version_full);
+      text($('about-version'), r.version_full || r.version || '-');
       text($('about-started'), fmtIso(r.service_started_at));
       uptimeBase = { sec: Number(r.service_uptime_sec) || 0, at: Date.now() };
       text($('about-uptime'), fmtDuration(uptimeBase.sec));
@@ -2784,9 +2794,20 @@ code.path {
     fetch('/api/changelog').then(function (r) { return r.json(); }).then(function (data) {
       if (data && data.content) {
         body.textContent = data.content;
-      } else {
-        body.textContent = '加载失败：' + ((data && data.error) || '未知错误');
+        return;
       }
+      // v2.0.4.0：安装包未随附 CHANGELOG.md 时给中文提示 + 可点的仓库链接
+      // （后端 eula.py 在找不到文件时返回 url 字段；用 DOM API 拼装，不拼字符串 HTML）
+      body.textContent = '加载失败：' + ((data && data.error) || '未知错误');
+      var url = (data && data.url) || '';
+      if (!url) return;
+      var link = document.createElement('a');
+      link.className = 'changelog-link';
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = '在仓库查看完整更新日志 →';
+      body.appendChild(link);
     }).catch(function () {
       body.textContent = '请求失败，请检查服务状态';
     });

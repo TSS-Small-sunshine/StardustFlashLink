@@ -34,30 +34,71 @@ def _attach(*, base_dir):
 # ============================================================
 # CHANGELOG
 # ============================================================
+# 仓库在线版（本地文件缺失时给用户一个可点的去处，而不是裸 Errno 报错）
+CHANGELOG_GITHUB_URL = (
+    "https://github.com/TSS-Small-sunshine/StardustFlashLink/blob/main/CHANGELOG.md"
+)
+
+
+def _changelog_candidates():
+    """按优先级返回可能的 CHANGELOG.md 路径（都是绝对路径）。
+
+    为什么要有多个候选：v2.0.4.0 之前的安装包**没有**把 CHANGELOG.md 打进去，
+    真机上点「关于 → 查看更新日志」必然弹
+    `read changelog failed: [Errno 2] No such file or directory`。
+    除了在安装包里补上该文件（`packaging/setup.iss`），这里也按
+    「安装目录 → 安装目录\\docs → 上一级目录」逐个探测，兼容各种分发形态。
+    """
+    if _BASE_DIR is None:
+        return []
+    base = os.path.normpath(_BASE_DIR)
+    return [
+        os.path.join(base, "CHANGELOG.md"),              # 正常安装 / 源码运行
+        os.path.join(base, "docs", "CHANGELOG.md"),      # 若将来挪进 docs\
+        os.path.normpath(os.path.join(base, "..", "CHANGELOG.md")),  # 从子目录运行
+    ]
+
+
 def api_get_changelog():
-    """GET /api/changelog — 返回仓库根目录 CHANGELOG.md 内容（UTF-8 文本）。
+    """GET /api/changelog — 返回 CHANGELOG.md 内容（UTF-8 文本）。
 
     路径说明：CHANGELOG.md 与 联网_service.py 同在仓库根目录（即 BASE_DIR）。
     安装场景下 Inno Setup 把 CHANGELOG.md 复制到 {app}（与 联网_service.py 同级），
     所以生产环境也是 BASE_DIR/CHANGELOG.md，与开发环境一致。
 
     返回 (status_code, dict) 元组 — 便于 web_api.py 直接转发。
+    找不到文件时返回**中文可读提示 + url 字段**（安装包漏打包时用户能自助），
+    但绝不把裸路径拼进报错以外的任何用户可见响应。
     """
     if _BASE_DIR is None:
         return 500, {"error": "eula module not attached", "content": ""}
-    cl_path = os.path.join(_BASE_DIR, "CHANGELOG.md")
-    cl_path = os.path.normpath(cl_path)
-    try:
-        with open(cl_path, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError as exc:
-        # 缺失 / 权限 / 编码等任何 OS 级错误都走这里，统一返回 500
-        return 500, {"error": "read changelog failed: {}".format(exc), "content": ""}
-    return 200, {
-        "content": content,
-        "size": len(content),
-        "version": VERSION,
+    candidates = _changelog_candidates()
+    for cl_path in candidates:
+        if not os.path.isfile(cl_path):
+            continue
+        try:
+            with open(cl_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as exc:
+            # 权限 / 占用等 OS 级错误
+            return 500, {
+                "error": "读取更新日志失败：{}".format(exc.strerror or exc),
+                "content": "",
+                "url": CHANGELOG_GITHUB_URL,
+            }
+        return 200, {
+            "content": content,
+            "size": len(content),
+            "version": VERSION,
+            "path": cl_path,
+        }
+    return 500, {
+        "error": ("本机没有更新日志文件（CHANGELOG.md 未随安装包分发）。"
+                  "可在仓库查看完整更新日志。"),
+        "content": "",
+        "url": CHANGELOG_GITHUB_URL,
     }
+
 
 
 # ============================================================
