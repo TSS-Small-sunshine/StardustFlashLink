@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.1
+;   版本: v2.0.2.4
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.1.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.2.4.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.1"
+  #define MyAppVersion "2.0.2.4"
 #endif
 #define MyAppPublisher "星尘闪连"
 #define MyAppExeName "联网_service.py"
@@ -41,6 +41,11 @@ Name: "startservice"; Description: "安装完成后立即启动服务"; GroupDes
 
 [Files]
 Source: "..\联网_service.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\version.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\protocol.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\eula.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\web_api.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.json.template"; DestDir: "{app}"; DestName: "config.json"; Flags: ignoreversion onlyifdoesntexist
@@ -209,14 +214,14 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.1）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.2.4）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppRotateFiles 1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppRotateBytes 1048576', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin AppExit Default Restart', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin AppExit 0 Restart', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin AppExit Default Ignore', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin AppExit 0 Ignore', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // 启动（仅当用户在 wizard 勾选）
   if IsTaskSelected('startservice') then

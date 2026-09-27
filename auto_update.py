@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -53,11 +54,13 @@ BACKUP_RETENTION_DAYS = 7
 
 # GitHub 镜像（国内加速；首个 None 表示主源，按顺序 fallback）
 # 镜像格式：prefix + 原始 URL；原始 URL 必须是 https://... 开头以避免双斜杠。
+#
+# P1-2：**API 元数据只信主源 api.github.com**。
+# 镜像能同时伪造 releases JSON、asset URL 和 digest —— 于是「SHA256 校验」校验的是
+# 攻击者提供的值（校验值与被校验对象同源），等于没有校验。下载仍可用镜像，
+# 但 digest 一律来自主源结果。
 GITHUB_API_MIRRORS = (
-    None,                    # 主源 api.github.com
-    "https://gh-proxy.com",
-    "https://ghfast.top",
-    "https://mirror.ghproxy.com",
+    None,                    # 主源 api.github.com（唯一可信的元数据源）
 )
 GITHUB_DOWNLOAD_MIRRORS = (
     None,                    # 主源 objects.githubusercontent.com / github.com
@@ -486,6 +489,13 @@ def _do_update_now():
             return {"ok": False, "error": msg}
         remote_ver, asset_url, digest, asset_size, published = latest
 
+        # P1-3：远端版本串白名单（防 `..\` 穿越拼进 %TEMP% 文件名）
+        if not re.fullmatch(r"[0-9A-Za-z._-]{1,32}", remote_ver):
+            msg = "远端版本串非法：{!r}".format(remote_ver)
+            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
+
         # —— 3. 比较版本 ——
         cmp = _compare_versions(VERSION, remote_ver)
         if cmp is None:
@@ -529,8 +539,19 @@ def _do_update_now():
 
         _log_upgrade("INFO", "下载完成：{} 字节".format(written))
 
-        # —— 5. 校验 SHA256 ——
-        if digest and not _verify_sha256(installer_path, digest):
+        # —— 5. 校验 SHA256（P0-2：fail-closed）——
+        # 旧行为是 fail-open：digest 为 None 时**不做任何校验**直接执行安装器。
+        # 现在拿不到 digest 就拒绝安装 —— 宁可不升级，也不执行来路不明的 exe。
+        if not digest:
+            msg = "远端未返回 digest，无法校验完整性，拒绝安装"
+            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
+            _log_upgrade("ERROR", msg)
+            try:
+                os.remove(installer_path)
+            except OSError:
+                pass
+            return {"ok": False, "error": msg}
+        if not _verify_sha256(installer_path, digest):
             try:
                 os.remove(installer_path)
             except OSError:
@@ -539,8 +560,7 @@ def _do_update_now():
             _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
             _log_upgrade("ERROR", "{}（期望 {}）".format(msg, digest[:16] + "..."))
             return {"ok": False, "error": msg}
-        elif digest:
-            _log_upgrade("INFO", "SHA256 校验通过")
+        _log_upgrade("INFO", "SHA256 校验通过")
 
         # —— 6. 备份当前脚本 ——
         backup = _backup_service_py()
@@ -737,13 +757,11 @@ def _post_upgrade_startup():
             except OSError:
                 pass
 
-        # 恢复 AppExit（与 setup.iss 一致：Default Restart + 0 Restart）
-        try:
-            _set_nssm_appexit("Default Restart")
-            _set_nssm_appexit("0 Restart")
-            _log_upgrade("INFO", "AppExit 已恢复为 Default Restart / 0 Restart")
-        except Exception as exc:  # noqa: BLE001
-            _log_upgrade("WARN", "恢复 AppExit 失败: {}".format(exc))
+        # AppExit 策略归**安装器**所有（P0-7）：setup.iss / install.bat 统一设
+        # `Default Ignore` + `0 Ignore`（防端口冲突时 NSSM 死循环重启）。
+        # 这里**不再写回 Restart** —— 旧行为每次启动都把 v2.0.2.3 刚修的
+        #「端口占用无限重启循环」修复原样撤销，且与 setup.iss 的 Ignore 打架。
+        _log_upgrade("INFO", "AppExit 策略由安装器维持（Default Ignore / 0 Ignore），启动钩子不再覆盖")
     except Exception as exc:  # noqa: BLE001
         _log_upgrade("WARN", "启动钩子异常: {}".format(exc))
 

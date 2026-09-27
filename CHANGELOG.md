@@ -5,6 +5,81 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.2.4 (fix/security) — 2026-09-27
+
+> 本版把「4 个升级相关按钮点了就崩」和几处安全口子一起修掉，并改掉发布策略。
+
+### 🔴 修复（P0）
+- `fix(web_api)`: 修 6 个未定义裸名 —— 补 `import time` + 5 处跨模块调用加 `_auto_update_mod.` 前缀。
+  修前「立即检查更新 / 立即升级 / 升级开关 / 升级历史」4 个功能**运行时必然 NameError**。（P0-1）
+- `fix(auto_update)`: SHA256 校验改 **fail-closed** —— `digest` 缺失即拒绝安装并删除已下载安装器。（P0-2）
+- `fix(password)`: `_load_password_from_disk` 跳过空行与 `#` 注释行；`password.txt.template` 内容清空。
+  新装机不再把模板提示当成真实密码去登录。（P0-3）
+- `fix(restart)`: 「重启服务」改为优先 `nssm restart DrcomAutoLogin`。AppExit=Ignore 时 `os._exit(0)`
+  之后 NSSM 不会拉起，旧行为 = 点一次永久停机；找不到 nssm 才退回旧路径。（P0-7）
+- `fix(installer)`: `install.bat` 的 `AppExit` 由 `Restart` 改为 `Ignore`，与 `setup.iss` 统一；
+  `_post_upgrade_startup` **不再每次启动写回 `Restart`**（旧行为把 v2.0.2.3 的 `a77ea46`
+  「端口占用不死循环重启」修复原样撤销）。（P0-7）
+
+### 🟠 安全（P1）
+- `security(web_api)`: Host 白名单（挡 DNS rebinding）+ 写接口强制 `X-Requested-With: DrcomUI`
+  + `Origin` 同源校验；页面内 `fetch` 由注入脚本自动带头。**（P1-1 部分完成：token 鉴权仍待做）**
+- `security(auto_update)`: `digest` **只信主源 `api.github.com`**，删除 API 镜像 fallback
+  —— 镜像曾可同时伪造 releases JSON / asset URL / digest，等于校验同源。（P1-2）
+- `security(auto_update)`: 静默升级**默认关闭**（`auto_update_enabled: false`）+ 远端版本串白名单
+  （防 `..\` 穿越拼进 `%TEMP%` 文件名）。（P1-3）
+- `security(web_api)`: `/api/config/export` 不再打包明文 `password.txt`，
+  改为在 `manifest.json` 记录 `password_status`（`set` / `missing`）。（P1-4）
+
+### 🚀 发布（P1-5）
+- `ci(installer)`: 安装包发布改**版本化非 prerelease release**（tag `v{版本}`）——
+  `/releases/latest` 只返回非 prerelease，此前自动升级拿不到版本；rolling `installer` prerelease
+  仍保留作固定下载链接。
+- 版本字面量统一：`version.py` / `setup.iss MyAppVersion` / NSSM 服务描述 / `install.bat` / 模块 docstring。
+
+### 说明
+- 自动升级默认关闭 ≠ 不可用：Web UI 里仍可手动「立即升级」；等真机验证过升级链路后再评估默认开启。
+- 安装包产物名保持 `StardustFlashLink-Setup-v2.0.2.4.exe`（不变量 I9）。
+
+## v2.0.2.3 (hotfix) — 2026-09-21
+
+- chore: 删除 `_debug/` 6 个临时诊断脚本 + 加 `.gitignore` (`f632fc3`)
+- fix(password): 移除 `pwd_value=` 注入, 改用 `get_password()` 函数; 同步清理 `web_api.py` line 166 死代码 + `protocol.py` `_attach` 签名 (`3021ad5`)
+- fix(installer): `AppExit Default Restart` → `Default Ignore`, 端口冲突时 NSSM 不死循环重启 (`a77ea46`)
+- fix(ci): `version.py` 缺 VERSION 时 `::error` + `exit 1`, 不再静默 fallback 2.0.1 (`b908e6c`)
+- 版本号字面量 bump: `2.0.2.2` → `2.0.2.3` (4 处: `version.py`, `setup.iss` MyAppVersion, `setup.iss` NSSM Description, `联网_service.py` docstring)
+
+4 个 P0 commit 已在 `hotfix/v2.0.2.2` 上, 此 commit 仅 bump 字面量 + CHANGELOG。
+
+## v2.0.2.2 (hotfix) — 2026-09-21
+- fix(web_api): `_schedule_success_clear` 裸名调用在解耦后 NameError，改为 `_auto_update_mod._schedule_success_clear()`
+- web_api.py `_attach()` docstring 注释"占位"改为正确的"跨模块调用走 _auto_update_mod"约定
+- packaging/version.py/setup.iss/联网_service.py docstring: 2.0.2.1 → 2.0.2.2
+
+## v2.0.2.1 (hotfix — 装包 + 启动修) — 2026-09-21
+
+- `fix(installer)`: v2.0.2 装包缺 5 个解耦模块 (`version.py` / `protocol.py` / `eula.py` / `web_api.py` / `auto_update.py`), 启动崩 `ModuleNotFoundError: No module named 'version'`。在 `packaging/setup.iss` [Files] 段加 5 行 `Source: "..\xxx.py"`, `version.py` VERSION 2.0.1 → 2.0.2.1。
+- `fix(ci)`: `.github/workflows/build-installer.yml` 之前硬编码 `APP_VERSION="2.0.1"`, 改为从 `version.py` 读取 (`-c "import version; print(version.VERSION)"`)。
+- `fix(startup)`: embeddable Python 默认 `sys.path[0]` 是 stdlib zip (`python312.zip`) 而不是脚本目录, 联网_service.py 头部加 `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))` 3 行兜底, 跨部署环境都生效。
+- 自启动不触发登录的退避算法 bug: `run_periodic` 计算 `wait_sec = max(interval_sec, delta)` 是反模式 (interval 永远 > backoff), 改为 `wait_sec = min(interval_sec, delta)`。`_startup_trigger` 强制退避 0, 开机早期网络未稳时**不**该有退避历史。
+- 释出: 装包资产覆盖到 v2.0.2 release (exe 文件名 `StardustFlashLink-Setup-v2.0.2.1.exe`), git tag 仍 v2.0.2。
+- 4 commits 领先 main (cf235a2 + 301e37e + 3b29087 + de0d0d7)。
+
+## v2.0.2 (字面量升级) — 2026-09-21
+
+- `version.py`: VERSION "2.0.1" → "2.0.2"
+- `packaging/setup.iss`: MyAppVersion "2.0.1" → "2.0.2" + 注释 / 输出文件名 / NSSM Description
+- `install.bat` / `uninstall.bat` / `packaging/build.ps1`: 注释 / echo / `$AppVersionText`
+- `.github/workflows/build-installer.yml`: fallback `$v` "2.0.1" → "2.0.2"
+- `README.md` / `packaging/README.md`: 当前版本 + 安装包文件名引用 (4 处)
+- `联网_service.py`: 文件头 docstring v2.0.1 → v2.0.2
+- `CHANGELOG.md`: 加 v2.0.2 段 (解耦 + 退避 max→min bug fix)
+- 18 处字面量升级, 0 临时文件 / 0 `git add .` 误带
+
+注: v2.0.2 release 资产后续被替换为 v2.0.2.1.exe (hotfix/v2.0.2.1 commit), git tag v2.0.2 保留指向 e0354df。
+
+---
+
 ## [v2.0.0] - 2026-09-20
 
 进入 2.0 时代。

@@ -20,7 +20,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
+import time
 import urllib.error
 import urllib.parse
 import zipfile
@@ -44,7 +46,7 @@ CONFIG_IMPORT_MAX_BYTES = 4 * 1024 * 1024  # 4MB 安全上限
 # ============================================================
 def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
             # 字典（直接挂到本模块 globals，API 代码用原名访问）
-            state, state_lock, pwd_value, pwd_lock,
+            state, state_lock, pwd_lock,
             config_file, password_file, upgrade_log_file,
             default_config,
             allowed_suffixes, allowed_intervals, allowed_update_intervals,
@@ -71,7 +73,6 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
     g["STATE_LOCK"] = state_lock
     g["BACKOFF"] = state.get  # 占位，web_api 不直接读 BACKOFF
     g["RUN_LOCK"] = run_lock
-    g["_PWD_VALUE"] = pwd_value
     g["PWD_LOCK"] = pwd_lock
     # 路径常量
     g["BASE_DIR"] = base_dir
@@ -99,7 +100,7 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
     if eula_api_get_changelog is None:
         from eula import api_get_changelog as eula_api_get_changelog  # noqa: E402
     g["api_get_changelog"] = eula_api_get_changelog
-    # auto_update 模块（commit 5 之后才注入；这里只是占位）
+    # auto_update 模块（v2.0.2 解耦后注入到 _auto_update_mod; 调用其函数请用 _auto_update_mod._func_name()）
     g["_auto_update_mod"] = auto_update_mod
 
 
@@ -163,7 +164,7 @@ def api_get_config():
     cfg = _load_config()
     cfg = {k: cfg[k] for k in DEFAULT_CONFIG if k in cfg}
     with PWD_LOCK:
-        pwd_set = _PWD_VALUE is not None
+        pwd_set = _get_password() is not None
     return {
         **cfg,
         "password_status": "set" if pwd_set else "missing",
@@ -315,12 +316,29 @@ def api_get_changelog():
 
 
 def api_post_restart(handler):
-    """返回响应后用 os._exit(0) 退出，由 NSSM 重启。"""
-    def _delayed_exit():
+    """重启服务（P0-7）。
+
+    优先 `nssm restart DrcomAutoLogin`：AppExit 策略是 `Ignore`（v2.0.2.3 起，
+    防端口冲突时 NSSM 死循环重启），因此 `os._exit(0)` 之后 NSSM **不会**再拉起，
+    点「重启服务」会变成永久停机。只有 nssm 不可用时才退回旧行为。
+    """
+    def _delayed_restart():
+        nssm = os.path.join(BASE_DIR, "tools", "nssm.exe")
+        if os.path.isfile(nssm):
+            try:
+                proc = subprocess.run([nssm, "restart", "DrcomAutoLogin"], timeout=30, check=False)
+                if proc.returncode == 0:
+                    logger.info("已通过 nssm restart 重启服务")
+                    return
+                logger.warning("nssm restart 返回码 %s，退回 os._exit(0)", proc.returncode)
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.warning("nssm restart 失败: %s，退回 os._exit(0)", exc)
+        else:
+            logger.warning("找不到 %s，退回 os._exit(0)", nssm)
         STOP_EVENT.set()
         time.sleep(0.3)
         os._exit(0)
-    threading.Thread(target=_delayed_exit, daemon=True).start()
+    threading.Thread(target=_delayed_restart, daemon=True).start()
     return 200, {"ok": True, "message": "服务正在重启"}
 
 
@@ -329,7 +347,7 @@ def api_post_restart(handler):
 # ============================================================
 def api_get_update_status():
     """GET /api/update/status — 当前升级状态快照。"""
-    _schedule_success_clear()  # 顺手清理过期绿 banner
+    _auto_update_mod._schedule_success_clear()  # 顺手清理过期绿 banner（v2.0.2.3.2 fix: 解耦后跨模块调用走 _auto_update_mod 注入）
     cfg = _load_config()
     snap = _snapshot_state()
     return {
@@ -352,11 +370,12 @@ def api_get_update_status():
 def api_post_update_check(payload):
     """POST /api/update/check — 立即触发一次 GitHub 检查（不等后台线程）。"""
     # 异步执行，避免阻塞 HTTP 响应
+    # P0-1：解耦后跨模块调用必须走 _auto_update_mod（原裸名 _do_check_now 会 NameError）
     def _runner():
         try:
-            _do_check_now()
+            _auto_update_mod._do_check_now()
         except Exception as exc:  # noqa: BLE001
-            _log_upgrade("ERROR", "手动检查异常: {}".format(exc))
+            _auto_update_mod._log_upgrade("ERROR", "手动检查异常: {}".format(exc))
     threading.Thread(target=_runner, daemon=True).start()
     return 200, {"ok": True, "message": "已提交检查任务"}
 
@@ -364,14 +383,16 @@ def api_post_update_check(payload):
 def api_post_update_install(payload):
     """POST /api/update/install — 立即开始升级。"""
     # 异步执行完整升级流程（耗时较长，HTTP 先返回）
+    # P0-1：同上，_do_update_now / _log_upgrade / _set_update_state 全走 _auto_update_mod
     def _runner():
         try:
-            _do_update_now()
+            _auto_update_mod._do_update_now()
         except Exception as exc:  # noqa: BLE001
-            _log_upgrade("ERROR", "手动升级异常: {}".format(exc))
-            _set_update_state(update_state="error", update_progress=0,
-                              update_progress_message="升级异常：{}".format(exc),
-                              update_last_error=str(exc))
+            _auto_update_mod._log_upgrade("ERROR", "手动升级异常: {}".format(exc))
+            _auto_update_mod._set_update_state(
+                update_state="error", update_progress=0,
+                update_progress_message="升级异常：{}".format(exc),
+                update_last_error=str(exc))
     threading.Thread(target=_runner, daemon=True).start()
     return 200, {"ok": True, "message": "已提交升级任务"}
 
@@ -389,7 +410,7 @@ def api_post_update_toggle(payload):
         _save_config(cfg)
     except (ValueError, OSError) as exc:
         return 400, {"ok": False, "error": str(exc)}
-    _log_upgrade("INFO", "auto_update_enabled 改为 {}".format(enabled))
+    _auto_update_mod._log_upgrade("INFO", "auto_update_enabled 改为 {}".format(enabled))
     return 200, {"ok": True, "auto_update_enabled": enabled}
 
 
@@ -400,7 +421,7 @@ def api_get_update_history():
         try:
             with open(UPGRADE_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
                 all_lines = f.readlines()
-            lines = [ln.rstrip("\r\n") for ln in all_lines[-UPGRADE_HISTORY_MAX_LINES:]]
+            lines = [ln.rstrip("\r\n") for ln in all_lines[-_auto_update_mod.UPGRADE_HISTORY_MAX_LINES:]]
         except OSError as exc:
             return {"lines": [], "error": str(exc), "path": UPGRADE_LOG_FILE}
     return {"lines": lines, "path": UPGRADE_LOG_FILE}
@@ -410,7 +431,11 @@ def api_get_update_history():
 # 配置导入/导出（zip）
 # ============================================================
 def _build_config_export_zip():
-    """把当前 config.json + password.txt（如有）+ manifest.json 打包成 bytes。"""
+    """把当前 config.json + manifest.json 打包成 bytes。
+
+    P1-4：**不再**打包明文 password.txt —— README 承诺「接口永不回传密码原文」，
+    之前这个端点直接证伪了该承诺。改为在 manifest 里记录密码是否已设置。
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
         manifest = {
@@ -419,15 +444,15 @@ def _build_config_export_zip():
             "service_version": VERSION,
             "tool": CONFIG_EXPORT_TOOL,
         }
+        pwd_path = os.path.join(BASE_DIR, "password.txt")
+        manifest["password_status"] = (
+            "set" if os.path.isfile(pwd_path) and os.path.getsize(pwd_path) > 0 else "missing"
+        )
         zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
         config_path = os.path.join(BASE_DIR, "config.json")
         if os.path.isfile(config_path):
             with open(config_path, "rb") as f:
                 zf.writestr("config.json", f.read())
-        pwd_path = os.path.join(BASE_DIR, "password.txt")
-        if os.path.isfile(pwd_path):
-            with open(pwd_path, "rb") as f:
-                zf.writestr("password.txt", f.read())
     return buf.getvalue()
 
 
@@ -527,9 +552,44 @@ class _Handler(BaseHTTPRequestHandler):
                     params[k] = v
         return path, params
 
+    def _check_request(self):
+        """P1-1：Host 白名单 + 写请求自定义头 + Origin 同源校验。返回 True = 放行。
+
+        - Host 校验挡 DNS rebinding（攻击者域名解析到 127.0.0.1 后绕过同源）；
+        - 写请求要求 `X-Requested-With: DrcomUI`（页面内脚本自动带），
+          跨站页面无法伪造该头 —— 非简单请求会触发预检，而服务端不返回任何
+          CORS 允许头，因此纯 CSRF 被阻断；
+        - Origin 存在时必须是本机同源。
+        """
+        port = self.server.server_address[1]
+        allowed_hosts = ("127.0.0.1:%d" % port, "localhost:%d" % port)
+        host = self.headers.get("Host", "")
+        if host not in allowed_hosts:
+            _log("拒绝非法 Host 请求：%r（%s）", host, self.path, level=logging.WARNING)
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        if self.command == "POST":
+            if self.headers.get("X-Requested-With") != "DrcomUI":
+                _log("拒绝缺少 X-Requested-With 的写请求：%s", self.path, level=logging.WARNING)
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+            origin = self.headers.get("Origin")
+            allowed_origins = ("http://127.0.0.1:%d" % port, "http://localhost:%d" % port)
+            if origin and origin not in allowed_origins:
+                _log("拒绝跨源写请求：Origin=%r（%s）", origin, self.path, level=logging.WARNING)
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+        return True
+
     def _serve_html(self):
-        """返回内嵌的 SPA HTML 页面。"""
-        body = _HTML_PAGE.encode("utf-8")
+        """返回内嵌的 SPA HTML 页面（注入写请求头包装脚本）。"""
+        body = _HTML_PAGE.replace("<head>", "<head>\n" + _FETCH_HEADER_JS, 1).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -538,6 +598,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self._check_request():
+            return
         path, params = self._parse_url()
         try:
             if path == "/" or path == "/index.html":
@@ -598,6 +660,8 @@ class _Handler(BaseHTTPRequestHandler):
             _send_json(self, 500, {"error": "internal: {}".format(exc)})
 
     def do_POST(self):
+        if not self._check_request():
+            return
         path, _params = self._parse_url()
         # —— 二进制上传（zip）在 JSON 解析之前专路分发 —— 现有 JSON 类端点行为零变更
         if path == "/api/config/import":
@@ -653,6 +717,18 @@ class _Handler(BaseHTTPRequestHandler):
             logger.exception("POST %s 异常: %s", path, exc)
             _send_json(self, 500, {"ok": False, "error": "internal: {}".format(exc)})
 
+
+# P1-1 前端配合：给页面内所有 fetch 自动补 `X-Requested-With: DrcomUI`。
+# 服务端 do_POST 强制要求该头；跨站页面发不出非简单请求（会触发预检，
+# 而服务端不返回任何 CORS 允许头），因此纯 CSRF 被阻断。
+_FETCH_HEADER_JS = (
+    "<script>/* DrcomAutoLogin: 同源写请求自动带 X-Requested-With */\n"
+    "(function(){var f=window.fetch;if(!f){return;}"
+    "window.fetch=function(u,o){o=o||{};var h=o.headers||{};"
+    "if(typeof Headers!=='undefined'&&h instanceof Headers){h.set('X-Requested-With','DrcomUI');}"
+    "else{h['X-Requested-With']='DrcomUI';}"
+    "o.headers=h;return f.call(window,u,o);};})();</script>\n"
+)
 
 _HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
