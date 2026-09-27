@@ -632,7 +632,7 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         'set "RC=' + rc_path + '"',
         "rem ---- 1) 静默安装（任务：桌面图标 + 启动服务）----",
         '"' + installer_path + '" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL'
-        ' /CLOSEAPPLICATIONS /TASKS=desktopicon,startservice /LOG="%LOG%"',
+        ' /CLOSEAPPLICATIONS /TASKS=desktopicon,startservice,trayicon /LOG="%LOG%"',
         'echo installer_rc=%ERRORLEVEL%>"%RC%"',
         "rem ---- 2) 安装日志归档到安装目录 ----",
         'if exist "%LOG%" copy /y "%LOG%" "' + app_dir + '\\logs\\installer-silent.log" >nul 2>&1',
@@ -708,7 +708,8 @@ def _launch_installer(installer_path):
         "/CLOSEAPPLICATIONS",
         # v2.0.4.2：补 desktopicon —— 与计划任务路径保持一致（否则公共桌面快捷方式
         # 会被 Inno 当成「未选中」，升级后桌面图标还是旧的）
-        "/TASKS=desktopicon,startservice",
+        # v2.0.6.0：补 trayicon —— 同理，否则升级会摘掉托盘的登录启动项
+        "/TASKS=desktopicon,startservice,trayicon",
         "/LOG=" + log_path,
     ]
     # Windows 进程创建标志（详见 MSDN CreateProcess dwCreationFlags）

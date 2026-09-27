@@ -5,6 +5,52 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.6.0 (feat) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> B2：**托盘小程序 + 断线通知**。新组件，向后兼容（`PATCH` +1）。
+
+### ✨ 新增
+- `feat(tray)`: 新增 `tray.py` —— **登录会话里的托盘小程序**（安装器默认勾选「开机自动启动托盘」）。
+  为什么不能由服务直接弹通知：服务是 LocalSystem、跑在 **session 0**，与用户桌面会话隔离，
+  `Shell_NotifyIcon` / 气泡从服务里调出去等于扔进黑洞。所以必须由一个随登录启动的**用户进程**来做。
+- 行为：每 10 秒轮询本机 `http://127.0.0.1:<ui_port>/api/status`（端口从 `config.json` 读，
+  改过端口也能连上），状态迁移时弹气泡：
+  | 迁移 | 通知 |
+  | --- | --- |
+  | 首次轮询 | **不弹**（开机时服务可能还在启动，别吓人）|
+  | 在线 → 掉线 | ⚠️「已掉线，服务正在尝试重新登录…」|
+  | 掉线 → 在线 | ✅「已恢复登录」|
+  | 连续 3 次（≈30s）拿不到服务 | ⚠️「服务未响应」（偶发抖动不弹）|
+- 右键菜单：**打开配置页** / **立即登录**（`POST /api/login`，带 `X-Requested-With: DrcomUI`）/
+  **打开日志目录** / **退出托盘**；双击图标 = 打开配置页；鼠标悬停显示当前状态（含 Wi-Fi 名）。
+- 单实例：`CreateMutexW`（`Local\DrcomAutoLoginTray`）—— 句柄随进程退出由内核释放，
+  被任务管理器强杀也不会留残留锁。
+- 日志：`%LOCALAPPDATA%\DrcomAutoLogin\tray.log`（托盘是非管理员进程，写不了 Program Files）。
+  超过 1 MB 自动轮转一份 `.1`。
+
+### 🔧 实现（只用标准库，无第三方依赖）
+- `ctypes` 直调 Win32：`RegisterClassExW` + 隐藏窗口 + `Shell_NotifyIconW(NIM_ADD/MODIFY/DELETE)` +
+  `TrackPopupMenu(TPM_RETURNCMD)` + `SetTimer` 轮询。**所有句柄（HWND/HICON/HMENU/HMODULE）都显式
+  声明 `argtypes`/`restype`** —— 64 位下不声明就会按 C int 传，句柄被截断后托盘静默消失
+  （`--self-test` 第一版就撞上 `OverflowError`，已修）。
+- 可测性：`classify()` / `status_text()` / `decide_events()` 都是**纯函数**，通知规则全部单测覆盖；
+  另有 `--check`（单次判定，CI / 排障）与 `--self-test`（真加一次图标 + 弹一次气泡，退出码即结论）。
+- `setup.iss`：新增 `[Tasks] trayicon`、`[Files] tray.py`、`[Registry]`（HKCU 的 Run 项，
+  `uninsdeletevalue` + `Tasks: trayicon`）、`[Run]`（装完勾选即可立刻起，`skipifsilent` 保证
+  静默升级不会在这里起进程）。
+- `auto_update.py`：两处 `/TASKS=` 都补上 `trayicon` —— 否则升级会把登录启动项当成「未选中」摘掉
+  （和 v2.0.4.2 补 `desktopicon` 同一个坑）。
+
+### ⚠️ 已知取舍
+- 自动升级后，**已经在跑的旧托盘**会继续用旧代码跑到下次注销/重启（它轮询的是同一个 HTTP 接口，
+  功能不受影响）；新版本的文件已经就位，下次登录自动用新的。之所以不做「检测到升级就自重启」，
+  是因为重启与互斥体释放之间有竞态，做不好会变成**托盘静默消失**，比多跑一会儿旧代码糟得多。
+
+### 🧪 测试
+- 冒烟新增 17 条：8 条接线 / 依赖检查 + 9 条**行为级**通知规则（首轮不弹、掉线、恢复、抖动抑制、去重、四态归类）。
+- 真机：`python tray.py --check` 连上本机服务 → 判定 `ok（已登录 ✓）`；
+  `python tray.py --self-test` → 退出码 0（`NIM_ADD`/`NIM_DELETE` 均被通知区接受）。
+
 ## v2.0.5.0 (feat) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > B1：**网络位置守卫** —— 只在校园网里才干活。接口向后兼容（`PATCH` +1，配置**新增**字段）。
