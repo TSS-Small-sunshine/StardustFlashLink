@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.6.0
+;   版本: v2.0.6.1
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.6.0.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.6.1.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.6.0"
+  #define MyAppVersion "2.0.6.1"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -57,7 +57,7 @@ FinishedLabel=[name] 已安装完成。%n%n服务会在后台自动运行，双�
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"
 Name: "startservice"; Description: "安装完成后立即启动服务"; GroupDescription: "附加任务:"
-; v2.0.6.0 新增：登录会话里的托盘小程序（断线通知 + 状态图标）
+; v2.0.6.1 新增：登录会话里的托盘小程序（断线通知 + 状态图标）
 ; 注意：服务在 session 0（LocalSystem）里弹不出任何通知，必须由用户会话里的进程来做。
 Name: "trayicon"; Description: "开机自动启动托盘（断线通知 / 状态图标）"; GroupDescription: "附加任务:"
 
@@ -68,7 +68,7 @@ Source: "..\protocol.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\eula.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\web_api.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
-; 托盘小程序（v2.0.6.0）：随登录启动，轮询本机 /api/status 弹断线通知
+; 托盘小程序（v2.0.6.1）：随登录启动，轮询本机 /api/status 弹断线通知
 Source: "..\tray.py"; DestDir: "{app}"; Flags: ignoreversion
 ; Web UI 品牌图片：服务端 /branding/* 静态路由从这里读取（顶栏 logo + favicon）
 Source: "branding\web-logo-*.png"; DestDir: "{app}\branding"; Flags: ignoreversion
@@ -95,10 +95,14 @@ Name: "{group}\卸载 Dr.COM 校园网自动登录"; Filename: "{uninstallexe}"
 Name: "{commondesktop}\Dr.COM 校园网自动登录"; Filename: "{app}\启动UI.bat"; Tasks: desktopicon; IconFilename: "{app}\branding\app.ico"; IconIndex: 0
 
 [Registry]
-; v2.0.6.0：托盘随登录启动（HKCU，只对装它的那个用户生效）。
+; v2.0.6.1：托盘随登录启动。
+; **必须用 HKLM 而不是 HKCU**：自动升级的执行器是 `schtasks /ru SYSTEM`（见 auto_update.py），
+; 那时 HKCU 指的是 SYSTEM 的配置单元（systemprofile），写进去真实用户登录时压根不会启动。
+; HKLM 的 Run 项对每个登录用户都生效；多用户同时登录也不会起两个 —— tray.py 用
+; `Local\DrcomAutoLoginTray` 互斥体（Local = 每个登录会话一个）保证一个会话只有一个托盘。
 ; uninsdeletevalue → 卸载时自动清掉；Tasks: trayicon → 和安装向导里的勾选联动。
 ; 用 pythonw.exe（无控制台窗口），不弹黑框。
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; \
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; \
   ValueName: "DrcomAutoLoginTray"; \
   ValueData: """{app}\python\pythonw.exe"" ""{app}\tray.py"""; \
   Flags: uninsdeletevalue; Tasks: trayicon
@@ -266,7 +270,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.6.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.6.1）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

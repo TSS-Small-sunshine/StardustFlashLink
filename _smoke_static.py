@@ -245,6 +245,14 @@ check("v2.0.6.0 tray.py 随包分发", 'Source: "..\\tray.py"' in _iss_src)
 check("v2.0.6.0 托盘随登录启动（HKCU Run 项 + 卸载自动清）",
       "DrcomAutoLoginTray" in _iss_src and "uninsdeletevalue" in _iss_src)
 check("v2.0.6.0 托盘任务在安装向导里可选", 'Name: "trayicon"' in _iss_src)
+# v2.0.6.1：Run 项必须挂 HKLM —— 自动升级是 schtasks /ru SYSTEM 跑的，
+# 那时 HKCU 写进的是 SYSTEM 的配置单元，真实用户登录不会自启托盘
+_tray_reg = _iss_src.split("[Registry]")[1].split("[Run]")[0] if "[Registry]" in _iss_src else ""
+check("v2.0.6.1 托盘自启项挂 HKLM（不能是 HKCU）",
+      "Root: HKLM;" in _tray_reg and "Root: HKCU;" not in _tray_reg
+      and 'Subkey: "Software\\Microsoft\\Windows\\CurrentVersion\\Run"' in _tray_reg)
+check("v2.0.6.1 托盘会自己识别「已卸载」并退出（不留孤儿图标）",
+      "_log(\"安装目录里已经没有 tray.py" in _tray_src and "missing_streak >= 2" in _tray_src)
 check("v2.0.6.0 升级时保留托盘任务（否则升级会摘掉登录启动项）",
       _au_src.count("desktopicon,startservice,trayicon") == 2)
 check("v2.0.6.0 托盘不引入第三方依赖（pystray/requests 之类都不许）",
@@ -454,7 +462,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.6.0", version.VERSION == "2.0.6.0", version.VERSION)
+check("版本 = 2.0.6.1", version.VERSION == "2.0.6.1", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
