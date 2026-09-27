@@ -1,14 +1,18 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.3.0
+;   版本: v2.0.4.0
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.3.0.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.4.0.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.3.0"
+  #define MyAppVersion "2.0.4.0"
+#endif
+; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
+#ifndef MyAppCodename
+  #define MyAppCodename "Sirius"
 #endif
 #define MyAppPublisher "星尘闪连"
 #define MyAppExeName "联网_service.py"
@@ -16,6 +20,7 @@
 [Setup]
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion} "{#MyAppCodename}"
 AppPublisher={#MyAppPublisher}
 LicenseFile=branding\EULA.rtf
 DefaultDirName={autopf}\DrcomAutoLogin
@@ -49,6 +54,9 @@ Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
 ; Web UI 品牌图片：服务端 /branding/* 静态路由从这里读取（顶栏 logo + favicon）
 Source: "branding\web-logo-*.png"; DestDir: "{app}\branding"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; 更新日志：Web UI「关于 → 查看更新日志」直接读 {app}\CHANGELOG.md。
+; v2.0.4.0 补打包 —— 之前没随包拷贝，弹窗必然报 "No such file or directory"。
+Source: "..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.json.template"; DestDir: "{app}"; DestName: "config.json"; Flags: ignoreversion onlyifdoesntexist
 Source: "password.txt.template"; DestDir: "{app}"; DestName: "password.txt"; Flags: ignoreversion onlyifdoesntexist
@@ -217,7 +225,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.3.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.4.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -262,9 +270,14 @@ begin
     Sleep(PollIntervalMs);
     Iterations := Iterations - 1;
   end;
-  // 超时未停：提示用户，但不阻断安装（让用户至少能把新文件复制上去）
-  MsgBox('服务未在 30 秒内停止，安装可能失败。建议先手动停止服务再重试安装。',
-         mbError, MB_OK);
+  // 超时未停：交互安装时提示用户；**静默安装绝不弹窗** ——
+  // 自动升级场景下安装器跑在服务会话里（无人在场），MsgBox 会把安装
+  // 永久挂起，导致升级反复"启动成功但装不上"（v2.0.4.0 修）。
+  if WizardSilent then
+    Log('WARN: 服务未在 30 秒内停止，继续安装（静默模式不提示）')
+  else
+    MsgBox('服务未在 30 秒内停止，安装可能失败。建议先手动停止服务再重试安装。',
+           mbError, MB_OK);
 end;
 
 // ============================================================

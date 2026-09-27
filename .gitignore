@@ -24,6 +24,12 @@ __pycache__/
 .venv/
 venv/
 
+# ---- 运行期可能含敏感信息的产物（日志 / 升级状态 / 安装器日志）----
+*.log
+update_attempt.json
+installer-silent.log
+config-export-*.zip
+
 # ---- 其它产物 ----
 *.apk
 *.exe

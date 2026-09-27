@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""静态/单元冒烟测试（v2.0.3.0 修复项）。
+"""静态/单元冒烟测试（覆盖 v2.0.2.4 安全项 + v2.0.3.0 前端/品牌路由 + v2.0.4.0 修复项）。
 
 跑法：python _smoke_static.py（在 DrcomAutoLogin-Windows 目录下）
+隐私守卫：想连真机安装目录一起查，先设 DRCOM_DATA_DIR（见文末「隐私守卫」）。
 """
 import pathlib
 import sys
@@ -51,9 +52,10 @@ tmp = tempfile.mkdtemp()
 p = os.path.join(tmp, "password.txt")
 svc.PASSWORD_FILE = p
 pathlib.Path(p).write_text("# 在此行写入你的校园网账号密码\nrealpass\n", encoding="utf-8")
-check("P0-3 跳过注释行取到真密码", svc._load_password_from_disk() == "realpass")
-pathlib.Path(p).write_text("# 只有注释\n\n", encoding="utf-8")
-check("P0-3 纯注释文件 -> None", svc._load_password_from_disk() is None)
+check("P0-3 跳过模板提示行取到真密码", svc._load_password_from_disk() == "realpass")
+# v2.0.4.0：语义收紧 —— 只有模板提示行算注释；其它 `#` 行一律按密码原文处理
+pathlib.Path(p).write_text("# 只有一行井号文本\n\n", encoding="utf-8")
+check("P0-3 非模板 # 行按密码原文处理", svc._load_password_from_disk() == "# 只有一行井号文本")
 tmpl = pathlib.Path("packaging/password.txt.template")
 check("P0-3 password.txt.template 已清空", tmpl.stat().st_size == 0, "size=%d" % tmpl.stat().st_size)
 
@@ -86,12 +88,155 @@ _page = src_web.split('_HTML_PAGE = r"""', 1)[1]
 _left = sorted(set(__import__("re").findall(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F]", _page)))
 check("v2.0.3.0 页面内无 emoji 图标", not _left, "残留=%s" % _left)
 
+# ---- v2.0.4.0：密码 / 启动钩子 / AppExit / 升级熔断 / 静默安装 ----
+# (1) 密码：不得再用 `#` 判定注释（真机上「# 包裹的密码」曾被整行吃掉）
+#     注意：这里用**合成夹具**，绝不把任何真机密码写进本文件（见文末「隐私守卫」）。
+_HASH_WRAPPED = "#Demo-Pwd-0000#"
+check("v2.0.4.0 密码不再按 # 判注释", 's.startswith("#")' not in src_svc)
+check("v2.0.4.0 只跳过模板提示行", "_PASSWORD_HINT_MARKERS" in src_svc and "_is_password_hint" in src_svc)
+_tmp_pwd = os.path.join(tmp, "password_regress.txt")
+svc.PASSWORD_FILE = _tmp_pwd
+pathlib.Path(_tmp_pwd).write_text(_HASH_WRAPPED + "\n", encoding="utf-8")
+check("v2.0.4.0 井号包裹的密码能读回", svc._load_password_from_disk() == _HASH_WRAPPED,
+      repr(svc._load_password_from_disk()))
+pathlib.Path(_tmp_pwd).write_bytes(b"\xef\xbb\xbfpwd_with_bom\n")
+check("v2.0.4.0 容忍 BOM 的密码文件", svc._load_password_from_disk() == "pwd_with_bom",
+      repr(svc._load_password_from_disk()))
+pathlib.Path(_tmp_pwd).write_text("# 在此行写入你的校园网账号密码\nrealpass2\n", encoding="utf-8")
+check("v2.0.4.0 模板提示行仍被跳过", svc._load_password_from_disk() == "realpass2")
+pathlib.Path(_tmp_pwd).write_text("# 在此行写入你的校园网账号密码\n", encoding="utf-8")
+check("v2.0.4.0 全是提示行 -> None", svc._load_password_from_disk() is None)
+
+# (2) 启动钩子必须在 auto_update _attach 之后调用（否则 LOG_DIR 未注入 → 钩子从未生效）
+check("v2.0.4.0 启动钩子在 _attach 之后",
+      src_svc.index("_auto_update_mod._attach(") < src_svc.index("_auto_update_mod._post_upgrade_startup()"))
+
+# (3) AppExit：空值视为无效 + 自愈
+check("v2.0.4.0 AppExit 空值视为无效", "if not isinstance(value, str) or not value.strip():" in src_upd)
+check("v2.0.4.0 AppExit 自愈函数在位", "_ensure_nssm_appexit_sane" in src_upd and "AppExit 自愈" in src_upd)
+check("v2.0.4.0 AppExit 优先走 nssm.exe", 'NSSM_PATH, "set", SERVICE_NAME, "AppExit", value' in src_upd)
+
+# (4) 升级熔断：同版本失败后冷却 / 上限
+check("v2.0.4.0 升级尝试记录落盘", "update_attempt.json" in src_upd and "_write_update_attempt" in src_upd)
+check("v2.0.4.0 自动重试熔断", "_auto_retry_blocked" in src_upd and "UPDATE_ATTEMPT_COOLDOWN_SEC" in src_upd)
+check("v2.0.4.0 启动钩子确认升级结果", "升级成功确认" in src_upd and "上次自动升级未生效" in src_upd)
+
+# (5) 静默安装参数 + 安装器不弹窗
+check("v2.0.4.0 installer 用 /VERYSILENT", "/VERYSILENT" in src_upd and '"/SILENT",' not in src_upd)
+check("v2.0.4.0 installer 抑制弹窗", "/SUPPRESSMSGBOXES" in src_upd and "/NORESTART" in src_upd)
+check("v2.0.4.0 installer 落盘安装日志", "installer-silent.log" in src_upd)
+_iss_src = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
+check("v2.0.4.0 setup.iss 静默不弹 MsgBox", "if WizardSilent then" in _iss_src)
+
+# (6) CHANGELOG 随包分发 + 多路径查找（真机弹窗报 "No such file or directory"）
+_src_eula = pathlib.Path("eula.py").read_text(encoding="utf-8")
+check("v2.0.4.0 CHANGELOG 已随包打包", 'Source: "..\\CHANGELOG.md"' in _iss_src)
+check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
+_eula = importlib.import_module("eula")
+_eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
+_st_missing, _pl_missing = _eula.api_get_changelog()
+_err = _pl_missing.get("error", "")
+check("v2.0.4.0 changelog 缺失 → 友好中文提示（不再是裸 Errno）",
+      _st_missing == 500 and "Errno" not in _err and "更新日志" in _err, repr(_err))
+check("v2.0.4.0 changelog 缺失时给出仓库链接", "github.com" in _pl_missing.get("url", ""))
+check("v2.0.4.0 changelog 弹窗渲染兜底链接",
+      "changelog-link" in src_web and "在仓库查看完整更新日志" in src_web)
+_eula._attach(base_dir=os.path.dirname(os.path.abspath(__file__)))
+_st_ok, _pl_ok = _eula.api_get_changelog()
+check("v2.0.4.0 changelog 正常读取", _st_ok == 200 and int(_pl_ok.get("size") or 0) > 100,
+      "status=%s size=%s" % (_st_ok, _pl_ok.get("size")))
+
+# ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
+# 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
+# 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
+import json  # noqa: E402
+import subprocess  # noqa: E402
+
+
+def _git_rc(git_args):
+    """跑 git 并返回退出码；git 不可用 / 非仓库 → None。"""
+    try:
+        proc = subprocess.run(["git"] + git_args, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, cwd=os.getcwd())
+    except OSError:
+        return None
+    return proc.returncode
+
+
+def _data_dirs():
+    """需要扫描的「数据目录」：当前目录 + 可选的 DRCOM_DATA_DIR。
+
+    真机安装目录里才有 password.txt / config.json（仓库根目录里没有），
+    所以想在本地把「安装目录的凭据」拿去反查仓库时，先设置：
+        $env:DRCOM_DATA_DIR = 'D:\\Program Files\\DrcomAutoLogin'; python _smoke_static.py
+    """
+    dirs = [pathlib.Path(".")]
+    extra = os.environ.get("DRCOM_DATA_DIR", "").strip()
+    if extra:
+        dirs.append(pathlib.Path(extra))
+    return dirs
+
+
+def _local_secrets():
+    """从本机 password.txt / config.json 收集「绝不该入库」的字符串。"""
+    found = []
+    seen = set()
+    for data_dir in _data_dirs():
+        pwd_file = data_dir / "password.txt"
+        if pwd_file.is_file():
+            try:
+                raw = pwd_file.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeDecodeError):
+                raw = ""
+            for line in raw.splitlines():
+                s = line.strip()
+                # 安装包自带的模板提示行本身就在源码里，扫它只会误报
+                if len(s) >= 6 and not svc._is_password_hint(s) and s not in seen:
+                    seen.add(s)
+                    found.append(("%s\\password.txt" % data_dir, s))
+        cfg_file = data_dir / "config.json"
+        if cfg_file.is_file():
+            try:
+                cfg = json.loads(cfg_file.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                cfg = {}
+            account = str(cfg.get("account") or "").strip()
+            if len(account) >= 6 and account not in seen:
+                seen.add(account)
+                found.append(("%s\\config.json#account" % data_dir, account))
+    return found
+
+
+_local = _local_secrets()
+if not _local:
+    print("SKIP  隐私守卫：本机无 password.txt / config.json.account（CI 环境正常）")
+else:
+    for _label, _secret in _local:
+        _rc = _git_rc(["grep", "-n", "--text", "-F", "-e", _secret, "--", "."])
+        if _rc is None:
+            print("SKIP  隐私守卫：git 不可用，无法扫描")
+            break
+        check("隐私守卫：%s 未出现在入库文件中" % _label, _rc == 1,
+              "命中！立刻把该字符串从源码 / 文档 / 截图里删掉" if _rc == 0 else "")
+
+# 敏感运行期文件必须始终被 .gitignore 覆盖（本机有没有这些文件都要成立）
+for _rel in ("password.txt", "config.json", "logs/campus_login.log",
+             "logs/upgrade.log", "logs/update_attempt.json",
+             "logs/installer-silent.log", "packaging/output/x.exe"):
+    _rc = _git_rc(["check-ignore", "-q", _rel])
+    if _rc is None:
+        print("SKIP  隐私守卫：git 不可用，跳过 .gitignore 检查")
+        break
+    check("隐私守卫：%s 已被 .gitignore 覆盖" % _rel, _rc == 0)
+
 # ---- 版本一致性 ----
 
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.3.0", version.VERSION == "2.0.3.0", version.VERSION)
+check("版本 = 2.0.4.0", version.VERSION == "2.0.4.0", version.VERSION)
+check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
+      "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))
 sys.exit(1 if FAILS else 0)

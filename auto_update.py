@@ -369,43 +369,155 @@ def _backup_service_py():
 
 
 def _read_nssm_appexit():
-    """从注册表读 AppExit 值；不存在 / 权限不足返回 None。"""
+    """从注册表读 AppExit 值；不存在 / **为空** / 权限不足返回 None。
+
+    v2.0.4.0：空串也是无效值。真机实测该值被写成空字符串后，NSSM 每次启停
+    服务都会往 stderr 刷 `Parameter "AppExit" requires a subparameter!`，
+    并且失去"退出即忽略"的策略（升级期间进程自杀后被立刻拉起的循环就是这么来的）。
+    """
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, NSSM_PARAMETERS_PATH) as k:
             value, _ = winreg.QueryValueEx(k, "AppExit")
-            return value
     except (OSError, ImportError):
         return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
 
 
 def _write_nssm_appexit(value):
-    """直写 AppExit 到注册表。失败抛 OSError。"""
+    """直写 AppExit 到注册表（仅作为 nssm.exe 不可用时的兜底）。失败抛 OSError。"""
+    if not isinstance(value, str) or not value.strip():
+        # 绝不允许把空值写进注册表：NSSM 会因此报错并失去退出策略
+        raise ValueError("AppExit 不能为空")
     import winreg
     with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, NSSM_PARAMETERS_PATH) as k:
-        winreg.SetValueEx(k, "AppExit", 0, winreg.REG_SZ, value)
+        winreg.SetValueEx(k, "AppExit", 0, winreg.REG_SZ, value.strip())
 
 
 def _set_nssm_appexit(value):
-    """设 AppExit。先试注册表直写，再试 nssm.exe 调用。"""
-    try:
-        _write_nssm_appexit(value)
-        return True
-    except (OSError, ImportError) as reg_exc:
-        # fallback：调 nssm.exe（路径含空格 → 用 list + 0x22 quote）
-        if not os.path.isfile(NSSM_PATH):
-            logger.warning("nssm.exe 不在 %s，无法 fallback", NSSM_PATH)
-            return False
+    """设 AppExit。**优先 nssm.exe**（由 NSSM 决定注册表值的类型/结构），
+    失败才退回注册表直写。空值直接拒绝（v2.0.4.0）。
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    value = value.strip()
+    if os.path.isfile(NSSM_PATH):
         try:
-            subprocess.run(
+            proc = subprocess.run(
                 [NSSM_PATH, "set", SERVICE_NAME, "AppExit", value],
                 timeout=15,
                 check=False,
             )
-            return True
+            if proc.returncode == 0:
+                return True
+            logger.warning("nssm set AppExit %s 返回码 %s", value, proc.returncode)
         except (OSError, subprocess.TimeoutExpired) as exc:
-            logger.warning("nssm set AppExit 失败: %s", exc)
-            return False
+            logger.warning("nssm set AppExit 调用失败: %s", exc)
+    else:
+        logger.warning("nssm.exe 不在 %s，改用注册表直写", NSSM_PATH)
+    try:
+        _write_nssm_appexit(value)
+        return True
+    except (OSError, ImportError, ValueError) as exc:
+        logger.warning("注册表直写 AppExit 失败: %s", exc)
+        return False
+
+
+def _ensure_nssm_appexit_sane():
+    """AppExit 为空 / 缺失时自愈为与 setup.iss 一致的值（v2.0.4.0）。
+
+    返回当前（修复后）的值，失败返回 None。
+    """
+    cur = _read_nssm_appexit()
+    if cur:
+        return cur
+    if not os.path.isfile(NSSM_PATH):
+        _log_upgrade("WARN", "AppExit 无效（空/缺失）且找不到 nssm.exe，跳过自愈")
+        return None
+    ok_default = _set_nssm_appexit("Default Ignore")
+    ok_zero = _set_nssm_appexit("0 Ignore")
+    fixed = _read_nssm_appexit()
+    if fixed:
+        _log_upgrade("INFO", "AppExit 自愈完成：此前为空/缺失 → 现为 {}（Default Ignore={} / 0 Ignore={}）".format(
+            fixed, ok_default, ok_zero))
+    else:
+        _log_upgrade("WARN", "AppExit 自愈失败（仍是空值），请手动执行：nssm set {} AppExit Default Ignore".format(SERVICE_NAME))
+    return fixed
+
+
+# ============================================================
+# 升级尝试记录 + 熔断（v2.0.4.0）
+#
+# 背景：静默升级是"启动 installer → Python 立即退出"。若 installer 因任何
+# 原因没有真正装上（权限、弹窗挂起、被安全软件拦），NSSM 会把服务拉起来，
+# 新进程又检测到"还是旧版本"，于是再下载、再安装 —— 真机实测每 30~60 秒
+# 一次、连刷 40 多次（logs/upgrade.log 可见）。这里落盘"尝试记录"：
+#   - 同一目标版本失败后进入冷却（默认 6 小时）不再自动重试
+#   - 失败累计 3 次后彻底停止该版本的自动升级，交给用户手动升级
+#   - 服务启动后确认目标版本 == 当前版本 → 删除记录并记"升级成功"
+# ============================================================
+UPDATE_ATTEMPT_MAX = 3                 # 同一版本自动升级最多尝试次数
+UPDATE_ATTEMPT_COOLDOWN_SEC = 6 * 3600  # 失败后的冷却时间（秒）
+
+
+def _attempt_file():
+    return os.path.join(LOG_DIR, "update_attempt.json")
+
+
+def _read_update_attempt():
+    """读升级尝试记录；不存在 / 损坏 → {}。"""
+    try:
+        with open(_attempt_file(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_update_attempt(target, count=1, state="attempted"):
+    rec = {
+        "target": target,
+        "count": int(count),
+        "state": state,
+        "at": _now_iso(),
+    }
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        with open(_attempt_file(), "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        logger.warning("写 update_attempt.json 失败: %s", exc)
+    return rec
+
+
+def _clear_update_attempt():
+    try:
+        os.remove(_attempt_file())
+    except OSError:
+        pass
+
+
+def _auto_retry_blocked(remote_ver):
+    """同一版本自动升级失败过 → 返回 (是否阻断, 原因)。"""
+    rec = _read_update_attempt()
+    if rec.get("target") != remote_ver:
+        return False, ""
+    if rec.get("state") == "success":
+        return False, ""
+    count = int(rec.get("count") or 1)
+    if count >= UPDATE_ATTEMPT_MAX:
+        return True, "自动升级 v{} 已失败 {} 次，已停止自动重试，请手动下载安装".format(remote_ver, count)
+    at = rec.get("at") or ""
+    try:
+        delta = (datetime.now() - datetime.fromisoformat(at)).total_seconds()
+    except ValueError:
+        return False, ""
+    if delta < UPDATE_ATTEMPT_COOLDOWN_SEC:
+        remain_min = max(1, int((UPDATE_ATTEMPT_COOLDOWN_SEC - delta) / 60))
+        return True, "上次自动升级未生效（{}），{} 分钟内不再自动重试".format(at, remain_min)
+    return False, ""
 
 
 def _nssm_stop_service(timeout_sec=30):
@@ -439,9 +551,16 @@ def _launch_installer(installer_path):
     args = [
         installer_path,
         "/SP-",
-        "/SILENT",
+        # v2.0.4.0：/SILENT → /VERYSILENT（连进度窗都不显示，服务会话里没有桌面）；
+        # 补 /SUPPRESSMSGBOXES（否则 setup.iss 里任何 MsgBox 都会把静默安装挂死）、
+        # /NORESTART、/NOCANCEL，并用 /LOG 落盘安装日志便于事后定位。
+        "/VERYSILENT",
+        "/SUPPRESSMSGBOXES",
+        "/NORESTART",
+        "/NOCANCEL",
         "/CLOSEAPPLICATIONS",
         "/TASKS=startservice",
+        "/LOG=" + os.path.join(LOG_DIR, "installer-silent.log"),
     ]
     # Windows 进程创建标志（详见 MSDN CreateProcess dwCreationFlags）
     DETACHED_PROCESS          = 0x00000008  # 子进程无控制台、不继承父 console
@@ -586,11 +705,18 @@ def _do_update_now():
         _log_upgrade("INFO", "升级透明：AppExit 保持原值 {}（不修改注册表）".format(prev_appexit))
 
         # —— 8. 启动 installer（DETACHED_PROCESS 完全脱离父 Python；不 wait）——
+        # v2.0.4.0：先把"这次尝试"落盘，服务下次启动时用它判断是否真的装上；
+        # 失败/未生效的记录会触发 _auto_retry_blocked 的冷却，避免无限重试。
+        prev_attempt = _read_update_attempt()
+        prev_count = int(prev_attempt.get("count") or 0) if prev_attempt.get("target") == remote_ver else 0
+        _write_update_attempt(remote_ver, count=prev_count + 1, state="attempted")
         try:
             proc = _launch_installer(installer_path)
-            _log_upgrade("INFO", "installer 已启动 PID={}（DETACHED_PROCESS）".format(proc.pid))
+            _log_upgrade("INFO", "installer 已启动 PID={}（DETACHED_PROCESS，第 {} 次尝试）".format(
+                proc.pid, prev_count + 1))
         except OSError as exc:
             # 启动失败：不让 Python 退出，保持服务运行 + Web UI 显示 error
+            _write_update_attempt(remote_ver, count=prev_count + 1, state="failed")
             msg = "启动 installer 失败：{}".format(exc)
             _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
             _log_upgrade("ERROR", msg)
@@ -695,6 +821,18 @@ def _auto_update_loop():
         # 但用户明确要"静默"→ 这里直接触发升级（无需 Web UI 介入）
         result = _do_check_now()
         if isinstance(result, dict) and result.get("update_available"):
+            remote = result.get("latest_version") or ""
+            # v2.0.4.0：失败熔断 —— 同一目标版本自动升级失败过就在冷却期内跳过，
+            # 避免"装不上 → 服务被拉起 → 再检测到新版 → 再装"的 30 秒死循环。
+            blocked, reason = _auto_retry_blocked(remote)
+            if blocked:
+                _log_upgrade("WARN", "自动升级已熔断：{}".format(reason))
+                _set_update_state(update_state="error", update_progress=0,
+                                  update_progress_message=reason,
+                                  update_last_error=reason)
+                if STOP_EVENT.wait(max(interval_sec, 3600)):
+                    return
+                continue
             # 静默升级：立即进入升级流程
             _log_upgrade("INFO", "后台线程检测到新版本，触发静默升级")
             _do_update_now()
@@ -757,11 +895,31 @@ def _post_upgrade_startup():
             except OSError:
                 pass
 
+        # —— v2.0.4.0：用尝试记录确认"上次自动升级到底装上没有" ——
+        # 之前只比对备份 hash，无法区分"同版本重装"与"根本没装上"，
+        # 于是装不上时既没有告警、也没有熔断。
+        attempt = _read_update_attempt()
+        target = attempt.get("target")
+        if target and attempt.get("state") != "success":
+            count = int(attempt.get("count") or 1)
+            if _compare_versions(VERSION, target) == 0:
+                _log_upgrade("INFO", "升级成功确认：已运行 v{}（目标 {}，尝试 {} 次）".format(VERSION, target, count))
+                _clear_update_attempt()
+            else:
+                _log_upgrade("WARN", "上次自动升级未生效：目标 {}，当前仍为 {}（installer 被拦截/挂起？见 logs/installer-silent.log）".format(target, VERSION))
+                _write_update_attempt(target, count=count, state="failed")
+                _set_update_state(update_last_error="上次自动升级未生效（目标 {}）".format(target))
+
         # AppExit 策略归**安装器**所有（P0-7）：setup.iss / install.bat 统一设
         # `Default Ignore` + `0 Ignore`（防端口冲突时 NSSM 死循环重启）。
         # 这里**不再写回 Restart** —— 旧行为每次启动都把 v2.0.2.3 刚修的
         #「端口占用无限重启循环」修复原样撤销，且与 setup.iss 的 Ignore 打架。
         _log_upgrade("INFO", "AppExit 策略由安装器维持（Default Ignore / 0 Ignore），启动钩子不再覆盖")
+        # v2.0.4.0 例外：AppExit 被写成**空串**时（NSSM 合法值里没有空值，会让
+        # NSSM 每次启停都报 "Parameter AppExit requires a subparameter"）自愈回合法值。
+        appexit = _ensure_nssm_appexit_sane()
+        if appexit:
+            _log_upgrade("INFO", "AppExit 现状：{}".format(appexit))
     except Exception as exc:  # noqa: BLE001
         _log_upgrade("WARN", "启动钩子异常: {}".format(exc))
 

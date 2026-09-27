@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.3.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.4.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -39,7 +39,7 @@ from http.server import ThreadingHTTPServer
 # ============================================================
 # 常量
 # ============================================================
-from version import VERSION  # noqa: E402  保持原行号兼容：VERSION 原本在 line 51
+from version import VERSION, CODENAME  # noqa: E402  保持原行号兼容：VERSION 原本在 line 51
 BACKOFF_LEVELS = [5, 10, 20, 40, 60]  # 分钟，索引 = 连续失败次数，封顶 60
 
 DEFAULT_CONFIG = {
@@ -139,25 +139,52 @@ UPDATE_LOCK = threading.Lock()  # 保护 update_lock 字段的并发读写
 # ============================================================
 _PWD_VALUE = None  # None 表示未设置
 
+# 安装包历史/现行模板提示行的可识别片段（v2.0.4.0）。
+# 只有命中这些片段的行才被当作注释跳过；**不要**再用 `startswith("#")`
+# 判断注释 —— 那会误杀以 `#` 开头的合法密码。
+_PASSWORD_HINT_MARKERS = (
+    "在此行写入你的校园网账号密码",
+    "去掉本注释行",
+)
+
+
+
+def _is_password_hint(line):
+    """True = 安装包自带模板提示行（唯一会被跳过的"注释"）。
+
+    v2.0.4.0 回归修复：旧实现把**任何 `#` 开头**的行都当注释跳过。若用户密码
+    本身以 `#` 开头（真机实测存在：形如 `#xxxxxxxx#`），整行会被吃掉 →
+    服务认为"密码未设置" → 登录失败，且 Web UI 显示「未设置」，看起来就像
+    「升级后配置文件丢了」。现在只按模板提示文本精确匹配，其余内容一律
+    按密码原文处理。
+    """
+    return any(marker in line for marker in _PASSWORD_HINT_MARKERS)
+
 
 def _load_password_from_disk():
-    """从 password.txt 读入 _PWD_VALUE。文件不存在或为空 → None。"""
+    """从 password.txt 读入 _PWD_VALUE。文件不存在或内容全是模板提示 → None。
+
+    规则（v2.0.4.0）：
+      - 空行        → 跳过
+      - 模板提示行  → 跳过（见 _is_password_hint）
+      - 其余任何行  → 视为密码原文（**包括以 `#` 开头的密码**）
+      - 用 utf-8-sig 读，容忍手工编辑时留下的 BOM（否则首字符会带 \\ufeff）
+    """
     global _PWD_VALUE
     with PWD_LOCK:
         if not os.path.isfile(PASSWORD_FILE):
             _PWD_VALUE = None
             return None
         try:
-            with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
-                # P0-3：跳过空行与 '#' 注释行，防止装包时模板提示被当成真实密码
+            with open(PASSWORD_FILE, "r", encoding="utf-8-sig") as f:
                 line = ""
                 for raw in f:
                     s = raw.strip()
-                    if not s or s.startswith("#"):
+                    if not s or _is_password_hint(s):
                         continue
                     line = s
                     break
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             logger.error("读取 password.txt 失败: %s", exc)
             _PWD_VALUE = None
             return None
@@ -494,7 +521,7 @@ def main():
     global HTTP_SERVER
 
     logger.info("=" * 60)
-    logger.info("Dr.COM 自动登录服务启动（Web UI 配置版 v%s）", VERSION)
+    logger.info("Dr.COM 自动登录服务启动（Web UI 配置版 v%s \"%s\"）", VERSION, CODENAME)
 
     # 1. 载入配置
     cfg = _load_config()
@@ -511,11 +538,10 @@ def main():
     if hasattr(signal, "SIGBREAK"):
         signal.signal(signal.SIGBREAK, _on_signal)
 
-    # 4. 启动钩子：检查是否刚升级过（必须在后台线程之前跑）
-    try:
-        _auto_update_mod._post_upgrade_startup()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("启动钩子异常: %s", exc)
+    # 4. 启动钩子**移到 4.9**（必须在 _auto_update_mod._attach 之后调用）：
+    #    钩子内部走 _log_upgrade → _ensure_upgrade_log → LOG_DIR，
+    #    而 LOG_DIR 由 _attach 注入。旧顺序（此处调用）每次都抛
+    #    NameError: name 'LOG_DIR' is not defined → 钩子从未真正执行过。
 
     # 4.5 把共享状态注入 protocol 模块（必须在 run_once 被任何线程调用之前）
     _protocol_mod._attach(
@@ -582,6 +608,13 @@ def main():
         now_iso=_now_iso,
         stop_event=STOP_EVENT,
     )
+
+    # 4.9 启动钩子：检查是否刚升级过（升级结果确认 / AppExit 自愈 / 备份清理）。
+    #     必须在 4.8 之后 —— 见上面第 4 步的说明。
+    try:
+        _auto_update_mod._post_upgrade_startup()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("启动钩子异常: %s", exc)
 
     # 5. 启动后台线程
     startup_thread = threading.Thread(target=_startup_trigger, name="startup-trigger", daemon=True)

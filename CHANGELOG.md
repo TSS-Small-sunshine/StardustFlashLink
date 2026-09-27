@@ -5,6 +5,69 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.4.0 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 本版的主题是「**自动升级到底装上了没有**」：真机上出现「每 30–60 秒一轮：发现新版本 →
+> 下载 → 启动 installer → 服务退出」，几十轮下来版本号纹丝不动。本轮把这条链上的 5 个断点
+> 全部修掉，并顺带修「`#` 开头的密码被当成注释整行吃掉」与「查看更新日志报缺文件」。
+> 同时启用**版本线代号**机制（本版起 `2.0` 线 = `Sirius`）。
+
+### 🔴 修复（升级链路）
+- `fix(update)`: **启动钩子从未生效** —— `_post_upgrade_startup()` 写在
+  `_auto_update_mod._attach()` **之前**，执行时 `LOG_DIR` 仍是 `None` → 每次开机
+  `NameError` 被吞掉。连带后果：`AppExit` 自愈不跑、升级结果没人确认。已归位到 `_attach` 之后。
+- `fix(update)`: **升级熔断** —— 新增 `logs\update_attempt.json`：落盘「目标版本 / 第几次尝试 /
+  是否生效」；启动时确认目标版本是否真的成了（成了 → 记「升级成功确认」并清记录；没成 → 记 WARN +
+  标 `failed`）。同版本连续 3 次未生效即**停止自动重试**并提示手动下载，失败后 **6 小时冷却**。
+- `fix(installer)`: **静默安装不再弹窗** —— 服务未在 30 秒内停止时原本弹 `MsgBox`，而自动升级跑在
+  服务会话里（无人在场）→ 安装**永久挂起** → 客户端以为没装上 → 再试 → 死循环。
+  现在 `if WizardSilent then Log(...) else MsgBox(...)`。
+- `fix(installer)`: 安装参数由 `/SILENT` 改为 **`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL`**，
+  并加 `/LOG=%BASE%\logs\installer-silent.log`（"装不上"终于有据可查）。
+- `fix(nssm)`: **`AppExit` 空字符串**不再被当成「已设置」—— 真机上注册表值为空时，
+  自愈函数判定"无需修复"而空转，同时 `nssm` 在 `service_stderr.log` 里刷
+  `Parameter "AppExit" requires a subparameter!`。现在空值视为无效，优先用 `nssm.exe`
+  重写 `Default Ignore`。
+
+### 🔴 修复（其它）
+- `fix(password)`: **`#` 开头的密码被整行吃掉** —— 旧实现把任何 `#` 开头的行都当注释跳过；
+  真机密码形如 `#xxxxxxxx#` 时整行被丢弃 → 服务认为「密码未设置」→ 登录失败 + Web UI 显示
+  「未设置」，看起来就像「升级把配置弄丢了」。现在只跳过安装包自带的模板提示行
+  （`_PASSWORD_HINT_MARKERS` / `_is_password_hint`），其余内容一律按密码原文处理；
+  读取改用 `utf-8-sig`，容忍手工编辑留下的 BOM。
+- `fix(changelog)`: **「关于 → 查看更新日志」报缺文件** —— 安装包从未打包 `CHANGELOG.md`，
+  真机必然弹 `read changelog failed: [Errno 2] No such file or directory`。现在
+  `setup.iss` 随包分发该文件，`eula.py` 按「安装目录 → `docs\` → 上一级」候选查找，
+  缺失时只给中文提示 + 仓库链接（不再把裸路径异常抛到界面）。
+
+### 🧹 文案 / 一致性
+- `feat(version)`: 启用**版本线代号** —— `version.py` 新增 `CODENAME` / `CODENAME_CN` /
+  `VERSION_FULL`（`2.0` 线 = `Sirius` / 天狼星）；Web UI 版本徽章与「关于」页显示 `v2.0.4.0 Sirius`；
+  安装器 `AppVerName` = `星尘闪连 (Stardust Flash Link) 2.0.4.0 "Sirius"`。规则与候选星名表见
+  `docs/VERSIONING.md`。
+- `docs`: 新增 `AGENTS.md`（AI / 协作者编辑规范：不变量、隐私红线、验证纪律、截图规范、发布 checklist）。
+- `docs`: README 版本记录改为**版本线摘要**（逐版本明细只留在 `CHANGELOG.md`）；运行期文件表补
+  `update_attempt.json` / `installer-silent.log`；修正两处过时产物名。
+- `fix(ui)`: 配置页账号提示由「例如 2023123456」改为「仅支持数字（学号 / 工号），不含运营商后缀」。
+- `docs`: README 截图重拍（亮 / 暗），徽章同步到 v2.0.4.0，且**账号一律打码**（`2023******@yd`）。
+
+### 🔒 隐私与安全
+- `test`: 新增**隐私守卫**断言 —— 读取本机 `password.txt` / `config.json` 的凭据，与**所有入库文件**
+  做精确比对，命中即测试失败；`DRCOM_DATA_DIR` 可指向安装目录（如
+  `$env:DRCOM_DATA_DIR='D:\Program Files\DrcomAutoLogin'`）一并核查。CI 上没有这些文件会自动 SKIP。
+- `chore`: `.gitignore` 补 `*.log` / `update_attempt.json` / `installer-silent.log` / `config-export-*.zip`。
+- `test`: 密码相关测试夹具全部改为**合成值**，源码与注释中不再出现真机凭据片段。
+
+### 其它
+- 安装包产物名 `StardustFlashLink-Setup-v2.0.4.0.exe`（不变量 I9）。
+- 冒烟结果：`_smoke_static.py` **68 项断言 0 失败**（新增 5 项 CHANGELOG 回归 + 9 项隐私守卫）、
+  `_smoke_http.py` **9/9 通过**。
+
+### ⚠️ 已知限制
+- `AppExit` 若已被写成空值，**自愈需要管理员权限**；权限不足时只写日志、不影响登录。
+  手动修复：`nssm set DrcomAutoLogin AppExit Default Ignore`（管理员 CMD）。
+- 自动升级仍**默认关闭**（`auto_update_enabled: false`），需在 Web UI「配置 → 自动化」手动开启。
+
 ## v2.0.3.0 (feature) — 2026-09-27
 
 > 本版把 Web UI 从「AI 味渐变卡片」换成 Apple 风格的亚克力玻璃界面，并修掉顶栏
