@@ -237,6 +237,39 @@ _guard_slice = "\n".join(
 check("v2.0.5.0 守卫不触发退避（跳过不等于失败）",
       "不调 _set_backoff" in _src_proto and "_set_backoff" not in _guard_slice)
 
+# ---- v2.0.6.0：托盘小程序（断线通知 + 状态图标）----
+_tray_src = pathlib.Path("tray.py").read_text(encoding="utf-8")
+_au_src = pathlib.Path("auto_update.py").read_text(encoding="utf-8")
+_tray = importlib.import_module("tray")
+check("v2.0.6.0 tray.py 随包分发", 'Source: "..\\tray.py"' in _iss_src)
+check("v2.0.6.0 托盘随登录启动（HKCU Run 项 + 卸载自动清）",
+      "DrcomAutoLoginTray" in _iss_src and "uninsdeletevalue" in _iss_src)
+check("v2.0.6.0 托盘任务在安装向导里可选", 'Name: "trayicon"' in _iss_src)
+check("v2.0.6.0 升级时保留托盘任务（否则升级会摘掉登录启动项）",
+      _au_src.count("desktopicon,startservice,trayicon") == 2)
+check("v2.0.6.0 托盘不引入第三方依赖（pystray/requests 之类都不许）",
+      all(x not in _tray_src for x in ("pystray", "import requests", "win32gui", "PyQt")))
+check("v2.0.6.0 托盘只连本机 127.0.0.1", "http://127.0.0.1:%d" in _tray_src)
+check("v2.0.6.0 托盘写接口带自定义头（否则被 403 挡掉）",
+      '_request("/api/login", method="POST")' in _tray_src
+      and '"X-Requested-With", "DrcomUI"' in _tray_src)
+
+# 行为级：状态迁移 → 通知（防刷屏规则）
+_d = _tray.decide_events
+check("v2.0.6.0 托盘首轮不弹（开机时服务可能还在起）", _d(None, "off", 0) == [] and _d(None, "down", 9) == [])
+check("v2.0.6.0 掉线弹警告", _d("ok", "off", 0)[0][0] == "已掉线")
+check("v2.0.6.0 恢复登录弹提示", _d("off", "ok", 0)[0][0] == "已恢复登录")
+check("v2.0.6.0 偶发一次拿不到服务不弹", _d("ok", "down", 1) == [])
+check("v2.0.6.0 连续三次拿不到服务才弹", _d("ok", "down", 3)[0][0] == "服务未响应")
+check("v2.0.6.0 同一状态不重复弹", _d("off", "off", 0) == [] and _d("ok", "ok", 0) == [])
+check("v2.0.6.0 classify 四态齐全",
+      [_tray.classify({"_reachable": True, "online": True}),
+       _tray.classify({"_reachable": True, "online": False}),
+       _tray.classify({"_reachable": True, "online": None}),
+       _tray.classify({"_reachable": False})]
+      == ["ok", "off", "unknown", "down"])
+check("v2.0.6.0 拿不到服务时的判定文案", _tray.status_text({"_reachable": False}) == "服务未响应")
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -421,7 +454,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.5.0", version.VERSION == "2.0.5.0", version.VERSION)
+check("版本 = 2.0.6.0", version.VERSION == "2.0.6.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
