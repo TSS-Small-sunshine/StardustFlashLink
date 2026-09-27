@@ -180,7 +180,8 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag
           }
-          gh release create $tag $exe.FullName --title "Windows 安装程序（自动更新）" --notes $notes --prerelease --target "$env:GITHUB_SHA"
+          # 标题带版本号：与版本化 release 一起出现在发布列表里时能看出归属
+          gh release create $tag $exe.FullName --title "Windows 安装程序 v$env:APP_VERSION（跟随最新构建 · 固定下载链接）" --notes $notes --prerelease --target "$env:GITHUB_SHA"
           gh release view $tag --json url,tagName,name,isPrerelease,assets
 
       # P1-5：自动升级通道。`/releases/latest` 只返回**非 prerelease** release，
