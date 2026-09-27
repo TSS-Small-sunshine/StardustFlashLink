@@ -6,5 +6,8 @@
   "auto_check_enabled": true,
   "auto_check_interval_min": 30,
   "network_wait_timeout_sec": 60,
-  "ui_port": 8848
+  "ui_port": 8848,
+  "auto_update_enabled": false,
+  "update_check_interval_hours": 6,
+  "update_min_free_disk_mb": 200
 }

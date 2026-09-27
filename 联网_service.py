@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.2.3）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.2.4）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -52,7 +52,10 @@ DEFAULT_CONFIG = {
     "network_wait_timeout_sec": 60,
     "ui_port": 8848,
     # —— 自动升级字段（v1.3 新增）——
-    "auto_update_enabled": True,
+    # P1-3：默认关闭。升级链路走第三方镜像 + SHA256 可绕过（P1-2 已修），
+    # 且 /releases/latest 之前拿不到版本（P1-5 已改版本化非 prerelease release）。
+    # 修好并验证过真机升级后再评估默认开启。
+    "auto_update_enabled": False,
     "update_check_interval_hours": 6,
     "update_min_free_disk_mb": 200,
 }
@@ -146,7 +149,14 @@ def _load_password_from_disk():
             return None
         try:
             with open(PASSWORD_FILE, "r", encoding="utf-8") as f:
-                line = f.readline()
+                # P0-3：跳过空行与 '#' 注释行，防止装包时模板提示被当成真实密码
+                line = ""
+                for raw in f:
+                    s = raw.strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    line = s
+                    break
         except OSError as exc:
             logger.error("读取 password.txt 失败: %s", exc)
             _PWD_VALUE = None
