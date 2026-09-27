@@ -99,7 +99,7 @@
 
 ## 🏷 项目状态
 
-**当前版本**：`v2.0.4.2 "Sirius"`（天狼星，2026-09-27） · **状态**：🟢 积极维护
+**当前版本**：`v2.0.4.3 "Sirius"`（天狼星，2026-09-27） · **状态**：🟢 积极维护
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -310,7 +310,7 @@ DrcomAutoLogin-Windows/
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.4.2.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.4.3.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -444,7 +444,8 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | --- | --- | --- |
 | **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
 | **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
-| **v2.0.4.2（当前）** | `Sirius` 天狼星 | 修**自动升级装不上**：installer 改由「任务计划程序」拉起（直启会被 nssm 的 Job Object 连坐杀掉，真机实测装不上且服务停在 `StopPending`）；升级执行器带**看门狗**（失败也把服务拉回来）、落盘 installer 退出码与日志；`AppExit` 改按 nssm 真实结构读写（不再每次开机误报自愈失败）；升级成功只认版本号，不再被"备份 hash 不同"误判。 |
+| **v2.0.4.3（当前）** | `Sirius` 天狼星 | 收掉自动升级的两处尾巴：`winreg` 键路径误带 `HKLM\` 前缀（v2.0.4.0 起 `AppExit` 自愈一直**误报**失败，实际策略一直正确）；升级执行器的结果归档时序（服务被安装器提前拉起时，别把还在跑的执行器删掉，并把安装日志归档回 `{app}\logs`）。真机 v2.0.4.1 → 2.0.4.2 已走通：`方式=schtasks` → 4 秒装完。 |
+| v2.0.4.2 | `Sirius` 天狼星 | 修**自动升级装不上**：installer 改由「任务计划程序」拉起（直启会被 nssm 的 Job Object 连坐杀掉，真机实测装不上且服务停在 `StopPending`）；升级执行器带**看门狗**（失败也把服务拉回来）、落盘 installer 退出码与日志；`AppExit` 改按 nssm 真实结构读写；升级成功只认版本号。 |
 | v2.0.4.1 | `Sirius` 天狼星 | 修 `PWD_LOCK` 自锁死锁（`GET /api/config` 永久挂起 → 配置页打不开、保存卡死、自动登录停摆）；安装器外观收口：桌面 / 开始菜单 / 「应用和功能」卸载项图标改用品牌 `app.ico`，`app.ico` 随包分发到 `{app}\branding`。 |
 | v2.0.4.0 | `Sirius` 天狼星 | 修「自动升级反复重装却始终装不上」的整套死循环：启动钩子终于生效、`AppExit` 空值自愈、失败熔断（3 次 / 6 小时冷却）、静默安装不再弹窗挂起、`/VERYSILENT` + `/LOG`；修「`#` 开头的密码被当成注释整行吃掉」；「查看更新日志」随包分发，缺失时给中文提示与仓库链接。 |
 | 后续版本线 | 见候选表 | 代号按 `MAJOR.MINOR` 走，候选星名表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。 |

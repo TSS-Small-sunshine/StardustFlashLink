@@ -5,6 +5,37 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.4.3 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 承接 v2.0.4.2：升级链路已经真能装上了（真机 v2.0.4.1 → 2.0.4.2 一次成功），本版收掉它剩下的
+> 两处尾巴 —— `AppExit` 自愈的**长期误报**，和升级执行器的**结果归档时序**。
+
+### 🔴 修复
+- `fix(auto_update)`: **`AppExit` 自愈从 v2.0.4.0 起一直在误报** —— `winreg.OpenKey` 的键路径
+  **不能带 `HKLM\` 前缀**（HKLM 由 `HKEY_LOCAL_MACHINE` 常量给出），而代码一直传
+  `HKLM\SYSTEM\...\Parameters\AppExit` → `FileNotFoundError` 被 `except OSError: return None`
+  吞掉 → 每次开机都记一行「AppExit 自愈失败（仍是空值）」。真机对照：那个子键里
+  `(默认)=Ignore`、`0=Ignore`，**策略一直是对的**。现在统一经 `_hklm_subpath()` 去前缀
+  （幂等、大小写不敏感）。
+- `fix(auto_update)`: **升级执行器的结果不再被误删** —— 服务是安装器在 `ssPostInstall` 就拉起来的，
+  那一刻 `.cmd` 执行器**还在跑**（它等 installer 进程退出后才归档日志、写 rc），而启动钩子上来就把
+  执行器删掉 → 它后面的步骤全部没执行（真机实测：`drcom_apply_update.rc` 与
+  `logs\installer-silent.log` 都没出现）。现在只清**陈旧**残留（`UPDATE_LEFTOVER_STALE_SEC`，
+  默认 5 分钟），计划任务也只在执行器已自删后才兜底删。
+- `fix(auto_update)`: **执行器结果读取带 8 秒宽限**（`_report_update_runner_result(wait_sec=8)`），
+  并在启动钩子里把 System TEMP 的安装日志**归档回 `{app}\logs\installer-silent.log`**，
+  保证 Web UI / 用户随时找得到。
+- `test`: 冒烟再加 6 条（4 条静态 + 2 条行为级：`_hklm_subpath` 去前缀、幂等、路径可用于 winreg）。
+
+### 🧪 真机验证（v2.0.4.1 → v2.0.4.2，走修复后的升级链路）
+```
+[22:59:03] 检查完成：发现新版本 2.0.4.2
+[22:59:06] 下载完成：11316847 字节 · SHA256 校验通过
+[22:59:07] installer 已启动（方式=schtasks，第 1 次尝试）      ← v2.0.4.2 新路径
+[22:59:11] 升级成功确认：已运行 v2.0.4.2（目标 2.0.4.2，尝试 1 次）   ← 4 秒装完
+```
+`version.py` → 2.0.4.2、服务 `Running`、`/api/config` 200、`update_attempt.json` 被清除。
+
 ## v2.0.4.2 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 本版只修**自动升级链路**。真机实测 v2.0.4.1 发布后：`发现新版本 → 下载 → SHA256 通过 →

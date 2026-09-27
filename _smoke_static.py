@@ -184,7 +184,7 @@ check("v2.0.4.2 installer 由任务计划程序拉起", "schtasks" in src_upd an
 check("v2.0.4.2 任务名单含 desktopicon",
       "/TASKS=desktopicon,startservice" in src_upd)   # 只传 startservice 会漏掉公共桌面图标
 check("v2.0.4.2 包装脚本落盘 installer 退出码", "installer_rc=%ERRORLEVEL%" in src_upd)
-check("v2.0.4.2 启动钩子读执行器结果", "_report_update_runner_result()" in src_upd)
+check("v2.0.4.2 启动钩子读执行器结果", "_report_update_runner_result(" in src_upd)
 check("v2.0.4.2 升级残留会被清理", "_cleanup_update_leftovers()" in src_upd)
 check("v2.0.4.2 不再用备份 hash 误判升级成功",
       "升级完成（v{}）：当前脚本与备份不同" not in src_upd)
@@ -192,6 +192,18 @@ check("v2.0.4.2 AppExit 按 nssm 子键结构读取",
       "APPEXIT_SUBKEY" in src_upd and "QueryValueEx(k, APPEXIT_DEFAULT_VALUE)" in src_upd)
 check("v2.0.4.2 nssm set AppExit 拆成两个 argv",
       '"AppExit", subparam.strip(), value.strip()' in src_upd)
+
+# ---- v2.0.4.3：winreg 路径前缀 / 清理时序 / 日志归档 ----
+# 真机证据：AppExit 子键明明是 (默认)=Ignore / 0=Ignore，日志却每次开机都报"自愈失败"
+# → 根因是 winreg.OpenKey 收到了带 "HKLM\\" 前缀的路径，异常被 except 吞掉。
+check("v2.0.4.3 winreg 路径去掉 HKLM\\ 前缀",
+      "def _hklm_subpath" in src_upd and "_hklm_subpath(APPEXIT_SUBKEY)" in src_upd)
+check("v2.0.4.3 清理只针对陈旧残留（不删正在跑的执行器）",
+      "UPDATE_LEFTOVER_STALE_SEC" in src_upd and "stale_before" in src_upd)
+check("v2.0.4.3 执行器结果读取带宽限",
+      "_report_update_runner_result(wait_sec=8)" in src_upd)
+check("v2.0.4.3 安装日志归档回安装目录",
+      'os.path.join(LOG_DIR, "installer-silent.log")' in src_upd)
 
 # 行为级：包装脚本内容必须同时具备「装 + 落退出码 + 看门狗 + 自删」
 au = importlib.import_module("auto_update")
@@ -204,6 +216,13 @@ check("v2.0.4.2 包装脚本 CRLF 行尾", _wrap.endswith("\r\n") and "\r\n" in 
 check("v2.0.4.2 包装脚本带看门狗（服务没起来就 sc start）",
       (" start %s" % au.SERVICE_NAME) in _wrap and "service=RUNNING" in _wrap)
 check("v2.0.4.2 包装脚本不外泄密码/凭据", "password" not in _wrap.lower() and "PWD" not in _wrap)
+check("v2.0.4.3 _hklm_subpath 去前缀且幂等",
+      au._hklm_subpath(r"HKLM\SYSTEM\X") == r"SYSTEM\X"
+      and au._hklm_subpath(r"SYSTEM\X") == r"SYSTEM\X"
+      and au._hklm_subpath("hklm\\SYSTEM\\X") == "SYSTEM\\X")
+check("v2.0.4.3 AppExit 注册表路径可用于 winreg",
+      au._hklm_subpath(au.APPEXIT_SUBKEY).upper().startswith("SYSTEM\\")
+      and "Parameters\\AppExit" in au._hklm_subpath(au.APPEXIT_SUBKEY))
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -307,7 +326,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.4.2", version.VERSION == "2.0.4.2", version.VERSION)
+check("版本 = 2.0.4.3", version.VERSION == "2.0.4.3", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

@@ -2,24 +2,20 @@
 
 ## 本版变更
 
-### 🔴 修复（自动升级：installer 被 nssm 的 Job 连坐杀掉 —— 真机实证）
-- **现象**：v2.0.4.1 发布后本机自动升级一路"成功"（发现新版本 → 下载 11,310,892 B →
-  SHA256 通过 → `installer 已启动 PID=51704`），但 **`version.py` 不变、
-  `installer-silent.log` 压根没生成、服务停在 `StopPending`** → 自动登录直接停摆。
-- **根因**：`setup.iss` 的 `CurStepChanged(ssInstall)` 会 `nssm stop DrcomAutoLogin`，而 nssm
-  关闭自己的 Job Object 时会把**同 Job 的子进程一起杀掉** —— 由服务直启（`DETACHED_PROCESS`
-  `|CREATE_BREAKAWAY_FROM_JOB`）的 installer 在复制文件前就被带走。
-  对照组：**同一条命令行由不在该 Job 里的进程拉起 → 退出码 0、7.1 秒装完**。
-- **修复**：改为写一个 `.cmd` 执行器 + `schtasks /create /ru SYSTEM /rl HIGHEST` + `/run`
-  （由 Task Scheduler 托管，与 nssm 没有 Job 关系）；任务计划程序不可用时才退回旧的直启路径。
-- **顺带修好的三处**：
-  - **看门狗**：installer 跑完先查服务，没 `RUNNING` 就 `sc start`（升级失败不再"没人管"）。
-  - **可诊断性**：`%TEMP%\drcom_apply_update.rc` 落盘 installer 退出码，安装日志复制进
-    `{app}\logs\installer-silent.log`，启动钩子把两者写进 `upgrade.log`（此前失败无从查起）。
-  - **`desktopicon` 任务**：`/TASKS=` 补上，升级后公共桌面快捷方式才会刷新。
-- **另修两处误报/误判**：`AppExit` 改按 nssm 的真实结构（`Parameters\AppExit` 子键的
-  `(默认)` / `0` 子值）读写，不再每次开机误报「自愈失败」；升级成功只认
-  「尝试记录目标版本 == 当前版本」，不再因为"备份 hash 不同"把任何脚本改动误报成升级成功。
+### 🔴 修复（v2.0.4.2 之后的两处收尾）
+- **`AppExit` 自愈从 v2.0.4.0 起一直在误报**：`winreg.OpenKey` 的键路径**不能带 `HKLM\` 前缀**
+  （HKLM 由 `HKEY_LOCAL_MACHINE` 常量给出），而代码一直传
+  `HKLM\SYSTEM\...\Parameters\AppExit` → `FileNotFoundError` 被 `except OSError: return None`
+  吞掉 → 每次开机都记一行「AppExit 自愈失败（仍是空值）」。真机对照：那个子键里
+  `(默认)=Ignore`、`0=Ignore`，**策略一直是对的**。现在统一经 `_hklm_subpath()` 去前缀
+  （幂等、大小写不敏感）。
+- **升级执行器的结果不再被误删**：服务是安装器在 `ssPostInstall` 就拉起来的，那一刻 `.cmd`
+  执行器**还在跑**（它在等 installer 进程退出，然后才归档日志、写 rc），而启动钩子上来就把它删掉
+  → 后续步骤全部没执行（真机实测：`drcom_apply_update.rc` 与 `logs\installer-silent.log` 都没出现）。
+  现在只清**陈旧**残留（默认 5 分钟），计划任务只在执行器已自删后才兜底删；执行器结果读取带
+  8 秒宽限，并把安装日志**归档回 `{app}\logs\installer-silent.log`**。
+- **上一版（v2.0.4.2）的自动升级链路已真机走通**：v2.0.4.1 → 2.0.4.2 一次成功 ——
+  `方式=schtasks` → 4 秒装完 → `升级成功确认：已运行 v2.0.4.2`。
 - 接口、配置结构、服务名、`AppId` 未动，可直接覆盖安装（`SERIAL` +1）。
 
 ## 安装包信息
