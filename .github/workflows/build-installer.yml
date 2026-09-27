@@ -165,28 +165,35 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $exe = Get-ChildItem "packaging\output\*.exe" | Select-Object -First 1
-          $notes = @"
-          Windows 安装程序（Inno Setup 自动构建）。
-
-          | 项 | 值 |
-          | --- | --- |
-          | 应用版本 | `$env:APP_VERSION` |
-          | 构建提交 | ``${{ github.sha }}`` |
-          | 构建编号 | #${{ github.run_number }} |
-          | 系统要求 | Windows 10/11 x64（安装包已内嵌 Python，无需预装） |
-
-          安装后会自动注册系统服务、创建桌面与开始菜单快捷方式。
-          首次使用请通过 Web UI（``http://127.0.0.1:8848``）填写账号与密码。
-
-          > 本 Release 每次推送代码后由 CI 自动覆盖更新，下载链接固定不变。
-          "@
           $tag = "installer"
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+
+          # 发布说明 = 仓库模板 packaging/RELEASE-NOTES.md（UTF-8 读 + 占位符替换 + --notes-file）。
+          # 注意：here-string 里**不要**用反引号转义 $ —— `` `$ `` 会让变量不展开，
+          # 页面上就会直接显示 $env:APP_VERSION / $sha（旧版 bug）。
+          $tpl = "packaging\RELEASE-NOTES.md"
+          if (Test-Path $tpl) {
+            $body = (Get-Content $tpl -Raw -Encoding utf8).Trim()
+          } else {
+            $body = "Windows 安装程序 v$env:APP_VERSION（Inno Setup 自动构建）。"
+          }
+          $body = $body.Replace('{{VERSION}}', $env:APP_VERSION)
+          $body = $body.Replace('{{ASSET}}', $exe.Name)
+          $body = $body.Replace('{{SIZE}}', "$($exe.Length)")
+          $body = $body.Replace('{{SIZE_MB}}', ([math]::Round($exe.Length / 1MB, 2)).ToString())
+          $body = $body.Replace('{{SHA256}}', $sha)
+          $body = $body.Replace('{{SHA}}', "${{ github.sha }}")
+          $body = $body.Replace('{{RUN}}', "${{ github.run_number }}")
+          $body = $body.Replace('{{DATE}}', (Get-Date -Format 'yyyy-MM-dd'))
+          $notesFile = Join-Path $env:RUNNER_TEMP "release-notes-installer.md"
+          [IO.File]::WriteAllText($notesFile, $body, (New-Object Text.UTF8Encoding($false)))
+
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag
           }
           # 标题带版本号：与版本化 release 一起出现在发布列表里时能看出归属
-          gh release create $tag $exe.FullName --title "Windows 安装程序 v$env:APP_VERSION（跟随最新构建 · 固定下载链接）" --notes $notes --prerelease --target "$env:GITHUB_SHA"
+          gh release create $tag $exe.FullName --title "Windows 安装程序 v$env:APP_VERSION（跟随最新构建 · 固定下载链接）" --notes-file $notesFile --prerelease --target "$env:GITHUB_SHA"
           gh release view $tag --json url,tagName,name,isPrerelease,assets
 
       # P1-5：自动升级通道。`/releases/latest` 只返回**非 prerelease** release，
@@ -199,23 +206,24 @@ jobs:
           $exe = Get-ChildItem "packaging\output\*.exe" | Select-Object -First 1
           $tag = "v$env:APP_VERSION"
           $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
-          $notes = @"
-          Windows 安装程序 **v$env:APP_VERSION**（Inno Setup 自动构建）。
 
-          | 项 | 值 |
-          | --- | --- |
-          | 应用版本 | `$env:APP_VERSION` |
-          | 附件 | `$($exe.Name)` |
-          | SHA256 | `$sha` |
-          | 构建提交 | ``${{ github.sha }}`` |
-          | 构建编号 | #${{ github.run_number }} |
-
-          安装包已内嵌 Python，无需预装；安装后自动注册系统服务、创建桌面与开始菜单快捷方式。
-          首次使用请通过 Web UI（``http://127.0.0.1:8848``）填写账号与密码。
-
-          > 本 release 是**自动升级通道**（非 prerelease）：客户端读 ``/releases/latest``
-          > 取版本号与 asset digest（fail-closed 校验）。固定下载链接仍见 prerelease ``installer``。
-          "@
+          # 发布说明与 installer 同源：仓库模板 packaging/RELEASE-NOTES.md
+          $tpl = "packaging\RELEASE-NOTES.md"
+          if (Test-Path $tpl) {
+            $body = (Get-Content $tpl -Raw -Encoding utf8).Trim()
+          } else {
+            $body = "Windows 安装程序 v$env:APP_VERSION（Inno Setup 自动构建）。"
+          }
+          $body = $body.Replace('{{VERSION}}', $env:APP_VERSION)
+          $body = $body.Replace('{{ASSET}}', $exe.Name)
+          $body = $body.Replace('{{SIZE}}', "$($exe.Length)")
+          $body = $body.Replace('{{SIZE_MB}}', ([math]::Round($exe.Length / 1MB, 2)).ToString())
+          $body = $body.Replace('{{SHA256}}', $sha)
+          $body = $body.Replace('{{SHA}}', "${{ github.sha }}")
+          $body = $body.Replace('{{RUN}}', "${{ github.run_number }}")
+          $body = $body.Replace('{{DATE}}', (Get-Date -Format 'yyyy-MM-dd'))
+          $notesFile = Join-Path $env:RUNNER_TEMP "release-notes-$tag.md"
+          [IO.File]::WriteAllText($notesFile, $body, (New-Object Text.UTF8Encoding($false)))
           # 标题策略：优先 workflow_dispatch 的 title；其次沿用现有 release 的人工标题（避免 CI 覆盖）；
           # 都没有才退回 v{版本}。这样发布列表里始终是可读的「vX.Y.Z — 简述」。
           $title = "v$env:APP_VERSION"
@@ -226,5 +234,5 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag
           }
-          gh release create $tag $exe.FullName --title $title --notes $notes --target "$env:GITHUB_SHA"
+          gh release create $tag $exe.FullName --title $title --notes-file $notesFile --target "$env:GITHUB_SHA"
           gh release view $tag --json url,tagName,isPrerelease,assets
