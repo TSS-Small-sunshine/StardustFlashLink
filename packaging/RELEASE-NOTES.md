@@ -1,26 +1,25 @@
-Windows 安装程序 **v{{VERSION}} "Sirius"（天狼星）**（Inno Setup 自动构建 · 安装包已内嵌 Python，无需预装）。
+﻿Windows 安装程序 **v{{VERSION}} "Sirius"（天狼星）**（Inno Setup 自动构建 · 安装包已内嵌 Python，无需预装）。
 
 ## 本版变更
 
-### 🔴 修复（升级链路：不再「反复重装却装不上」）
-- **启动钩子从未生效**：`_post_upgrade_startup()` 在 `_attach` 之前执行，`LOG_DIR` 还是 `None` → 每次开机 `NameError`，`AppExit` 自愈与升级结果确认全部失效。现在归位到 `_attach` 之后。
-- **静默安装弹窗挂起**：服务未在 30 秒内停止时安装器弹 `MsgBox`，而自动升级无人在场 → 安装永久挂起。现在静默模式只写日志，绝不弹窗。
-- **升级改用 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL`**，并落盘 `/LOG=%BASE%\logs\installer-silent.log`，装不上时有据可查。
-- **新增升级熔断**：`logs\update_attempt.json` 记录「目标版本 / 尝试次数 / 是否生效」；同版本连续 3 次未生效即停止自动重试并提示手动安装，失败后 6 小时冷却。
-- **`AppExit` 空值自愈**：空字符串不再被当成合法值（此前会让 `nssm` 刷 `Parameter "AppExit" requires a subparameter!`）；优先用 `nssm.exe` 重写 `Default Ignore`。
+### 🔴 修复（PWD_LOCK 自锁死锁：Web UI 配置页打不开、自动登录停摆）
+- **`GET /api/config` 会永久挂起**：`api_get_config()` 在 `with PWD_LOCK:` 里又调了自带
+  `with PWD_LOCK` 的 `_get_password()` —— `PWD_LOCK` 是不可重入的 `threading.Lock`，同一线程
+  二次获取即死锁（v1.x 单文件版这里是直接读 `_PWD_VALUE`，模块化拆分时成了回归）。
+- 表现：配置页字段全空、徽标显示「状态未知」、**保存请求也一起卡死**（`_save_password_to_disk`
+  抢同一把锁），刷新后看着像"编辑完又没了"；**周期性自检线程同样卡在 `_get_password()` 上
+  → 自动登录实际已停摆**（`last_check_at` 不再推进）。
+- 修复：只调 `_get_password()`（加锁责任在它内部），并把这条约定写进注释；冒烟测试新增
+  3 条静态断言 + 真实调用 `api_get_config()` 的 3 秒超时回归（再犯即 FAIL）。
+- 已装机器：把 `web_api.py` 换成本版并 `Restart-Service DrcomAutoLogin` 即可，
+  `config.json` / `password.txt` 不受影响。
 
-### 🔴 修复（其它）
-- **`#` 开头的密码被整行吃掉**：`_load_password_from_disk` 不再把「`#` 开头」当注释，只跳过安装包自带的模板提示行；并用 `utf-8-sig` 读，容忍 BOM。修前表现为登录失败 + Web UI 显示「密码未设置」，看着像升级把配置弄丢了。
-- **「关于 → 查看更新日志」报缺文件**：安装包补打包 `CHANGELOG.md`，服务端按「安装目录 → `docs\` → 上一级」查找，缺失时给中文提示 + 仓库链接（不再暴露裸路径异常）。
-
-### 🧹 文案 / 一致性
-- 启用版本线代号：`2.0` 线 = `Sirius` / 天狼星（见 `docs/VERSIONING.md`）；Web UI 徽章与「关于」页显示 `v2.0.4.0 Sirius`，安装器显示名为 `星尘闪连 (Stardust Flash Link) 2.0.4.0 "Sirius"`。
-- README 版本记录改为版本线摘要；新增 `AGENTS.md`（编辑规范）与 `docs/VERSIONING.md`（版本号 / 代号规则）。
-- README 截图重拍为当前版本，且**账号已打码**（`2023******@yd`）。
-
-### 🔒 隐私与安全
-- 新增**隐私守卫**冒烟断言：把本机 `password.txt` / `config.json` 的账号与所有入库文件比对，命中即失败（`DRCOM_DATA_DIR` 可指向安装目录）。
-- `.gitignore` 补 `*.log` / `update_attempt.json` / `installer-silent.log` / `config-export-*.zip`；测试夹具全部改为合成值。
+### ✨ 安装器外观收口
+- **桌面快捷方式**：图标从 `{sys}\shell32.dll,13`（Windows 通用图标）换成品牌 `app.ico`
+  （7 个尺寸，256 → 16 px）；安装包新增分发 `{app}\branding\app.ico`。
+- **开始菜单项**：`.url` 补 `IconFile` / `IconIndex`，不再显示浏览器默认图标。
+- **「应用和功能」卸载项**：`UninstallDisplayIcon` 改用品牌图标。
+- 服务名、`AppId`、配置结构、CLI / API 一律未动，可直接覆盖安装（`SERIAL` +1）。
 
 ## 安装包信息
 
@@ -45,48 +44,15 @@ Windows 安装程序 **v{{VERSION}} "Sirius"（天狼星）**（Inno Setup 自�
 
 ```
 Get-Service DrcomAutoLogin | Select-Object Status, StartType
+(Invoke-WebRequest http://127.0.0.1:8848/api/config -UseBasicParsing -TimeoutSec 10).StatusCode   # 必须是 200，且不能挂住
 Get-Content "D:\Program Files\DrcomAutoLogin\logs\service_stderr.log" -Tail 30
 Get-Content "D:\Program Files\DrcomAutoLogin\logs\campus_login.log" -Tail 50 | Select-String -Pattern "NameError|ModuleNotFound"
 Get-Content "D:\Program Files\DrcomAutoLogin\logs\upgrade.log" -Tail 20
 ```
 
-**预期**：`Status=Running`；stderr 无 `ModuleNotFoundError`；`campus_login.log` 无 `NameError`；
+**预期**：`Status=Running`；`/api/config` 立刻 200（死锁已修，配置页能读到值、保存立即生效）；
+stderr 无 `ModuleNotFoundError`；`campus_login.log` 无 `NameError`；
 `upgrade.log` 不再出现「几十秒一轮的下载 → 装 → 重启」死循环。
-
-## 校验
-
-```
-certutil -hashfile {{ASSET}} SHA256
-```
-
-> 本 release 是**自动升级通道**（非 prerelease）：客户端读 `/releases/latest` 取版本号与 asset `digest`（fail-closed 校验）。
-> 固定下载链接仍见 prerelease `installer`。
-
-## 安装包信息
-
-| 项 | 值 |
-| --- | --- |
-| 应用版本 | {{VERSION}} |
-| 文件名 | {{ASSET}} |
-| 大小 | {{SIZE}} bytes（约 {{SIZE_MB}} MB） |
-| SHA256 | {{SHA256}} |
-| 构建提交 | {{SHA}} |
-| 构建编号 | #{{RUN}} |
-| 构建时间 | {{DATE}} |
-| 系统要求 | Windows 10/11 x64（安装包已内嵌 Python，无需预装） |
-
-安装后会自动注册系统服务、创建桌面与开始菜单快捷方式。
-首次使用请通过 Web UI（`http://127.0.0.1:8848`）填写账号与密码。
-
-## 用户机器验证步骤（装包后跑）
-
-```
-Get-Service DrcomAutoLogin | Select-Object Status, StartType
-Get-Content "D:\Program Files\DrcomAutoLogin\logs\service_stderr.log" -Tail 30
-Get-Content "D:\Program Files\DrcomAutoLogin\logs\campus_login.log" -Tail 50 | Select-String -Pattern "NameError|ModuleNotFound"
-```
-
-**预期**：`Status=Running`；stderr 无 `ModuleNotFoundError`；`campus_login.log` 无 `NameError`。
 
 ## 校验
 

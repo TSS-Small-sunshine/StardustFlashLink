@@ -5,6 +5,36 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.4.1 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 本版两件事：**① 修一个会把 Web UI 配置页和自动登录一起卡死的死锁**；
+> **② 打包 / 外观收口** —— 桌面、开始菜单与「应用和功能」里的图标换成品牌图。
+> 接口、配置结构、服务名、`AppId` 一律未动（`SERIAL` +1）。
+
+### 🔴 修复（PWD_LOCK 自锁死锁：配置页打不开 + 自动登录停摆）
+- `fix(web_api)`: **`api_get_config()` 对不可重入锁 `PWD_LOCK` 拿了两次** —— `with PWD_LOCK:` 里
+  又调了自带 `with PWD_LOCK` 的 `_get_password()`（归档的 v1.x 版本是直接读 `_PWD_VALUE`，
+  模块化拆分时成了回归）。后果：`GET /api/config` **永久挂起** → 配置页字段全空、徽标显示
+  「状态未知」、**保存请求也一起卡死**（`_save_password_to_disk` 抢同一把锁），刷新后看着像
+  "编辑完又没了"；更严重的是周期性自检线程同样卡在 `_get_password()` 上 → **自动登录实际已停摆**
+  （`last_check_at` 不再推进）。现在只调 `_get_password()`（加锁责任在它内部），并把这条约定写进注释；
+  冒烟测试新增 3 条静态断言 + 真实调用 `api_get_config()` 的 3 秒超时回归（死锁即 FAIL）。
+
+### ✨ 改进（安装器外观）
+- `fix(installer)`: **桌面快捷方式不再是通用图标** —— `setup.iss` 的 `[Icons]` 原本把图标写成
+  `{sys}\shell32.dll,13`（Windows 通用图标），现在改为品牌 `{app}\branding\app.ico`；
+  `app.ico`（7 个尺寸，256 → 16 px）随包分发到 `{app}\branding`。
+- `fix(installer)`: **开始菜单 `.url` 带上图标** —— `CreateURLFile` 生成的 `InternetShortcut`
+  现在写 `IconFile={app}\branding\app.ico` + `IconIndex=0`，不再显示浏览器默认图标。
+- `fix(installer)`: **「应用和功能」卸载项图标** —— `UninstallDisplayIcon` 从 `联网_service.py`
+  （py 图标）改为 `{app}\branding\app.ico`。
+
+### 🔧 开发工具（不在安装包里）
+- `_ui_redesign/shot-wizard.ps1`：向导逐页截图（`PrintWindow` 渲染 + `BM_CLICK` 翻页，
+  不抢前台焦点）；修掉「按 PID 找不到向导窗口」（Inno 是 loader + 向导子进程）、
+  「误点说明文字而非按钮」、150% 缩放下截图被裁右下角、向导提前关闭后句柄失效等坑。
+- `_ui_redesign/fix-desktop-icon.ps1`：给**已装机器**补品牌图标（公共桌面只有管理员能改，需提权一次）。
+
 ## v2.0.4.0 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 本版的主题是「**自动升级到底装上了没有**」：真机上出现「每 30–60 秒一轮：发现新版本 →
