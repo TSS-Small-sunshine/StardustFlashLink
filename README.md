@@ -298,6 +298,19 @@ DrcomAutoLogin-Windows/
 
 > CI 流程：安装 Inno Setup 6 → 准备中文语言文件 → 下载 NSSM 到 `tools\` → 下载并解压内嵌 Python 到 `python\` → 用 ISCC 编译 `packaging\setup.iss` → 校验产物 → 上传 artifact → 发布到 tag `installer` 的 Release。
 
+### 分支与发布约定
+
+| 约定 | 说明 |
+| --- | --- |
+| **每个版本一个分支** | 版本分支命名 `hotfix/v{版本}`（如 `hotfix/v2.0.2.4`）。本版全部改动只落在该分支上；**不要**把新版本的改动提交到旧版本分支 |
+| 版本号单一来源 | `version.py` 的 `VERSION`；`packaging/setup.iss` 的 `MyAppVersion`、NSSM 服务描述、`install.bat` 描述、模块 docstring 必须同步 |
+| 从版本分支发版 | 工作流的自动触发只监听 `main`/`master`，版本分支用 `workflow_dispatch` 手动触发：<br>`gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLink --ref hotfix/v2.0.2.4` |
+| 一次构建出两条发布 | ① tag `installer`（**prerelease**，固定下载链接）；② tag `v{版本}`（**非 prerelease** —— `/releases/latest` 只认它，是自动升级通道） |
+| 产物名固定 | `StardustFlashLink-Setup-v{版本}.exe`（不变量 I9，存量下载链接依赖它） |
+
+> 自动升级客户端读 `/releases/latest` → 取 `tag_name` 与 asset 的 `digest`（sha256）→ **fail-closed** 校验通过才执行安装器。
+> 因此每次发版都必须有非 prerelease 的 `v{版本}` release，否则升级链路拿不到版本号与校验值。
+
 ---
 
 ## Web UI 说明
