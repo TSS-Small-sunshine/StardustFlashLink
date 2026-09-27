@@ -153,14 +153,16 @@ if errorlevel 1 (
 
 "!NSSM!" set DrcomAutoLogin AppDirectory "!SCRIPT_DIR!"
 "!NSSM!" set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"
-"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.1）"
+"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.2.4）"
 "!NSSM!" set DrcomAutoLogin Start SERVICE_AUTO_START
 "!NSSM!" set DrcomAutoLogin AppStdout "!LOG_DIR!\service_stdout.log"
 "!NSSM!" set DrcomAutoLogin AppStderr "!LOG_DIR!\service_stderr.log"
 "!NSSM!" set DrcomAutoLogin AppRotateFiles 1
 "!NSSM!" set DrcomAutoLogin AppRotateBytes 1048576
-"!NSSM!" set DrcomAutoLogin AppExit Default Restart
-"!NSSM!" set DrcomAutoLogin AppExit 0 Restart
+REM P0-7：AppExit 与 setup.iss 统一为 Ignore（v2.0.2.3 的 a77ea46 修复：
+REM 端口占用时 NSSM 不再无限重启循环）。之前这里是 Restart，与安装器行为打架。
+"!NSSM!" set DrcomAutoLogin AppExit Default Ignore
+"!NSSM!" set DrcomAutoLogin AppExit 0 Ignore
 
 REM ============================================================
 REM   立即启动测试

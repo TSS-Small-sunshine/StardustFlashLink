@@ -5,6 +5,42 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.2.4 (fix/security) — 2026-09-27
+
+> 本版把「4 个升级相关按钮点了就崩」和几处安全口子一起修掉，并改掉发布策略。
+
+### 🔴 修复（P0）
+- `fix(web_api)`: 修 6 个未定义裸名 —— 补 `import time` + 5 处跨模块调用加 `_auto_update_mod.` 前缀。
+  修前「立即检查更新 / 立即升级 / 升级开关 / 升级历史」4 个功能**运行时必然 NameError**。（P0-1）
+- `fix(auto_update)`: SHA256 校验改 **fail-closed** —— `digest` 缺失即拒绝安装并删除已下载安装器。（P0-2）
+- `fix(password)`: `_load_password_from_disk` 跳过空行与 `#` 注释行；`password.txt.template` 内容清空。
+  新装机不再把模板提示当成真实密码去登录。（P0-3）
+- `fix(restart)`: 「重启服务」改为优先 `nssm restart DrcomAutoLogin`。AppExit=Ignore 时 `os._exit(0)`
+  之后 NSSM 不会拉起，旧行为 = 点一次永久停机；找不到 nssm 才退回旧路径。（P0-7）
+- `fix(installer)`: `install.bat` 的 `AppExit` 由 `Restart` 改为 `Ignore`，与 `setup.iss` 统一；
+  `_post_upgrade_startup` **不再每次启动写回 `Restart`**（旧行为把 v2.0.2.3 的 `a77ea46`
+  「端口占用不死循环重启」修复原样撤销）。（P0-7）
+
+### 🟠 安全（P1）
+- `security(web_api)`: Host 白名单（挡 DNS rebinding）+ 写接口强制 `X-Requested-With: DrcomUI`
+  + `Origin` 同源校验；页面内 `fetch` 由注入脚本自动带头。**（P1-1 部分完成：token 鉴权仍待做）**
+- `security(auto_update)`: `digest` **只信主源 `api.github.com`**，删除 API 镜像 fallback
+  —— 镜像曾可同时伪造 releases JSON / asset URL / digest，等于校验同源。（P1-2）
+- `security(auto_update)`: 静默升级**默认关闭**（`auto_update_enabled: false`）+ 远端版本串白名单
+  （防 `..\` 穿越拼进 `%TEMP%` 文件名）。（P1-3）
+- `security(web_api)`: `/api/config/export` 不再打包明文 `password.txt`，
+  改为在 `manifest.json` 记录 `password_status`（`set` / `missing`）。（P1-4）
+
+### 🚀 发布（P1-5）
+- `ci(installer)`: 安装包发布改**版本化非 prerelease release**（tag `v{版本}`）——
+  `/releases/latest` 只返回非 prerelease，此前自动升级拿不到版本；rolling `installer` prerelease
+  仍保留作固定下载链接。
+- 版本字面量统一：`version.py` / `setup.iss MyAppVersion` / NSSM 服务描述 / `install.bat` / 模块 docstring。
+
+### 说明
+- 自动升级默认关闭 ≠ 不可用：Web UI 里仍可手动「立即升级」；等真机验证过升级链路后再评估默认开启。
+- 安装包产物名保持 `StardustFlashLink-Setup-v2.0.2.4.exe`（不变量 I9）。
+
 ## v2.0.2.3 (hotfix) — 2026-09-21
 
 - chore: 删除 `_debug/` 6 个临时诊断脚本 + 加 `.gitignore` (`f632fc3`)
