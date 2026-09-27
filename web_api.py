@@ -518,7 +518,8 @@ def api_post_config_import(handler):
                 pwd_bytes = zf.read("password.txt")
                 if pwd_bytes.strip():
                     pwd_path = os.path.join(BASE_DIR, "password.txt")
-                    tmp = pwd_path + ".tmp"
+                    # v2.0.4.5：tmp 名带 pid（同 _save_password_to_disk），避免并发写交错
+                    tmp = "{}.{}.tmp".format(pwd_path, os.getpid())
                     with open(tmp, "wb") as f:
                         f.write(pwd_bytes)
                     os.replace(tmp, pwd_path)

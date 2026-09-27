@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.4.4）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.4.5）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -199,11 +199,11 @@ def _get_password():
 
 
 def _save_password_to_disk(password):
-    """写入 password.txt（原子写：先 tmp 再 replace）。"""
+    """写入 password.txt（原子写：唯一 tmp → replace，v2.0.4.5 起 tmp 名带 pid）。"""
     global _PWD_VALUE
     if not isinstance(password, str) or len(password) < 1:
         raise ValueError("password 必须是非空字符串")
-    tmp = PASSWORD_FILE + ".tmp"
+    tmp = "{}.{}.tmp".format(PASSWORD_FILE, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(password.rstrip("\r\n") + "\n")
     os.replace(tmp, PASSWORD_FILE)
@@ -318,8 +318,13 @@ def _load_config():
 
 
 def _save_config_raw(cfg):
-    """原子写：tmp → replace。"""
-    tmp = CONFIG_FILE + ".tmp"
+    """原子写：唯一 tmp 名 → replace。
+
+    v2.0.4.5：tmp 名带上 pid —— 原先固定用 `config.json.tmp`，两个写者（例如服务 + 手动
+    跑的实例，或两个并发 POST）会往同一个文件里交错写，最终可能落盘一个半截 JSON。
+    带上 pid + 原子 replace 后，并发只会是"最后写入者胜"，不会写出损坏文件。
+    """
+    tmp = "{}.{}.tmp".format(CONFIG_FILE, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2, sort_keys=True)
     os.replace(tmp, CONFIG_FILE)

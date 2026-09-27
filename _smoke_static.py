@@ -167,6 +167,31 @@ check("v2.0.4.4 旧的单张 wizard.bmp 已不再被引用",
       "WizardImageFile=branding\\wizard.bmp" not in _iss_src
       and not pathlib.Path("packaging/branding/wizard.bmp").exists())
 
+# ---- v2.0.4.5：并发登录死逻辑 / 写盘 tmp 名 / Inno 弃用 API ----
+_src_proto = pathlib.Path("protocol.py").read_text(encoding="utf-8")
+_proto_code = "\n".join(l for l in _src_proto.splitlines() if not l.strip().startswith("#"))
+check("v2.0.4.5 run_once 改为非阻塞抢锁", "_RUN_LOCK.acquire(blocking=False)" in _src_proto)
+check("v2.0.4.5 不再先持锁再判 login_in_progress（死逻辑已除）", "with _RUN_LOCK:" not in _proto_code)
+check("v2.0.4.5 手工抢到的锁会被释放", "_RUN_LOCK.release()" in _src_proto)
+check("v2.0.4.5 config 写盘用唯一 tmp 名", '"{}.{}.tmp"' in src_svc and "CONFIG_FILE, os.getpid()" in src_svc)
+check("v2.0.4.5 password 写盘用唯一 tmp 名", "PASSWORD_FILE, os.getpid()" in src_svc)
+check("v2.0.4.5 installer 不再用弃用的 IsTaskSelected",
+      "WizardIsTaskSelected('desktopicon')" in _iss_src
+      and "if IsTaskSelected('desktopicon')" not in _iss_src)
+
+# 行为级：非阻塞抢锁的语义（连点登录不再排队，靠的就是这两条）
+# 注意：protocol._RUN_LOCK 平时由 _attach() 注入（导入时是 None），这里自己放一把，
+# 只影响本测试进程，不碰正在跑的服务。
+import threading as _th2
+import protocol as _pl
+_pl._RUN_LOCK = _th2.Lock()
+_got1 = _pl._RUN_LOCK.acquire(blocking=False)
+check("v2.0.4.5 RUN_LOCK 可非阻塞抢到", _got1 is True)
+_got2 = _pl._RUN_LOCK.acquire(blocking=False)
+check("v2.0.4.5 已占用时非阻塞抢锁立即返回 False（不排队）", _got2 is False)
+if _got1:
+    _pl._RUN_LOCK.release()
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -351,7 +376,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.4.4", version.VERSION == "2.0.4.4", version.VERSION)
+check("版本 = 2.0.4.5", version.VERSION == "2.0.4.5", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

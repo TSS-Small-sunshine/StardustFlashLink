@@ -5,6 +5,31 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.4.5 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
+
+> 技术债收口（C 组）：三处"不致命但迟早咬人"的小问题，外加把 PR 自动检查闸门装上。
+> 接口、配置结构、服务名未动（`SERIAL` +1）。
+
+### 🔧 修复
+- `fix(protocol)`: **`run_once` 的"忙判定"是死逻辑** —— 原代码是 `with _RUN_LOCK:` 之后才判
+  `_STATE["login_in_progress"]`，而 `_RUN_LOCK` 本身已经把并发串行化了，那个判断**永远为假**；
+  于是连点「立即登录」会排队执行 N 次完整检查（每次都是等网络 + 查在线 + 登录）。
+  现在改成**非阻塞抢锁**（`_RUN_LOCK.acquire(blocking=False)`）：抢不到就立即返回并记一行日志，
+  真正的"忙"以锁为准；手工抢到的锁用 `try/finally` 保证任何分支（含中途 return）都会释放。
+- `fix(联网_service)`: **`config.json` / `password.txt` 的原子写改用唯一 tmp 名** —— 原先固定
+  `config.json.tmp` / `password.txt.tmp`，两个写者（服务 + 手动跑的实例，或两个并发 POST）会往
+  同一个文件里交错写，极端情况下会落盘半截 JSON。现在 tmp 名带上 pid，并发只会"最后写入者胜"。
+  （`web_api` 配置导入里写 `password.txt` 的那处同样处理。）
+- `fix(installer)`: `IsTaskSelected` → `WizardIsTaskSelected`（ISCC 编译时一直提示的弃用项，Inno 6 新名字）。
+
+### 🧪 测试 / 交付
+- 冒烟新增 8 条：6 条静态 + 2 条**行为级**（同一线程里非阻塞抢锁：第一次 True、第二次立即 False
+  —— "连点不再排队"靠的就是这条语义）。
+- **新增 PR 检查闸门**（PR #12）：`.github/workflows/pr-checks.yml` 在 PR 上跑 `compileall` +
+  静态冒烟 + HTTP 冒烟，**不发布任何东西**（发布链路仍只由 `push → main` 的
+  `build-installer.yml` 负责）；顺带修掉 CI 上 cp1252 控制台让中文断言名崩掉的问题
+  （job 级 `PYTHONIOENCODING=utf-8` + 两个脚本的 `reconfigure(errors="backslashreplace")` 兜底）。
+
 ## v2.0.4.4 (fix) — 2026-09-27 · 代号 `Sirius`（天狼星）
 
 > 安装向导外观收口：把 `_ui_redesign/flashlink-mock.iss` 上真机逐页验证过的多尺寸品牌图接进真包。
