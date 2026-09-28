@@ -428,12 +428,12 @@ def api_get_changelog():
     return _eula_mod.api_get_changelog()
 
 
-def api_post_restart(handler):
-    """重启服务（P0-7）。
+def _restart_service_soon():
+    """稍后重启服务：优先 `nssm restart DrcomAutoLogin`，否则退回 `os._exit(0)`。
 
-    优先 `nssm restart DrcomAutoLogin`：AppExit 策略是 `Ignore`（v2.0.2.3 起，
-    防端口冲突时 NSSM 死循环重启），因此 `os._exit(0)` 之后 NSSM **不会**再拉起，
-    点「重启服务」会变成永久停机。只有 nssm 不可用时才退回旧行为。
+    P0-7：AppExit 策略是 `Ignore`（v2.0.2.3 起，防端口冲突时 NSSM 死循环重启），
+    因此 `os._exit(0)` 之后 NSSM **不会**再拉起 —— 点「重启服务」会变成永久停机。
+    v2.0.11.0 从 `api_post_restart` 里抽出来，让「回滚」也能复用同一条重启路径。
     """
     def _delayed_restart():
         nssm = os.path.join(BASE_DIR, "tools", "nssm.exe")
@@ -452,7 +452,35 @@ def api_post_restart(handler):
         time.sleep(0.3)
         os._exit(0)
     threading.Thread(target=_delayed_restart, daemon=True).start()
+
+
+def api_post_restart(handler):
+    """重启服务（P0-7）。"""
+    _restart_service_soon()
     return 200, {"ok": True, "message": "服务正在重启"}
+
+
+# ============================================================
+# 版本回滚 API（v2.0.11.0 / P6-6）
+# ============================================================
+def api_get_rollback():
+    """GET /api/rollback — 可回滚的版本列表（薄壳，业务逻辑在 auto_update）。"""
+    try:
+        return _auto_update_mod.api_get_rollback()
+    except Exception as exc:  # noqa: BLE001  面板坏了不该拖垮配置页
+        logger.exception("读取回滚备份失败: %s", exc)
+        return 500, {"ok": False, "error": "读取备份列表失败：{}".format(exc), "backups": []}
+
+
+def api_post_rollback(payload):
+    """POST /api/rollback — {version?}：把代码回滚到备份版本，成功后重启服务。
+
+    只还原代码文件（配置 / 密码不动）；回滚成功必须重启 —— 当前进程内存里还是新代码。
+    """
+    status, body = _auto_update_mod.api_post_rollback(payload)
+    if status == 200 and isinstance(body, dict) and body.get("ok"):
+        _restart_service_soon()
+    return status, body
 
 
 # ============================================================
@@ -812,6 +840,10 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/update/history":
                 _send_json(self, 200, api_get_update_history())
                 return
+            if path == "/api/rollback":
+                _status, _body = api_get_rollback()
+                _send_json(self, _status, _body)
+                return
             if path == "/api/metrics":
                 _days = 7
                 if "days=" in self.path:
@@ -885,6 +917,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/update/toggle":
                 status, body = api_post_update_toggle(payload)
+                _send_json(self, status, body)
+                return
+            if path == "/api/rollback":
+                status, body = api_post_rollback(payload)
                 _send_json(self, status, body)
                 return
             # —— 配置方案（v2.0.9.0 / B5）——
@@ -1930,6 +1966,16 @@ code.path {
           <button class="btn btn-secondary" id="btn-update-install-now" type="button">立即升级</button>
         </div>
         <div class="hint" style="margin-top:6px;">点「立即检查更新」拉 GitHub；发现新版再点「立即升级」（升级前自动停服务，约 30-60 秒）</div>
+      </div>
+
+      <div class="field">
+        <div class="hint" style="margin-bottom:8px;">版本回滚（升级把服务弄挂时的退路）</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <select id="rollback-version" style="min-width:210px;"></select>
+          <button class="btn btn-secondary" id="btn-rollback-now" type="button">回滚到该版本</button>
+          <button class="btn btn-secondary" id="btn-rollback-refresh" type="button">刷新列表</button>
+        </div>
+        <div class="hint" id="rollback-hint" style="margin-top:6px;">正在读取备份列表...</div>
       </div>
     </div>
 
@@ -3185,6 +3231,74 @@ code.path {
         })
         .catch(function () { toast('请求失败', 'error'); });
     });
+  })();
+
+  // —— 版本回滚（v2.0.11.0 / P6-6）：列出升级前的备份，一键回退 ——
+  // 回滚只还原代码文件；config.json / password.txt 一律不动（服务端保证）。
+  (function () {
+    var sel = $('rollback-version');
+    var hint = $('rollback-hint');
+    if (!sel || !hint) return;
+
+    function render(data) {
+      var items = (data && data.ok && data.backups) ? data.backups : [];
+      sel.innerHTML = '';
+      if (!items.length) {
+        var empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = '（暂无备份）';
+        sel.appendChild(empty);
+        hint.textContent = '暂无可用备份：第一次自动升级成功后才会生成（每份含全部代码文件 + 逐个 sha256）。';
+        return;
+      }
+      items.forEach(function (b) {
+        var opt = document.createElement('option');
+        opt.value = b.version;
+        opt.textContent = 'v' + b.version
+          + (b.created_at ? '（' + String(b.created_at).replace('T', ' ') + '）' : '')
+          + (b.current ? ' · 当前' : '');
+        opt.disabled = !!b.current;
+        sel.appendChild(opt);
+      });
+      var pick = items.filter(function (b) { return !b.current; })[0];
+      if (pick) sel.value = pick.version;
+      hint.textContent = '当前 v' + ((data && data.current_version) || '?')
+        + '；备份保留 ' + ((data && data.retention_days) || 7) + ' 天（至少留 '
+        + ((data && data.keep_min) || 2) + ' 份）。回滚只还原代码文件，配置与密码不动。';
+    }
+
+    function load() {
+      hint.textContent = '正在读取备份列表...';
+      fetch('/api/rollback', { cache: 'no-store', headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(render)
+        .catch(function () { hint.textContent = '读取备份列表失败（服务未响应？）'; });
+    }
+
+    var refreshBtn = $('btn-rollback-refresh');
+    if (refreshBtn) refreshBtn.addEventListener('click', load);
+
+    var rollbackBtn = $('btn-rollback-now');
+    if (rollbackBtn) rollbackBtn.addEventListener('click', function () {
+      var v = sel.value;
+      if (!v) { toast('没有可回滚的版本', 'warn', 4000); return; }
+      if (!confirm('确认回滚到 v' + v + '？\n\n- 只还原代码文件：配置、密码、方案都不动\n'
+                 + '- 服务会重启，Web UI 约 15 秒不可用\n'
+                 + '- 回滚后如需再升级，点「立即升级」即可\n\n继续？')) return;
+      toast('正在回滚到 v' + v + '...', 'warn', 4000);
+      postUpdateJson('/api/rollback', { version: v })
+        .then(function (data) {
+          if (data && data.ok) {
+            toast(data.message || '已回滚，服务正在重启', 'success', 8000);
+          } else {
+            toast('回滚失败: ' + ((data && data.error) || '未知错误'), 'error', 8000);
+          }
+          if (typeof pollUpdate === 'function') pollUpdate();
+        })
+        .catch(function () { toast('请求失败（服务可能正在重启）', 'error', 6000); });
+    });
+
+    load();
   })();
 
   /* ===== 配置方案（v2.0.9.0 / B5）：教室 / 宿舍 / 家里 ===== */

@@ -803,6 +803,212 @@ if _saved_temp is None:
 else:
     os.environ["TEMP"] = _saved_temp
 
+# ---- v2.0.11.0：备份改整目录 + 自动/手动回滚（P6-6 / T4.4）----
+# 背景：v2.0.10.0 的看门狗只解决「发现」；这一版给「回不去」补退路 ——
+# 旧实现只备份 联网_service.py 一个文件（v2.0.2 拆 9 个模块后不够）+ 放 %TEMP%（会被清理）。
+import json  # noqa: E402  （本文件后段才 import 它，这里先用上）
+import shutil  # noqa: E402
+
+check("v2.0.11.0 回滚白名单 = 随包分发的 .py 清单（双向一致）",
+      _iss_py_sources | {"联网_service.py"} == set(au.ROLLBACK_MODULES)
+      and 'Source: "..\\联网_service.py"' in _iss_src,
+      "白名单:%s vs 打包:%s" % (sorted(au.ROLLBACK_MODULES), sorted(_iss_py_sources | {"联网_service.py"})))
+check("v2.0.11.0 备份目录名走白名单（防 `..\\` 穿越）",
+      au.ROLLBACK_VERSION_RE.match("2.0.10.0") is not None
+      and au.ROLLBACK_VERSION_RE.match("..\\evil") is None
+      and au.ROLLBACK_VERSION_RE.match("") is None
+      and au._backup_dir_for("../evil") is None)
+
+_appbox = tempfile.mkdtemp(prefix="drcom_app_")
+_logbox2 = tempfile.mkdtemp(prefix="drcom_logs_")
+_rb_state = {}
+_saved_g2 = {k: au.__dict__.get(k) for k in ("LOG_DIR", "UPGRADE_LOG_FILE", "logger", "BASE_DIR")}
+
+
+def _au_attach(base, logdir):
+    """把 auto_update 的注入点指到沙箱（等价于服务 main() 里那次 _attach）。"""
+    au._attach(
+        logger=_au_logger, state=_rb_state, state_lock=threading.Lock(), update_lock=threading.Lock(),
+        tools_dir=os.path.join(base, "tools"), nssm_path=os.path.join(base, "tools", "nssm.exe"),
+        upgrade_log_file=os.path.join(logdir, "upgrade.log"), log_dir=logdir, base_dir=base,
+        load_config=lambda: {}, save_config=lambda *a: None,
+        now_iso=lambda: "2026-09-28T00:00:00", stop_event=threading.Event())
+
+
+_py_names = [n for n in au.ROLLBACK_MODULES if n not in ("metrics.py", "profiles.py")]
+for _n in _py_names:
+    pathlib.Path(os.path.join(_appbox, _n)).write_text("# fake %s\n" % _n, encoding="utf-8")
+pathlib.Path(os.path.join(_appbox, "config.json")).write_text('{"account": "fake-acct"}', encoding="utf-8")
+_au_attach(_appbox, _logbox2)
+# metrics.py / profiles.py 故意不建 = 模拟「可选模块没装上」
+_bk = au._backup_modules(version="1.2.3", note="冒烟")
+_man = {}
+if _bk and os.path.isfile(os.path.join(_bk, au.BACKUP_MANIFEST_NAME)):
+    with open(os.path.join(_bk, au.BACKUP_MANIFEST_NAME), encoding="utf-8") as _f:
+        _man = json.load(_f)
+check("v2.0.11.0 备份落到 {app}\\backup\\<版本>\\",
+      bool(_bk) and os.path.normcase(_bk) == os.path.normcase(au._backup_dir_for("1.2.3")), repr(_bk))
+check("v2.0.11.0 清单逐个记 sha256（能校验备份有没有被改）",
+      all(_man.get("files", {}).get(n) == au._sha256_hex(os.path.join(_bk, n)) for n in _py_names),
+      repr(sorted(_man.get("files", {}))))
+check("v2.0.11.0 config.json 只作人工参考、不进回滚清单",
+      "config.json" in _man.get("files", {}) and "config.json" not in _man.get("rollback_files", []))
+check("v2.0.11.0 可选模块缺失不算失败（也不进清单）",
+      "metrics.py" not in _man.get("files", {}) and "metrics.py" not in _man.get("rollback_files", []))
+check("v2.0.11.0 备份失败就不升级（宁可这次不升，也不能在回不去的状态换代码）",
+      '_backup_modules(version=VERSION, note="升级到 {}".format(remote_ver))' in src_upd
+      and "已中止升级" in src_upd)
+
+# 行为级 A：把生成的回滚脚本**真跑起来**（正常 / 备份被改坏 / 拿错版本 / 清单缺失 / 非法文件名）
+_rbdir = tempfile.mkdtemp(prefix="drcom_rb_")
+_saved_temp2 = os.environ.get("TEMP")
+os.environ["TEMP"] = _rbdir                    # 让 _run_rollback 的临时文件也落沙箱
+_scr = os.path.join(_rbdir, "drcom_rollback.py")
+_rb_rc = os.path.join(_rbdir, "rollback.rc")
+_rb_log = os.path.join(_logbox2, "upgrade.log")
+_rb_src = au._build_rollback_script(_bk, _appbox, _rb_rc, _rb_log)
+pathlib.Path(_scr).write_text(_rb_src, encoding="utf-8")
+check("v2.0.11.0 回滚脚本：占位符全填好 / 不 import 项目模块 / 不含凭据",
+      "__RB_" not in _rb_src and "import auto_update" not in _rb_src
+      and "password" not in _rb_src.lower() and "联网" not in _rb_src)
+
+
+def _break_app(tag):
+    for _n in _py_names:
+        pathlib.Path(os.path.join(_appbox, _n)).write_text("# %s\n" % tag, encoding="utf-8")
+
+
+def _run_rb(*args):
+    return subprocess.run([sys.executable, _scr, "--rc", _rb_rc, "--log", _rb_log] + list(args),
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+
+
+def _app_now():
+    return {n: pathlib.Path(os.path.join(_appbox, n)).read_text(encoding="utf-8") for n in _py_names}
+
+
+_break_app("BROKEN")
+_r1 = _run_rb("--tag", "auto", "--expect", "1.2.3")
+_r1_out = _r1.stdout.decode("utf-8", "replace")
+_r1_rc = pathlib.Path(_rb_rc).read_text(encoding="utf-8") if os.path.isfile(_rb_rc) else ""
+_r1_log = pathlib.Path(_rb_log).read_text(encoding="utf-8") if os.path.isfile(_rb_log) else ""
+check("v2.0.11.0 回滚：文件真还原（内容逐一相等）+ 退出码 0",
+      _r1.returncode == 0 and all(_app_now()[n] == "# fake %s\n" % n for n in _py_names), _r1_out[:140])
+check("v2.0.11.0 回滚：rc 落 rollback=OK + rollback_version",
+      "rollback=OK" in _r1_rc and "rollback_version=1.2.3" in _r1_rc, repr(_r1_rc))
+check("v2.0.11.0 回滚：upgrade.log 留中文结论（并声明配置与密码未改动）",
+      "版本回滚" in _r1_log and "配置与密码未改动" in _r1_log)
+check("v2.0.11.0 回滚：绝不碰 config.json",
+      pathlib.Path(os.path.join(_appbox, "config.json")).read_text(encoding="utf-8") == '{"account": "fake-acct"}')
+
+# 备份被改坏（复制一份出来改）→ fail-closed：拒绝还原，app 里一个文件都不许动
+_bk_bad = au._backup_dir_for("1.4.4")
+shutil.copytree(_bk, _bk_bad)
+pathlib.Path(os.path.join(_bk_bad, "version.py")).write_text("# TAMPERED\n", encoding="utf-8")
+_break_app("KEEP")
+_r2 = _run_rb("--backup", _bk_bad, "--tag", "auto", "--expect", "1.4.4")
+_r2_rc = pathlib.Path(_rb_rc).read_text(encoding="utf-8") if os.path.isfile(_rb_rc) else ""
+check("v2.0.11.0 回滚：备份被改坏就拒绝（退出码 1 + 末行 rollback=FAIL）",
+      _r2.returncode == 1 and _r2_rc.strip().splitlines()[-1] == "rollback=FAIL", repr(_r2_rc))
+check("v2.0.11.0 回滚：拒绝时 all-or-nothing（app 文件原样未动）",
+      all(_app_now()[n] == "# KEEP\n" for n in _py_names))
+
+_r3 = _run_rb("--backup", _bk, "--expect", "9.9.9")
+check("v2.0.11.0 回滚：--expect 与备份版本不符 → 拒绝（防拿错备份）",
+      _r3.returncode == 1 and "但期望" in _r3.stdout.decode("utf-8", "replace"))
+
+_bk_no_man = au._backup_dir_for("2.2.2")
+os.makedirs(_bk_no_man, exist_ok=True)
+_r4 = _run_rb("--backup", _bk_no_man)
+check("v2.0.11.0 回滚：清单缺失 → 拒绝",
+      _r4.returncode == 1 and "读不了备份清单" in _r4.stdout.decode("utf-8", "replace"))
+
+_bk_evil = au._backup_dir_for("3.3.3")
+os.makedirs(_bk_evil, exist_ok=True)
+with open(os.path.join(_bk_evil, au.BACKUP_MANIFEST_NAME), "w", encoding="utf-8") as _f:
+    json.dump({"version": "3.3.3", "files": {"..\\evil.py": "x"}, "rollback_files": ["..\\evil.py"]}, _f)
+_r5 = _run_rb("--backup", _bk_evil)
+check("v2.0.11.0 回滚：清单里带路径分隔符的文件名 → 拒绝（不许写到 app 外）",
+      _r5.returncode == 1 and "非法文件名" in _r5.stdout.decode("utf-8", "replace")
+      and not os.path.isfile(os.path.join(os.path.dirname(_appbox), "evil.py")))
+
+# 行为级 B：接口层（GET 列表 / 忙时 409 / 非法与不存在的版本 / 默认取最新并真还原）
+_st_rb, _b_rb = au.api_get_rollback()
+check("v2.0.11.0 GET /api/rollback：列表 + 保留策略 + 不把本机绝对路径抛给前端",
+      _st_rb == 200 and _b_rb.get("ok") and _b_rb.get("current_version") == au.VERSION
+      and any(x["version"] == "1.2.3" for x in _b_rb.get("backups", []))
+      and _b_rb.get("retention_days") == au.BACKUP_RETENTION_DAYS
+      and all("path" not in x for x in _b_rb.get("backups", [])), repr(_b_rb)[:170])
+_rb_state["update_lock"] = True
+_st_busy, _b_busy = au.api_post_rollback({"version": "1.2.3"})
+_rb_state["update_lock"] = False
+check("v2.0.11.0 POST /api/rollback：忙（正在升级）→ 409，不硬来",
+      _st_busy == 409 and _b_busy.get("ok") is False and "任务进行中" in _b_busy.get("error", ""), repr(_b_busy))
+_st_ev, _b_ev = au.api_post_rollback({"version": "../evil"})
+check("v2.0.11.0 POST /api/rollback：版本串非法 → 400", _st_ev == 400 and "非法" in _b_ev.get("error", ""))
+_st_nf, _b_nf = au.api_post_rollback({"version": "9.9.9"})
+check("v2.0.11.0 POST /api/rollback：找不到该版本 → 404", _st_nf == 404 and "找不到" in _b_nf.get("error", ""))
+_saved_ver2 = au.VERSION
+au.VERSION = "1.2.3"
+_st_cur, _b_cur = au.api_post_rollback({"version": "1.2.3"})
+au.VERSION = _saved_ver2
+check("v2.0.11.0 POST /api/rollback：目标就是当前版本 → 400（不白折腾）",
+      _st_cur == 400 and "无需回滚" in _b_cur.get("error", ""))
+_break_app("BROKEN2")
+au._write_update_attempt("9.9.9", count=1, state="attempted")
+_st_ok, _b_ok = au.api_post_rollback({})
+check("v2.0.11.0 POST /api/rollback：默认取最新备份并真还原（与自动回滚同一份脚本）",
+      _st_ok == 200 and _b_ok.get("ok") and _b_ok.get("version") == "1.2.3"
+      and all(_app_now()[n] == "# fake %s\n" % n for n in _py_names), repr(_b_ok)[:170])
+check("v2.0.11.0 回滚成功即清「升级尝试记录」（重启后旧代码不再误报「升级未生效」）",
+      "_clear_update_attempt()" in src_upd
+      and not os.path.isfile(os.path.join(_logbox2, "update_attempt.json")))
+
+# 执行器（.cmd）：自动回滚接线 + 顺序 + 缺件降级
+_wrap_rb = au._build_update_wrapper(
+    r"C:\T\DrcomAutoLogin-Setup-v9.9.9.exe", r"D:\App", r"C:\T\l.log", r"C:\T\r.txt", "MyTask",
+    python_path=r"C:\App\python\python.exe", probe_path=r"C:\T\drcom_health_probe.py", ui_port=8848,
+    backup_dir=r"D:\App\backup\1.2.3", rollback_path=r"C:\T\drcom_rollback.py")
+check("v2.0.11.0 执行器：两轮不健康 → 停服务 → 回滚 → 起服务 → 再探（顺序钉死）",
+      "--tag auto" in _wrap_rb and "--expect 1.2.3" in _wrap_rb and "--tag after-rollback" in _wrap_rb
+      and _wrap_rb.index("--tag retry") < _wrap_rb.index("--tag auto") < _wrap_rb.index("--tag after-rollback"))
+check("v2.0.11.0 执行器：缺件（python / 回滚脚本 / 备份）落 rollback=SKIP",
+      _wrap_rb.count("echo rollback=SKIP") == 3, str(_wrap_rb.count("echo rollback=SKIP")))
+check("v2.0.11.0 执行器：收尾把回滚脚本也删掉", 'del /f /q "C:\\T\\drcom_rollback.py"' in _wrap_rb)
+check("v2.0.11.0 执行器：回滚路径同样不外泄凭据",
+      "password" not in _wrap_rb.lower() and "PWD" not in _wrap_rb)
+check("v2.0.11.0 启动钩子回报回滚结论（OK / FAIL / SKIP 三种都有话说）",
+      all(s in src_upd for s in ('rollback == "OK"', 'rollback == "FAIL"', 'rollback == "SKIP"')))
+
+# 行为级 C：启动钩子不再被「%TEMP% 里没有旧式备份」卡住
+# （这正是「备份从 %TEMP% 挪到整目录」会踩的坑：迁移后钩子会整段静默失效 ✗）
+_au_restore = {k: au.__dict__.get(k) for k in
+               ("_cleanup_update_leftovers", "_ensure_nssm_appexit_sane", "_ensure_tray_autostart_sane")}
+au._cleanup_update_leftovers = lambda: None
+au._ensure_nssm_appexit_sane = lambda: "Ignore"
+au._ensure_tray_autostart_sane = lambda: {"action": "keep", "want": True, "current": "x"}
+os.environ["TEMP"] = tempfile.mkdtemp(prefix="drcom_empty_")   # 空目录 = 没有旧式备份
+if os.path.isfile(au.UPGRADE_LOG_FILE):
+    os.remove(au.UPGRADE_LOG_FILE)
+au._post_upgrade_startup()
+_hook_log = pathlib.Path(au.UPGRADE_LOG_FILE).read_text(encoding="utf-8") if os.path.isfile(au.UPGRADE_LOG_FILE) else ""
+check("v2.0.11.0 启动钩子：没有旧式备份也照常跑完（回滚清单 / AppExit / 托盘自启）",
+      "可用回滚备份" in _hook_log and "AppExit 策略由安装器维持" in _hook_log
+      and "托盘自启项" in _hook_log, repr(_hook_log[-160:]))
+for _k, _v in _au_restore.items():
+    au.__dict__[_k] = _v
+
+# 沙箱收尾：还原注入点与 TEMP，别影响后面「版本一致性 / 隐私守卫」
+for _k, _v in _saved_g2.items():
+    if _v is None:
+        au.__dict__.pop(_k, None)
+    else:
+        au.__dict__[_k] = _v
+if _saved_temp2 is None:
+    os.environ.pop("TEMP", None)
+else:
+    os.environ["TEMP"] = _saved_temp2
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -906,7 +1112,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.10.0", version.VERSION == "2.0.10.0", version.VERSION)
+check("版本 = 2.0.11.0", version.VERSION == "2.0.11.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

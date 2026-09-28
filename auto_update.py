@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -97,6 +98,36 @@ HEALTH_PROBE_INTERVAL_SEC = 1.0
 HEALTH_PROBE_TIMEOUT_SEC = 2.0
 # 随包分发的内嵌解释器（setup.iss 把 python\ 整个拷进 {app}\python）
 EMBEDDED_PYTHON_REL = os.path.join("python", "python.exe")
+
+# ---- v2.0.11.0（P6-6 / T4.4）：升级备份与回滚 ----
+# 背景（v2.0.10.0 的看门狗只解决了「发现」）：升级把服务弄挂了以后，用户手上没有退路 ——
+# 旧实现 `_backup_service_py` 只复制 `联网_service.py` **一个**文件（v2.0.2 拆成 9 个模块后
+# 就不够了 ✗），而且放在 %TEMP%（会被磁盘清理删掉 ✗）。
+# 现在：
+#   1) 升级前把「随包分发的代码文件」整目录备份到 `{app}\backup\<旧版本>\` + manifest.json
+#      （文件清单 + 逐个 sha256 + 时间）—— 安装目录不归 Inno 管，升级不会动它 ✓；
+#   2) 执行器在「探测两轮都不健康」时**自动回滚**：停服务 → 校验并还原这些文件 → 起服务 → 再探；
+#   3) Web UI 也能手动回滚（同一份回滚脚本 —— 手测到的就是自动会跑的那条路径 ✓）。
+# 边界：备份里**也存一份 config.json 仅作人工参考**，但回滚**只还原代码文件**，
+#       **绝不碰 config.json / password.txt**（不变量 I6 / I8：升级与回滚都不该动用户数据）。
+UPDATE_ROLLBACK_NAME = "drcom_rollback.py"
+BACKUP_DIR_NAME = "backup"                 # {app}\backup\<版本>\
+BACKUP_MANIFEST_NAME = "manifest.json"
+BACKUP_NOTE_MAX = 120
+BACKUP_KEEP_MIN = 2                        # 无论多旧，至少留最新 2 份备份
+ROLLBACK_MODULES = (
+    "联网_service.py",
+    "version.py",
+    "protocol.py",
+    "web_api.py",
+    "eula.py",
+    "auto_update.py",
+    "metrics.py",      # 可选模块（缺文件不致命，但装了就要能回滚）
+    "profiles.py",
+    "tray.py",
+)
+# 备份目录名 = 版本号 → 必须过白名单（防 `..\` 穿越到别的目录去 ✗）
+ROLLBACK_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$")
 # nssm 的 AppExit 是**子键 + 子值**：Default 存在子键的 (默认) 值里，0 存在名为 "0" 的值里
 APPEXIT_SUBKEY = NSSM_PARAMETERS_PATH + r"\AppExit"
 APPEXIT_DEFAULT_VALUE = ""
@@ -453,16 +484,335 @@ def _verify_sha256(path, expected_hex):
     return h.hexdigest().lower() == expected_hex.lower()
 
 
-def _backup_service_py():
-    """复制联网_service.py 到 %TEMP%，返回 backup 路径。"""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup = os.path.join(os.environ.get("TEMP", "."), "drcom_backup_{}.py".format(ts))
+def _sha256_hex(path):
+    """算文件 sha256（十六进制，小写）；读不了返回 None。"""
+    h = hashlib.sha256()
     try:
-        shutil.copy2(os.path.join(BASE_DIR, "联网_service.py"), backup)
-        return backup
-    except OSError as exc:
-        logger.error("备份联网_service.py 失败: %s", exc)
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(DOWNLOAD_CHUNK_BYTES), b""):
+                h.update(chunk)
+    except OSError:
         return None
+    return h.hexdigest().lower()
+
+
+def _backup_root():
+    """备份根目录：{app}\\backup（安装目录不归 Inno 管 → 升级不会动它）。"""
+    return os.path.join(BASE_DIR, BACKUP_DIR_NAME)
+
+
+def _backup_dir_for(version):
+    """某个版本的备份目录；版本串非法（可能是穿越尝试）返回 None（纯函数）。"""
+    if not isinstance(version, str) or not ROLLBACK_VERSION_RE.match(version):
+        return None
+    return os.path.join(_backup_root(), version)
+
+
+def _backup_modules(version=None, note=""):
+    """把「随包分发的代码文件」整目录备份到 `{app}\\backup\\<版本>\\`，返回备份目录。
+
+    v2.0.11.0（P6-6 / T4.4）替换掉旧的 `_backup_service_py`：
+      旧：只复制 `联网_service.py` 一个文件（v2.0.2 拆模块后不够 ✗）+ 落在 %TEMP%（会被清理 ✗）；
+      新：`ROLLBACK_MODULES` 全清单 + `manifest.json`（逐个 sha256）→ 回滚脚本据此校验，
+          **备份被改坏就拒绝恢复**（fail-closed），不会把半套文件写回去 ✓。
+    另外存一份 `config.json` **仅供人工比对**：回滚脚本只还原代码文件，绝不碰配置与密码 ✓。
+    缺可选模块（metrics / profiles 没装上）不算失败 ✓。
+    """
+    ver = version or VERSION
+    d = _backup_dir_for(ver)
+    if d is None:
+        _log_upgrade("ERROR", "备份失败：版本串非法 {!r}".format(ver))
+        return None
+    files = {}
+    try:
+        os.makedirs(d, exist_ok=True)
+        for name in ROLLBACK_MODULES:
+            src = os.path.join(BASE_DIR, name)
+            if not os.path.isfile(src):
+                continue
+            dst = os.path.join(d, name)
+            shutil.copy2(src, dst)
+            digest = _sha256_hex(dst)
+            if digest is None:
+                raise OSError("无法校验备份文件 {}".format(name))
+            files[name] = digest
+        cfg = os.path.join(BASE_DIR, "config.json")
+        if os.path.isfile(cfg):
+            shutil.copy2(cfg, os.path.join(d, "config.json"))
+            files["config.json"] = _sha256_hex(os.path.join(d, "config.json"))
+        manifest = {
+            "version": ver,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "note": (note or "")[:BACKUP_NOTE_MAX],
+            "rollback_files": [n for n in ROLLBACK_MODULES if n in files],
+            "files": files,
+        }
+        with open(os.path.join(d, BACKUP_MANIFEST_NAME), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        logger.error("备份当前版本失败: %s", exc)
+        _log_upgrade("ERROR", "备份到 {} 失败：{}".format(d, exc))
+        return None
+    _log_upgrade("INFO", "已备份 {} 个文件到 {}（回滚用）".format(len(files), d))
+    return d
+
+
+def _parse_backup_manifest(d):
+    """读备份目录的 manifest.json；缺失 / 坏掉返回 None。"""
+    try:
+        with open(os.path.join(d, BACKUP_MANIFEST_NAME), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+        return None
+    return data
+
+
+def _list_backups():
+    """列出可用备份（新的在前）：[{version, created_at, path, files, rollback_files}]。"""
+    out = []
+    root = _backup_root()
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    for name in names:
+        d = _backup_dir_for(name)
+        if d is None or not os.path.isdir(d):
+            continue
+        man = _parse_backup_manifest(d)
+        if man is None:
+            continue
+        out.append({
+            "version": name,
+            "created_at": man.get("created_at") or "",
+            "path": d,
+            "files": len(man.get("files") or {}),
+            "rollback_files": len(man.get("rollback_files") or []),
+            "current": name == VERSION,
+        })
+    out.sort(key=lambda b: b.get("created_at") or "", reverse=True)
+    return out
+
+
+def _prune_backups():
+    """清掉过期备份：7 天前的删掉，但**最新的 2 份永远保留**（`BACKUP_KEEP_MIN`）。"""
+    backups = _list_backups()
+    keep = {b["path"] for b in backups[:BACKUP_KEEP_MIN]}
+    cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+    for b in backups[BACKUP_KEEP_MIN:]:
+        if b["path"] in keep:
+            continue
+        try:
+            if os.path.getmtime(b["path"]) >= cutoff:
+                continue
+            shutil.rmtree(b["path"], ignore_errors=False)
+            _log_upgrade("INFO", "清理过期备份：v{}（{}）".format(b["version"], b["created_at"]))
+        except OSError as exc:
+            logger.warning("清理备份 %s 失败: %s", b["path"], exc)
+
+
+# 回滚脚本模板（自包含、只用标准库、不 import 任何项目模块 —— 被升级搞坏的正是那些模块）。
+# 用 .replace 填参数（脚本里有 % 与花括号，别用 %-格式化 / .format）。
+_ROLLBACK_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""drcom_rollback.py — 把「升级前备份的代码文件」还原回去（v2.0.11.0）。
+
+由 auto_update.py 生成到 %TEMP%，两种调用者共用**同一份**脚本：
+  1. 升级执行器（.cmd）：探两轮都探不到 /api/health 时自动回滚；
+  2. Web UI 的「回滚」按钮（服务自己起一个子进程跑它，再重启服务）。
+共用同一份的意义：**手测到的就是自动会跑的那条路径**。
+
+它只碰 manifest 里 `rollback_files` 列出的**代码文件** ——
+`config.json` / 密码文件 / 日志 / 备份目录本身都不动。
+
+安全（fail-closed，三个都过才动手）：
+  1. manifest.json 必须能读、且 `rollback_files` 里全是**裸 .py 文件名**（不许路径分隔符 ✗）；
+  2. 备份目录里每个文件的 sha256 必须与 manifest 记录一致（备份被改坏就拒绝 ✗）；
+  3. `--expect` 给的版本必须与 manifest 的版本一致（防拿错备份 ✗）。
+全部校验通过之后才逐个复制，并把复制结果再校验一遍 sha256。
+
+退出码：0 = 已回滚；1 = 没回滚（原因写在日志与 rc 里）。
+"""
+import hashlib
+import json
+import os
+import shutil
+import sys
+import time
+
+try:  # 控制台编码兜底
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sys.stderr.reconfigure(errors="backslashreplace")
+except (AttributeError, ValueError):
+    pass
+
+DEFAULT_BACKUP = __RB_BACKUP__
+DEFAULT_APP = __RB_APP__
+DEFAULT_RC = __RB_RC__
+DEFAULT_LOG = __RB_LOG__
+
+
+def _parse_args(argv):
+    opts = {"backup": DEFAULT_BACKUP, "app": DEFAULT_APP, "rc": DEFAULT_RC,
+            "log": DEFAULT_LOG, "expect": "", "tag": "manual"}
+    i = 0
+    while i + 1 < len(argv):
+        key, val = argv[i], argv[i + 1]
+        i += 2
+        if key in ("--backup", "--app", "--rc", "--log", "--expect", "--tag"):
+            opts[key[2:]] = val
+    return opts
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(256 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest().lower()
+
+
+def _append(path, line):
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\\n")
+    except OSError:
+        pass
+
+
+def _safe_name(name):
+    """裸文件名白名单：不许目录分隔符 / 盘符 / 上跳（防写到 app 目录外面去）。"""
+    if not name or name in (".", ".."):
+        return False
+    for ch in ("/", "\\\\", ":", "*", "?", '"', "<", ">", "|"):
+        if ch in name:
+            return False
+    return name.endswith(".py")
+
+
+def main(argv):
+    o = _parse_args(argv)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    tag = o["tag"]
+
+    def fail(reason):
+        _append(o["rc"], "rollback=FAIL")
+        _append(o["log"], "[%s] [ERROR] 版本回滚（%s）：未执行 —— %s" % (stamp, tag, reason))
+        print("rollback=FAIL %s" % reason)
+        return 1
+
+    man_path = os.path.join(o["backup"], "manifest.json")
+    try:
+        with open(man_path, "r", encoding="utf-8") as f:
+            man = json.load(f)
+    except (OSError, ValueError) as exc:
+        return fail("读不了备份清单 %s（%s）" % (man_path, exc))
+    if not isinstance(man, dict) or not isinstance(man.get("files"), dict):
+        return fail("备份清单结构不对：%s" % man_path)
+    version = str(man.get("version") or "")
+    if o["expect"] and version != o["expect"]:
+        return fail("备份版本是 %s，但期望 %s（拿错备份？）" % (version or "?", o["expect"]))
+    names = man.get("rollback_files") or []
+    if not names:
+        return fail("备份清单里没有可回滚的代码文件")
+    bad = [n for n in names if not _safe_name(n)]
+    if bad:
+        return fail("备份清单里有非法文件名：%s" % bad)
+    if not os.path.isdir(o["app"]):
+        return fail("安装目录不存在：%s" % o["app"])
+
+    for n in names:                      # 先全量校验，再动手（all-or-nothing）
+        src = os.path.join(o["backup"], n)
+        if not os.path.isfile(src):
+            return fail("备份里缺文件：%s" % n)
+        if _sha256(src) != (man["files"].get(n) or "").lower():
+            return fail("备份文件被改动过：%s（sha256 不符）" % n)
+
+    done = []
+    for n in names:
+        src = os.path.join(o["backup"], n)
+        dst = os.path.join(o["app"], n)
+        try:
+            shutil.copy2(src, dst)
+        except OSError as exc:
+            return fail("还原 %s 失败：%s" % (n, exc))
+        if _sha256(dst) != (man["files"].get(n) or "").lower():
+            return fail("还原后校验失败：%s" % n)
+        done.append(n)
+
+    _append(o["rc"], "rollback=OK")
+    _append(o["rc"], "rollback_version=%s" % version)
+    _append(o["log"], "[%s] [WARN] 版本回滚（%s）：已还原 v%s 的 %d 个代码文件到 %s"
+            "（配置与密码未改动）" % (stamp, tag, version or "?", len(done), o["app"]))
+    print("rollback=OK version=%s files=%d" % (version or "?", len(done)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+
+
+def _build_rollback_script(backup_dir, app_dir, rc_path, log_path):
+    """生成回滚脚本内容（纯函数，便于单测 / 行为级冒烟）。"""
+    return (_ROLLBACK_TEMPLATE
+            .replace("__RB_BACKUP__", repr(backup_dir or ""))
+            .replace("__RB_APP__", repr(app_dir or ""))
+            .replace("__RB_RC__", repr(rc_path or ""))
+            .replace("__RB_LOG__", repr(log_path or "")))
+
+
+def _rollback_script_path():
+    """回滚脚本路径（%TEMP%，与执行器同级；执行器跑完会删掉它）。"""
+    return os.path.join(_update_tmp_dir(), UPDATE_ROLLBACK_NAME)
+
+
+def _write_rollback_script(backup_dir=None, rc_path=None):
+    """把回滚脚本落盘（自动回滚与手动回滚共用同一份），返回路径；失败返回 None。"""
+    path = _rollback_script_path()
+    try:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(_build_rollback_script(
+                backup_dir or os.path.join(_backup_root(), "<version>"),
+                BASE_DIR,
+                rc_path if rc_path is not None else _rc_path(),
+                UPGRADE_LOG_FILE,
+            ))
+    except OSError as exc:
+        logger.warning("写回滚脚本失败: %s", exc)
+        return None
+    return path
+
+
+def _run_rollback(backup_dir, expect=None, tag="manual"):
+    """跑一次回滚（子进程，用**随包内嵌**解释器）。返回 (ok, detail)。"""
+    rc_path = os.path.join(_update_tmp_dir(), "drcom_rollback.rc")
+    path = _write_rollback_script(backup_dir=backup_dir, rc_path=rc_path)
+    if path is None:
+        return False, "无法写回滚脚本"
+    try:
+        if os.path.isfile(rc_path):
+            os.remove(rc_path)
+    except OSError:
+        pass
+    args = [sys.executable, path, "--backup", backup_dir, "--app", BASE_DIR,
+            "--rc", rc_path, "--log", UPGRADE_LOG_FILE, "--tag", tag]
+    if expect:
+        args += ["--expect", str(expect)]
+    try:
+        proc = subprocess.run(args, timeout=180, check=False,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, "回滚脚本执行失败：{}".format(exc)
+    out = (proc.stdout or b"").decode("utf-8", "replace").strip()
+    detail = out.splitlines()[-1] if out else "无输出"
+    return proc.returncode == 0, detail
 
 
 def _read_nssm_appexit():
@@ -949,7 +1299,7 @@ def _build_health_probe_script(rc_path, log_path, port, host=HEALTH_PROBE_HOST,
 
 def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name, svc_name=SERVICE_NAME,
                           sc_path=None, schtasks_path=None, python_path=None, probe_path=None,
-                          ui_port=None):
+                          ui_port=None, backup_dir=None, rollback_path=None):
     """生成升级执行器的 .cmd 内容（纯函数，便于单测）。
 
     包装脚本要在一个「不在 NSSM Job 里」的进程里完成这些事：
@@ -959,19 +1309,27 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
       3. 把 installer 日志复制到安装目录 logs\\ 下，方便用户 / Web UI 查看；
       4. **看门狗 A（服务状态）**：`sc query` 没 RUNNING 就 `sc start`
          （v2.0.4.1 真机：装不上 + 服务停在 StopPending，自动登录直接停摆）；
-      5. **看门狗 B（HTTP 健康，v2.0.10.0 新增）**：探 `/api/health`，探不到就
+      5. **看门狗 B（HTTP 健康，v2.0.10.0）**：探 `/api/health`，探不到就
          「停 + 起」重启一次再给一次窗口。`sc query` 只看 nssm 的 wrapper，
          AppExit=Ignore 下里面的 Python 崩了 wrapper 照样 RUNNING —— 真机两次事故的根因；
-      6. 收尾：删计划任务、删探针、删自己。
+      6. **自动回滚（v2.0.11.0）**：两轮都不健康 → 停服务 → 用升级前那份备份还原代码
+         → 起服务 → 再探一次。这样「升坏了」不再需要用户重装安装包；
+      7. 收尾：删计划任务、删探针与回滚脚本、删自己。
 
     新增参数都已给默认值（老调用点与老断言不受影响）：
-        python_path / probe_path  显式指定内嵌解释器与探针脚本（默认取实际路径）
-        ui_port                   要探的 Web UI 端口（非法值退回 8848）
+        python_path / probe_path     内嵌解释器与探针脚本（默认取实际路径）
+        ui_port                      要探的 Web UI 端口（非法值退回 8848）
+        backup_dir / rollback_path   升级前的备份目录与回滚脚本（缺一个就落 rollback=SKIP）
     """
     sc = sc_path or SC_PATH
     schtasks = schtasks_path or SCHTASKS_PATH
     py = python_path if python_path is not None else _embedded_python_path()
     probe = probe_path if probe_path is not None else _health_probe_path()
+    rollback = rollback_path if rollback_path is not None else _rollback_script_path()
+    bk = backup_dir or ""
+    bk_ver = os.path.basename(bk.rstrip("\\/")) if bk else ""
+    # 备份目录名 = 版本号 → 只有过白名单才把它当 --expect 传下去（拿错备份要能拒绝）
+    expect_arg = " --expect " + bk_ver if ROLLBACK_VERSION_RE.match(bk_ver) else ""
     port = _normalize_ui_port(ui_port)
     lines = [
         "@echo off",
@@ -1010,19 +1368,37 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         '"' + sc + '" start ' + svc_name + ' >nul 2>&1',
         '"' + py + '" "' + probe + '" --port ' + str(port) + ' --rc "%RC%" --tag retry'
         ' --wait ' + str(int(HEALTH_PROBE_RETRY_WAIT_SEC)) + ' >nul 2>&1',
+        "if not errorlevel 1 goto after_health",
+        "rem ---- 4c) 两轮都不健康 -> 自动回滚到升级前那份代码（v2.0.11.0）----",
+        'rem 回滚只还原代码文件；配置文件与密码文件一律不动。缺件就落 rollback=SKIP。',
+        'if not exist "' + py + '" >>"%RC%" echo rollback=SKIP',
+        'if not exist "' + py + '" goto after_health',
+        'if not exist "' + rollback + '" >>"%RC%" echo rollback=SKIP',
+        'if not exist "' + rollback + '" goto after_health',
+        'if not exist "' + bk + '" >>"%RC%" echo rollback=SKIP',
+        'if not exist "' + bk + '" goto after_health',
+        '"' + sc + '" stop ' + svc_name + ' >nul 2>&1',
+        'ping -n 4 127.0.0.1 >nul 2>&1',
+        '"' + py + '" "' + rollback + '" --backup "' + bk + '" --app "' + app_dir + '" --tag auto'
+        + expect_arg + ' --rc "%RC%" >nul 2>&1',
+        '"' + sc + '" start ' + svc_name + ' >nul 2>&1',
+        "rem 回滚后再探一次：结果会作为 rc 里最后一条 health= 落盘（多行以最后一条为准）",
+        '"' + py + '" "' + probe + '" --port ' + str(port) + ' --rc "%RC%" --tag after-rollback'
+        ' --wait ' + str(int(HEALTH_PROBE_RETRY_WAIT_SEC)) + ' >nul 2>&1',
         ":after_health",
         "rem ---- 5) 服务状态回写（放在健康探测之后，取的是最终状态）----",
         '"' + sc + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
         'if errorlevel 1 (echo service=STOPPED>>"%RC%") else (echo service=RUNNING>>"%RC%")',
-        "rem ---- 6) 收尾：删任务、删探针、删自己 ----",
+        "rem ---- 6) 收尾：删任务、删探针与回滚脚本、删自己 ----",
         '"' + schtasks + '" /delete /tn "' + task_name + '" /f >nul 2>&1',
         'del /f /q "' + probe + '" >nul 2>&1',
+        'del /f /q "' + rollback + '" >nul 2>&1',
         'del /f /q "%~f0" >nul 2>&1',
     ]
     return "\r\n".join(lines) + "\r\n"
 
 
-def _launch_installer(installer_path, ui_port=None):
+def _launch_installer(installer_path, ui_port=None, backup_dir=None):
     """启动 installer，返回 {"mode": ..., "pid": ...}；抛 OSError 表示全都失败。
 
     v2.0.4.2 修（真机证据见文件头注释）：优先用**任务计划程序**拉起包装脚本 ——
@@ -1030,8 +1406,10 @@ def _launch_installer(installer_path, ui_port=None):
     setup.iss 在 ssInstall 阶段 `nssm stop` 服务时不会把它连带杀死。
     任务计划程序不可用时才退回旧的 DETACHED_PROCESS 直启（保持旧行为）。
 
-    v2.0.10.0：顺带把健康探测脚本写到 %TEMP%（执行器在 installer 跑完后用它探
-    `/api/health`）。写失败不致命 —— 执行器会落一行 `health=SKIP` 退回旧判据。
+    v2.0.10.0：顺带写健康探测脚本（执行器用它探 `/api/health`）。写失败不致命 ——
+    执行器会落一行 `health=SKIP` 退回旧判据。
+    v2.0.11.0：再写一个回滚脚本并把 `backup_dir` 传下去 —— 两轮都不健康时执行器会
+    自动还原升级前的代码（写失败只是落 `rollback=SKIP`，不影响升级本身）。
     """
     log_path = _installer_log_path()
     wrapper = _wrapper_path()
@@ -1051,10 +1429,13 @@ def _launch_installer(installer_path, ui_port=None):
         _log_upgrade("WARN", "写健康探测脚本失败：{}（本次升级只看服务状态）".format(exc))
         probe = None
 
+    rollback = _write_rollback_script(backup_dir=backup_dir) if backup_dir else None
+
     try:
         with open(wrapper, "w", encoding="utf-8", newline="\r\n") as f:
             f.write(_build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME,
-                                          probe_path=probe, ui_port=port))
+                                          probe_path=probe, ui_port=port,
+                                          backup_dir=backup_dir, rollback_path=rollback))
     except OSError as exc:
         _log_upgrade("WARN", "写升级执行器失败：{}（退回直启）".format(exc))
         wrapper = None
@@ -1218,10 +1599,11 @@ def _do_update_now():
             return {"ok": False, "error": msg}
         _log_upgrade("INFO", "SHA256 校验通过")
 
-        # —— 6. 备份当前脚本 ——
-        backup = _backup_service_py()
+        # —— 6. 备份当前代码（v2.0.11.0：整目录 + manifest）——
+        # 备份失败就**不升级**：宁可这次不升，也不能在「回不去」的状态下换代码。
+        backup = _backup_modules(version=VERSION, note="升级到 {}".format(remote_ver))
         if backup is None:
-            msg = "备份联网_service.py 失败"
+            msg = "备份当前版本 v{} 失败，已中止升级".format(VERSION)
             _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
             _log_upgrade("ERROR", msg)
             try:
@@ -1248,7 +1630,7 @@ def _do_update_now():
         prev_count = int(prev_attempt.get("count") or 0) if prev_attempt.get("target") == remote_ver else 0
         _write_update_attempt(remote_ver, count=prev_count + 1, state="attempted")
         try:
-            launch = _launch_installer(installer_path, cfg.get("ui_port"))
+            launch = _launch_installer(installer_path, cfg.get("ui_port"), backup)
             _log_upgrade("INFO", "installer 已启动（方式={}，PID={}，第 {} 次尝试；收尾将探 http://{}:{}{}）".format(
                 launch.get("mode"), launch.get("pid"), prev_count + 1,
                 HEALTH_PROBE_HOST, _normalize_ui_port(cfg.get("ui_port")), HEALTH_PROBE_PATH))
@@ -1329,6 +1711,64 @@ def _do_check_now():
 
 
 # ============================================================
+# v2.0.11.0：版本回滚（P6-6 / T4.4）
+# ============================================================
+def api_get_rollback():
+    """GET /api/rollback —— 可回滚的版本列表 + 当前版本（只读，不改任何状态）。"""
+    backups = _list_backups()
+    return 200, {
+        "ok": True,
+        "current_version": VERSION,
+        "retention_days": BACKUP_RETENTION_DAYS,
+        "keep_min": BACKUP_KEEP_MIN,
+        "backups": [{k: v for k, v in b.items() if k != "path"} for b in backups],
+    }
+
+
+def api_post_rollback(payload):
+    """POST /api/rollback —— 把代码回滚到指定（默认最新）备份。
+
+    只还原 `ROLLBACK_MODULES` 里的**代码文件**：`config.json` / `password.txt` 一律不动 ✓。
+    跑的是**与自动回滚同一份脚本**（手测到的就是自动会跑的那条路径 ✓）。
+    成功后调用方（web_api）负责重启服务 —— 当前进程内存里还是新代码，不重启不生效。
+    """
+    if is_update_busy():
+        return 409, {"ok": False, "error": "任务进行中（{}），请稍候再试".format(update_busy_message())}
+    if not _acquire_update_lock():
+        return 409, {"ok": False, "error": "任务进行中，请稍候再试"}
+    try:
+        want = str((payload or {}).get("version") or "").strip()
+        if want and not ROLLBACK_VERSION_RE.match(want):
+            return 400, {"ok": False, "error": "版本串非法：{!r}".format(want)}
+        backups = _list_backups()
+        if not backups:
+            return 404, {"ok": False, "error": "没有可用备份（还没成功备份过，或备份已被清理）"}
+        target = want or backups[0]["version"]
+        if target == VERSION:
+            return 400, {"ok": False, "error": "当前已运行 v{}，无需回滚".format(VERSION)}
+        chosen = next((b for b in backups if b["version"] == target), None)
+        if chosen is None:
+            return 404, {"ok": False, "error": "找不到 v{} 的备份".format(target)}
+        _log_upgrade("WARN", "用户请求回滚：v{} -> v{}（备份时间 {}）".format(
+            VERSION, target, chosen.get("created_at") or "?"))
+        _set_update_state(update_progress_message="正在回滚到 v{}...".format(target))
+        ok, detail = _run_rollback(chosen["path"], expect=target, tag="manual")
+        if not ok:
+            _set_update_state(update_state="error", update_progress_message="回滚失败",
+                              update_last_error="回滚到 v{} 失败：{}".format(target, detail))
+            return 500, {"ok": False, "error": "回滚失败：{}".format(detail), "version": target}
+        # 回滚成功 → 清掉「升级尝试记录」：服务重启后（跑的是旧代码）启动钩子
+        # 不该再报「上次自动升级未生效」，那会让人以为回滚没成功。
+        _clear_update_attempt()
+        _set_update_state(update_state=None, update_progress=0, update_progress_message="",
+                          update_last_error=None)
+        return 200, {"ok": True, "version": target, "restarting": True,
+                     "message": "已回滚到 v{}，服务正在重启（约 15 秒后刷新页面）".format(target)}
+    finally:
+        _release_update_lock()
+
+
+# ============================================================
 # 自动升级后台线程
 # ============================================================
 def _auto_update_loop():
@@ -1384,50 +1824,54 @@ def _auto_update_loop():
 
 
 def _post_upgrade_startup():
-    """启动钩子：检查是否刚升级过（对比当前脚本与备份），写日志 + 清理。"""
+    """启动钩子：确认上次升级结果 + 报告回滚 + 清理残留 + 自愈 AppExit / 托盘自启。
+
+    v2.0.11.0 修一个**只有新备份方案才会暴露**的陷阱：旧实现开头写着
+    「%TEMP% 里没有 `drcom_backup_*.py` 就直接 return」—— 备份改成整目录
+    （`{app}\\backup\\<旧版本>\\`）之后 %TEMP% 里再也不会出现那种文件，于是
+    「尝试确认 / 执行器结果 / AppExit 自愈 / 托盘自启」**会被整段静默跳过** ✗。
+    现在旧式备份只剩「提示脚本变过」这一个用途（且只影响那一行日志），其余步骤一律执行 ✓。
+    """
     try:
-        backups = []
+        # —— A) 旧式 %TEMP% 备份（v2.0.11.0 之前）：只用来提示 + 顺手清理 ——
+        legacy = []
         for name in os.listdir(os.environ.get("TEMP", ".")):
             if name.startswith("drcom_backup_") and name.endswith(".py"):
-                backups.append(name)
-        backups.sort(reverse=True)  # 最新在前
-        if not backups:
-            return
-        # 最新备份
-        newest = os.path.join(os.environ.get("TEMP", "."), backups[0])
-        if not os.path.isfile(newest):
-            return
-        # 对比 hash
-        def _h(p):
-            hh = hashlib.sha256()
-            try:
-                with open(p, "rb") as f:
-                    for c in iter(lambda: f.read(DOWNLOAD_CHUNK_BYTES), b""):
-                        hh.update(c)
-            except OSError:
-                return None
-            return hh.hexdigest()
-        current_hash = _h(os.path.join(BASE_DIR, "联网_service.py"))
-        backup_hash = _h(newest)
-        if current_hash and backup_hash and current_hash != backup_hash:
-            # v2.0.4.2：**不再**据此宣告"升级完成"。备份是升级前随手落的，
-            # 拿它比 hash 会把"任何一次脚本改动（含手动热补丁）"误判成"升级成功" ——
-            # 真机上就出现过"绿 banner 说已升级，实际还是旧版本"（22:41 那次日志）。
-            # 成功与否一律由下面的尝试记录（目标版本 vs 当前版本）判定。
-            _log_upgrade("INFO", "启动钩子：联网_service.py 与最近备份不同（可能是升级，也可能只是本地改动）")
-        else:
-            _log_upgrade("INFO", "启动钩子：未检测到脚本变更")
+                legacy.append(name)
+        legacy.sort(reverse=True)  # 最新在前
+        if legacy:
+            newest = os.path.join(os.environ.get("TEMP", "."), legacy[0])
+            if os.path.isfile(newest):
+                # v2.0.4.2：**不再**据此宣告"升级完成"。备份是升级前随手落的，
+                # 拿它比 hash 会把"任何一次脚本改动（含手动热补丁）"误判成"升级成功" ——
+                # 真机上就出现过"绿 banner 说已升级，实际还是旧版本"（22:41 那次日志）。
+                # 成功与否一律由下面的尝试记录（目标版本 vs 当前版本）判定。
+                current_hash = _sha256_hex(os.path.join(BASE_DIR, "联网_service.py"))
+                backup_hash = _sha256_hex(newest)
+                if current_hash and backup_hash and current_hash != backup_hash:
+                    _log_upgrade("INFO", "启动钩子：联网_service.py 与最近备份不同（可能是升级，也可能只是本地改动）")
+                else:
+                    _log_upgrade("INFO", "启动钩子：未检测到脚本变更")
+            cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+            for name in legacy[1:]:
+                p = os.path.join(os.environ.get("TEMP", "."), name)
+                try:
+                    if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                        os.remove(p)
+                        _log_upgrade("INFO", "清理过期备份：{}".format(name))
+                except OSError:
+                    pass
 
-        # 清理 7 天前的旧备份
-        cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
-        for name in backups[1:]:
-            p = os.path.join(os.environ.get("TEMP", "."), name)
-            try:
-                if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
-                    os.remove(p)
-                    _log_upgrade("INFO", "清理过期备份：{}".format(name))
-            except OSError:
-                pass
+        # —— B) 整目录备份（v2.0.11.0 起）：清过期（最新 2 份永远保留）+ 报可用清单 ——
+        try:
+            _prune_backups()
+        except Exception as exc:  # noqa: BLE001  清理失败不该拖垮后面的自愈步骤
+            logger.warning("清理过期备份异常: %s", exc)
+        try:
+            _log_upgrade("INFO", "可用回滚备份：{}".format(
+                "、".join("v{}".format(b["version"]) for b in _list_backups()) or "无"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("列备份失败: %s", exc)
 
         # —— v2.0.4.0：用尝试记录确认"上次自动升级到底装上没有" ——
         # 之前只比对备份 hash，无法区分"同版本重装"与"根本没装上"，
@@ -1524,6 +1968,31 @@ def _report_update_runner_result(wait_sec=0):
     elif health == "SKIP":
         _log_upgrade("WARN", "升级看门狗：本次没做 HTTP 健康探测（缺内嵌 python 或探测脚本），只看服务状态")
 
+    # v2.0.11.0：自动回滚结论。执行器在「两轮都不健康」时会用升级前那份备份还原代码 ——
+    #   成功：本进程跑的是**回滚后**的代码（若回滚回了旧版本，那个旧版本不认识这行，
+    #         所以真正的「人读」告警由回滚脚本自己写进 upgrade.log）；
+    #   失败：本进程仍是新代码 → 这里必须给出明确指引，不能让它静默变砖 ✗。
+    rollback = None
+    for l in lines:
+        if l.startswith("rollback="):
+            rollback = l.split("=", 1)[1].strip()
+    if rollback == "OK":
+        _log_upgrade("WARN", "升级看门狗：上次升级探测失败后**已自动回滚**到备份版本 —— "
+                             "请看 logs\\upgrade.log 里的「版本回滚」那行，确认现在跑的是哪一版")
+        _set_update_state(
+            update_last_error="上次升级后服务没起来，已自动回滚（详见 logs\\upgrade.log）",
+        )
+    elif rollback == "FAIL":
+        _log_upgrade("ERROR", "升级看门狗：自动回滚**失败**（{}）—— 服务现在虽然起来了，但代码可能处于"
+                              "「半新半旧」；请重新运行安装包，或在 Web UI「配置 → 自动升级」里手动回滚".format(detail))
+        _set_update_state(
+            update_state="error",
+            update_progress_message="自动回滚失败，建议手动回滚或重装",
+            update_last_error="上次升级失败且自动回滚失败（详见 logs\\upgrade.log）",
+        )
+    elif rollback == "SKIP":
+        _log_upgrade("WARN", "升级看门狗：没做自动回滚（缺备份 / 内嵌 python / 回滚脚本），只做了重启重试")
+
 
 def _cleanup_update_leftovers():
     """清掉升级残留：包装脚本 / 结果文件 / 计划任务 / 已装上的安装包。
@@ -1546,8 +2015,9 @@ def _cleanup_update_leftovers():
                 _log_upgrade("INFO", "已归档安装日志：{}".format(dst))
     except OSError as exc:
         logger.warning("归档 installer 日志失败: %s", exc)
-    # 2) 包装脚本 / 结果文件 / 健康探测脚本：只清陈旧的（刚跑完那次的交给执行器自己收尾）
-    for p in (_wrapper_path(), _rc_path(), _health_probe_path()):
+    # 2) 包装脚本 / 结果文件 / 探针 / 回滚脚本：只清陈旧的（刚跑完那次的交给执行器自己收尾）
+    for p in (_wrapper_path(), _rc_path(), _health_probe_path(), _rollback_script_path(),
+              os.path.join(_update_tmp_dir(), "drcom_rollback.rc")):
         try:
             if os.path.isfile(p) and os.path.getmtime(p) < stale_before:
                 os.remove(p)
