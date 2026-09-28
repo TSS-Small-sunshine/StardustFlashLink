@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.7.1
+;   版本: v2.0.8.0
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.7.1.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.8.0.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.7.1"
+  #define MyAppVersion "2.0.8.0"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -68,6 +68,7 @@ Source: "..\protocol.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\eula.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\web_api.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\metrics.py"; DestDir: "{app}"; Flags: ignoreversion
 ; 托盘小程序（v2.0.6.2）：随登录启动，轮询本机 /api/status 弹断线通知
 Source: "..\tray.py"; DestDir: "{app}"; Flags: ignoreversion
 ; Web UI 品牌图片：服务端 /branding/* 静态路由从这里读取（顶栏 logo + favicon）
@@ -272,7 +273,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.7.1）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.8.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

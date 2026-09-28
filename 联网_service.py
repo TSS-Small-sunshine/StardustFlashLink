@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.7.1）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.8.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -474,6 +474,15 @@ import auto_update as _auto_update_mod
 
 
 # ============================================================
+# 连接质量统计（v2.0.8.0 / B4）已进 metrics.py
+#   —— 纯日志解析（campus_login.log），不落第二份状态文件：重启不清零、升级不丢
+# ============================================================
+import metrics as _metrics_mod
+
+# _metrics_mod._attach() 在 main() 里调用（只需 log_dir / base_dir / load_config / logger）。
+
+
+# ============================================================
 # 后台线程
 # ============================================================
 def _startup_trigger():
@@ -630,6 +639,13 @@ def main():
         stop_event=STOP_EVENT,
         run_once_fn=run_once,
         auto_update_mod=_auto_update_mod,
+    )
+    # 4.7b 连接质量统计（v2.0.8.0）：只要日志目录 + 配置读取 + logger
+    _metrics_mod._attach(
+        logger=logger,
+        log_dir=LOG_DIR,
+        base_dir=BASE_DIR,
+        load_config=_load_config,
     )
     # 4.8 把共享状态注入 auto_update 模块（后台线程 / 升级流程需要）
     _auto_update_mod._attach(

@@ -5,6 +5,8 @@
 跑法：python _smoke_http.py（在 DrcomAutoLogin-Windows 目录下）
 """
 import http.client
+import json
+import os
 import sys
 import threading
 from http.server import ThreadingHTTPServer
@@ -31,6 +33,19 @@ def _req(method, path, headers):
     ctype = resp.getheader("Content-Type") or ""
     conn.close()
     return resp.status, ctype
+
+
+def _get_json(path):
+    """GET 一个 JSON 接口并解析（v2.0.8.0 的 /api/metrics 要断言字段，不只断言状态码）。"""
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=15)
+    conn.request("GET", path, headers={"Host": HOST})
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+    try:
+        return json.loads(body)
+    except ValueError:
+        return {"_unparsable": body[:120]}
 
 
 def _check(name, got, want, note=""):
@@ -72,6 +87,67 @@ try:
     # 8) 路径穿越 / 非图片扩展名 → 404
     _check("路径穿越被拒", _req("GET", "/branding/..%2fweb_api.py", {"Host": HOST})[0], 404)
     _check("非图片扩展名被拒", _req("GET", "/branding/web_api.py", {"Host": HOST})[0], 404)
+
+    # ============================================================
+    # v2.0.8.0（B4）：/api/metrics —— 连接质量面板的端到端断言
+    # 合成一份「7 天窗口内」的最小日志（三种走向各一次），断言**算出来的数字**，
+    # 而不是「接口没报错」。全程离线：延迟量的是本机测试端口。
+    # ============================================================
+    import metrics as _metrics
+    import tempfile
+    import time as _time
+
+    _mdir = tempfile.mkdtemp(prefix="drcom_metrics_")
+    _now = _time.time()
+
+    def _ts(offset_sec):
+        return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(_now - offset_sec))
+
+    _log_lines = [
+        "[%s] [INFO] 开始检查 (reason=periodic)" % _ts(300),
+        "[%s] [INFO] 网络已可达（第 1 次尝试，耗时 0.25s）" % _ts(300),
+        "[%s] [INFO] 已在线，无需登录" % _ts(299),
+        "[%s] [INFO] 开始检查 (reason=periodic)" % _ts(200),
+        "[%s] [INFO] 网络已可达（第 1 次尝试，耗时 0.25s）" % _ts(200),
+        "[%s] [INFO] 登录成功: Portal协议认证成功！" % _ts(198),
+        "[%s] [INFO] 开始检查 (reason=periodic)" % _ts(100),
+        "[%s] [ERROR] 登录失败: 账号不存在或账号未绑定宽带" % _ts(100),
+        "[%s] [WARNING] 登录失败，进入退避：连续 1 次，下次重试 5 分钟后（…）" % _ts(100),
+        "这一行没有时间戳前缀，必须被忽略",
+    ]
+    _log_path = os.path.join(_mdir, "campus_login.log")
+    with open(_log_path, "w", encoding="utf-8") as _f:
+        _f.write("\n".join(_log_lines) + "\n")
+    _metrics.LOG_DIR = _mdir
+    _metrics._load_config = lambda: {"host": "127.0.0.1", "port": PORT}   # 本机端口 → 延迟必成功
+    web_api._metrics_mod = _metrics
+
+    _m = _get_json("/api/metrics?days=7")
+    _check("v2.0.8.0 /api/metrics 三种走向各计一次",
+           (_m.get("checks"), _m.get("online"), _m.get("relogin"), _m.get("fail"),
+            _m.get("unknown")), (3, 1, 1, 1, 0),
+           "checks=%s online=%s relogin=%s fail=%s unknown=%s"
+           % (_m.get("checks"), _m.get("online"), _m.get("relogin"), _m.get("fail"),
+              _m.get("unknown")))
+    _check("v2.0.8.0 /api/metrics 在线率 66.7%", _m.get("uptime_pct"), 66.7)
+    _check("v2.0.8.0 /api/metrics 平均恢复耗时 2000ms", _m.get("avg_recover_ms"), 2000)
+    _check("v2.0.8.0 /api/metrics 可达耗时 250ms（本版起记录的新字段）",
+           _m.get("avg_reach_ms"), 250)
+    _check("v2.0.8.0 /api/metrics 当前延迟可测（本机端口，应 >= 0）",
+           isinstance(_m.get("latency_ms"), int) and _m.get("latency_ms") >= 0, True,
+           str(_m.get("latency_ms")))
+    _check("v2.0.8.0 /api/metrics 7 天序列 + 当天计数",
+           len(_m.get("series") or []) == 7
+           and (_m.get("series") or [{}])[-1].get("relogin") == 1, True,
+           str((_m.get("series") or [{}])[-1]))
+    _check("v2.0.8.0 /api/metrics 坏参数回退 7 天",
+           (_get_json("/api/metrics?days=abc") or {}).get("days"), 7)
+    _metrics.LOG_DIR = os.path.join(_mdir, "不存在的目录")
+    _check("v2.0.8.0 /api/metrics 日志缺失 → 0 周期且不 500",
+           (_get_json("/api/metrics?days=7") or {}).get("checks"), 0)
+    web_api._metrics_mod = None
+    _check("v2.0.8.0 /api/metrics 模块未注入 → 优雅降级（不 500）",
+           (_get_json("/api/metrics?days=7") or {}).get("ok") is False, True)
 finally:
     server.shutdown()
 

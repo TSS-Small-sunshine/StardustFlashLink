@@ -351,6 +351,45 @@ check("v2.0.7.1 用独立进程起新实例（DETACHED_PROCESS + 不继承控制
 check("v2.0.7.1 新实例起不来时把互斥体拿回来（不放弃当前进程）",
       "self.mutex_handle = _single_instance()[0]" in _tray_src)
 
+# ---- v2.0.8.0（B4）：连接质量面板（数据来自 logs/campus_login.log，不落新状态文件）----
+_mx = importlib.import_module("metrics")
+check("v2.0.8.0 打包带上 metrics.py", 'Source: "..\\metrics.py"' in _iss_src)
+check("v2.0.8.0 服务注入 metrics（_attach 在位）",
+      "import metrics as _metrics_mod" in src_svc and "_metrics_mod._attach(" in src_svc)
+check("v2.0.8.0 /api/metrics 路由 + 优雅降级",
+      'path == "/api/metrics"' in src_web and "def api_get_metrics(" in src_web
+      and "统计模块未就绪" in src_web)
+check("v2.0.8.0 状态页有连接质量卡片",
+      'id="card-quality"' in src_web and 'id="kpi-uptime"' in src_web
+      and 'id="qbars"' in src_web)
+check("v2.0.8.0 柱图是纯 CSS（不引入图表库）",
+      ".qbars" in src_web and "chart.js" not in src_web.lower()
+      and "echarts" not in src_web.lower())
+# 行为级：三种走向 + 窗口过滤 + 老格式（没有「耗时」字段）容忍
+_ev = _mx.parse_log_lines([
+    "[2026-09-28 07:28:05] [INFO] 开始检查 (reason=periodic)",
+    "[2026-09-28 07:28:05] [INFO] 网络已可达（第 2 次尝试）",        # 老格式：无耗时
+    "[2026-09-28 07:28:06] [INFO] 登录成功: Portal协议认证成功！",
+    "[2026-09-28 07:00:00] [INFO] 开始检查 (reason=periodic)",
+    "[2026-09-28 07:00:00] [INFO] 已在线，无需登录",
+    "[2026-08-01 07:00:00] [INFO] 开始检查 (reason=periodic)",        # 窗口外 → 不计
+    "[2026-08-01 07:00:01] [ERROR] 登录失败: 老数据",
+    "没有时间戳的行也要被忽略",
+])
+_sum = _mx.summarize(_mx.group_cycles(_ev), _mx._parse_ts("2026-09-28 09:00:00"), days=7)
+check("v2.0.8.0 三种走向解析正确（online/relogin/checks）",
+      (_sum["checks"], _sum["online"], _sum["relogin"]) == (2, 1, 1),
+      str((_sum["checks"], _sum["online"], _sum["relogin"])))
+check("v2.0.8.0 窗口外的周期不计入", _sum["fail"] == 0, str(_sum["fail"]))
+check("v2.0.8.0 平均恢复耗时 = 1 秒", _sum["avg_recover_ms"] == 1000,
+      str(_sum["avg_recover_ms"]))
+check("v2.0.8.0 老格式行不炸：可达耗时 None、重试次数照算",
+      _sum["avg_reach_ms"] is None and _sum["avg_attempts"] == 2.0,
+      str(_sum["avg_attempts"]))
+check("v2.0.8.0 空输入 / 非法 days 不炸",
+      _mx.summarize([], 1000, days=7)["checks"] == 0
+      and _mx.summarize([], 1000, days="abc")["days"] == 7)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -602,7 +641,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.7.1", version.VERSION == "2.0.7.1", version.VERSION)
+check("版本 = 2.0.8.0", version.VERSION == "2.0.8.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
