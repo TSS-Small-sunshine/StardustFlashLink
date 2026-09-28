@@ -1187,6 +1187,151 @@ check("v2.0.13.0 单实例锁排在「真正干活」之前（早于载配置 / 
       and "本进程退出" in _main_src13 and "return 0" in _main_src13,
       "单实例检查必须紧跟在启动横幅之后")
 
+# ---- v2.0.14.0：导入加固（P1-6）+ 空账号不再阻塞保存（P1-7）+ 周期线程兜底（P3-2）----
+check("v2.0.14.0 导入上限覆盖「解压后」体积（zip 炸弹）",
+      _wa.CONFIG_IMPORT_MAX_UNCOMPRESSED_BYTES == 8 * 1024 * 1024
+      and _wa.CONFIG_IMPORT_MAX_MEMBER_BYTES == 4 * 1024 * 1024
+      and "zf.infolist()" in src_web)
+check("v2.0.14.0 导入异常类型补全（ValueError / TypeError / KeyError 也算参数不合法）",
+      "ValueError, TypeError, KeyError) as exc" in src_web)
+check("v2.0.14.0 空账号合法（默认配置本身就能通过校验）",
+      svc._validate_config(svc._default_config()) == []
+      and svc._validate_config(dict(svc._default_config(), account="")) == []
+      and any("account" in e for e in svc._validate_config(dict(svc._default_config(), account="12ab"))),
+      repr((svc._validate_config(svc._default_config()),
+            svc._validate_config(dict(svc._default_config(), account="12ab")))))
+
+# 行为级：真发两个「坏 zip」给导入端点（都必须在读配置之前就被挡掉）
+_p14 = 18968
+_ph14 = "127.0.0.1:%d" % _p14
+_srv14 = _ThreadingHTTPServer(("127.0.0.1", _p14), _wa._Handler)
+threading.Thread(target=_srv14.serve_forever, daemon=True).start()
+
+
+def _post_zip14(zip_bytes):
+    _c = http.client.HTTPConnection("127.0.0.1", _p14, timeout=30)
+    _c.request("POST", "/api/config/import", body=zip_bytes, headers={
+        "Host": _ph14, "Content-Type": "application/zip", "X-Requested-With": "DrcomUI",
+        "Content-Length": str(len(zip_bytes))})
+    _r = _c.getresponse()
+    _d = _r.read()
+    _c.close()
+    try:
+        return _r.status, json.loads(_d.decode("utf-8"))
+    except ValueError:
+        return _r.status, {"_raw": _d[:100]}
+
+
+def _mk_zip(members):
+    _buf = io.BytesIO()
+    with zipfile.ZipFile(_buf, "w", zipfile.ZIP_DEFLATED) as _z:
+        for _n, _b in members.items():
+            _z.writestr(_n, _b)
+    return _buf.getvalue()
+
+
+_good_manifest = json.dumps({"schema_version": 1, "tool": "smoke"})
+_st_bomb, _b_bomb = _post_zip14(_mk_zip({
+    "manifest.json": _good_manifest,
+    "config.json": "{}",
+    "b1.bin": b"\0" * (3 * 1024 * 1024),        # 三个各 3 MB（单成员都没超）
+    "b2.bin": b"\0" * (3 * 1024 * 1024),
+    "b3.bin": b"\0" * (3 * 1024 * 1024),        # 合计 9 MB > 8 MB = zip 炸弹
+}))
+check("v2.0.14.0 zip 炸弹被拦（413 + 中文原因，且在任何 read() 之前）",
+      _st_bomb == 413 and "解压后总体积过大" in _b_bomb.get("error", ""), repr(_b_bomb))
+_st_fat, _b_fat = _post_zip14(_mk_zip({
+    "manifest.json": _good_manifest,
+    "fat.bin": b"\0" * (5 * 1024 * 1024),       # 单成员超 4 MB
+}))
+check("v2.0.14.0 单成员过大也被拦（413）",
+      _st_fat == 413 and "单个成员解压后过大" in _b_fat.get("error", ""), repr(_b_fat))
+_st_sch, _b_sch = _post_zip14(_mk_zip({
+    "manifest.json": json.dumps({"schema_version": "abc"}),   # 旧实现 int("abc") → 500 ✗
+    "config.json": "{}",
+}))
+check("v2.0.14.0 schema_version 类型不对 → 400（不再 500）",
+      _st_sch == 400 and "不是整数" in _b_sch.get("error", ""), repr(_b_sch))
+_srv14.shutdown()
+
+# 行为级：空账号时 run_once 必须**跳过登录**（不能拿空用户名去认证）
+_proto = importlib.import_module("protocol")
+_p_saved = {k: getattr(_proto, k, None) for k in
+            ("_RUN_LOCK", "_STATE", "_STATE_LOCK", "_log", "_load_config", "get_current_ssid",
+             "_auto_profile", "get_local_ips", "guard_allows", "_set_state", "wait_network",
+             "is_online", "_get_password", "login", "_now_iso", "_backoff_until",
+             "_set_backoff", "_reset_backoff")}
+_p_seen = {}
+_proto._RUN_LOCK = threading.Lock()
+_proto._STATE = {}
+_proto._STATE_LOCK = threading.Lock()
+_proto._log = lambda *a, **k: None
+_proto._load_config = lambda: {"host": "172.16.80.3", "port": 80, "account": "",
+                               "suffix": "@yd", "auto_check_interval_min": 30,
+                               "network_wait_timeout_sec": 10}
+_proto.get_current_ssid = lambda: ""
+_proto._auto_profile = None
+_proto.get_local_ips = lambda: []
+_proto.guard_allows = lambda cfg, ssid, ips: (True, "")
+_proto._set_state = lambda **k: _p_seen.update(k)
+_proto.wait_network = lambda *a, **k: True
+_proto.is_online = lambda host: False
+_proto._get_password = lambda: "pwd-whatever"
+_proto.login = lambda *a, **k: _p_seen.setdefault("login_called", True) and (True, "x")
+_proto._now_iso = lambda: "2026-09-28T11:30:00"
+_proto._backoff_until = lambda: None
+_proto._set_backoff = lambda *a, **k: None
+_proto._reset_backoff = lambda *a, **k: None
+_proto.run_once("manual")
+for _k, _v in _p_saved.items():
+    setattr(_proto, _k, _v)
+check("v2.0.14.0 空账号：记「账号未设置」并跳过登录（不发认证请求）",
+      _p_seen.get("last_error") == "账号未设置" and "login_called" not in _p_seen,
+      repr({k: v for k, v in _p_seen.items() if k != "online"}))
+
+# 行为级：周期自检线程遇到异常必须活下来（旧行为是线程直接死掉 ✗）
+class _BoomLogger:
+    def __init__(self):
+        self.lines = []
+
+    def exception(self, msg, *a):
+        self.lines.append(msg % a if a else msg)
+
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+
+_boom_log = _BoomLogger()
+_svc14_saved = {k: getattr(svc, k, None) for k in
+                ("_load_config", "logger", "STOP_EVENT", "PERIODIC_ERROR_BACKOFF_SEC")}
+_svc14_calls = []
+
+
+def _boom_cfg():
+    _svc14_calls.append(1)
+    if len(_svc14_calls) == 1:
+        raise RuntimeError("模拟配置读失败")       # 第一圈就炸
+    svc.STOP_EVENT.set()                          # 第二圈让它正常退出
+    return {"auto_check_enabled": False}
+
+
+svc._load_config = _boom_cfg
+svc.logger = _boom_log
+svc.STOP_EVENT = threading.Event()
+svc.PERIODIC_ERROR_BACKOFF_SEC = 0            # 测试里不等那 60 秒冷却
+_th14 = threading.Thread(target=svc.run_periodic, daemon=True)
+_th14.start()
+_th14.join(5)
+svc.STOP_EVENT.set()
+for _k, _v in _svc14_saved.items():
+    setattr(svc, _k, _v)
+check("v2.0.14.0 周期自检异常后线程仍活着（不再静默死掉）",
+      not _th14.is_alive() and len(_svc14_calls) >= 2 and any("周期自检循环异常" in l for l in _boom_log.lines),
+      repr((_th14.is_alive(), len(_svc14_calls), _boom_log.lines[:1])))
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -1290,7 +1435,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.13.0", version.VERSION == "2.0.13.0", version.VERSION)
+check("版本 = 2.0.14.0", version.VERSION == "2.0.14.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

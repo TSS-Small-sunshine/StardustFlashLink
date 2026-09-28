@@ -441,6 +441,14 @@ def run_once(reason):
             _set_state(online=False)
 
             # 3. 登录
+            # v2.0.14.0（P1-7）：账号没填就**别拿空用户名去认证** —— 记一条清楚的中文提示、
+            # 不计退避（属于「还没配置好」，不是网络问题），与下面的「密码未设置」同等对待 ✓。
+            if not str(account or "").strip():
+                _log("账号未设置，跳过登录。请在 Web UI 的「配置 → 账户」里填写学号 / 工号。",
+                     level=logging.WARNING)
+                _set_state(last_error="账号未设置")
+                return
+
             pwd = _get_password()
             if pwd is None:
                 _log("密码未设置，跳过登录。请通过 Web UI 设置密码。", level=logging.WARNING)

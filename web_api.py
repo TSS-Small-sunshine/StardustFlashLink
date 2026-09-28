@@ -41,6 +41,10 @@ import eula as _eula_mod
 CONFIG_EXPORT_SCHEMA_VERSION = 1
 CONFIG_EXPORT_TOOL = "DrcomAutoLogin-Windows"
 CONFIG_IMPORT_MAX_BYTES = 4 * 1024 * 1024  # 4MB 安全上限
+# v2.0.14.0（P1-6）：**解压后**的体积也要限 —— 一个几百 KB 的 zip 可以解出几十 GB
+# （zip 炸弹），只卡上传体积是拦不住的 ✗。
+CONFIG_IMPORT_MAX_UNCOMPRESSED_BYTES = 8 * 1024 * 1024    # 全部成员解压后之和
+CONFIG_IMPORT_MAX_MEMBER_BYTES = 4 * 1024 * 1024          # 单个成员上限
 
 
 # ============================================================
@@ -893,11 +897,31 @@ def api_post_config_import(handler):
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             names = set(zf.namelist())
+            # v2.0.14.0（P1-6）：先看**解压后**的体积（zip 炸弹拦截）——在任何 read() 之前 ✓
+            _total = 0
+            for _info in zf.infolist():
+                if _info.file_size > CONFIG_IMPORT_MAX_MEMBER_BYTES:
+                    _send_json(handler, 413, {"ok": False, "error": "单个成员解压后过大（上限 {} 字节）：{}".format(
+                        CONFIG_IMPORT_MAX_MEMBER_BYTES, _info.filename)})
+                    return
+                _total += _info.file_size
+            if _total > CONFIG_IMPORT_MAX_UNCOMPRESSED_BYTES:
+                _send_json(handler, 413, {"ok": False, "error": "解压后总体积过大（上限 {} 字节）：{}".format(
+                    CONFIG_IMPORT_MAX_UNCOMPRESSED_BYTES, _total)})
+                return
             if "manifest.json" not in names:
                 _send_json(handler, 400, {"ok": False, "error": "missing manifest.json"})
                 return
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
-            if int(manifest.get("schema_version", -1)) != CONFIG_EXPORT_SCHEMA_VERSION:
+            # v2.0.14.0（P1-6）：`schema_version` 可能是任何 JSON 类型 —— 旧实现直接 int()，
+            # 传 `"abc"` / `[]` 会抛 TypeError/ValueError → 500（本该是 400 的「参数不合法」✗）
+            try:
+                _schema = int(manifest.get("schema_version", -1))
+            except (TypeError, ValueError):
+                _send_json(handler, 400, {"ok": False, "error": "schema_version 不是整数: {!r}".format(
+                    manifest.get("schema_version"))})
+                return
+            if _schema != CONFIG_EXPORT_SCHEMA_VERSION:
                 _send_json(handler, 400, {"ok": False, "error": "unsupported schema_version: {}".format(manifest.get("schema_version"))})
                 return
             if "config.json" not in names:
@@ -923,7 +947,10 @@ def api_post_config_import(handler):
                     applied.append("password")
                 else:
                     logger.warning("import password.txt is empty, skipped")
-    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, OSError,
+            ValueError, TypeError, KeyError) as exc:
+        # v2.0.14.0（P1-6）：把 ValueError / TypeError / KeyError 一起收进来 ——
+        # zip 里塞任何奇怪类型的字段都不该变成 500（参数不合法就是 400）✓
         logger.exception("config import failed: %s", exc)
         _send_json(handler, 400, {"ok": False, "error": "import failed: {}".format(exc)})
         return
