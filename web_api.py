@@ -57,7 +57,9 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
             # 注入到 web_api 模块命名空间，标志 / 兼容别名
             eula_api_get_changelog=None,
             # auto_update 模块的可选注入（commit 5 才存在；现 commit 4 暂不引用）
-            auto_update_mod=None):
+            auto_update_mod=None,
+            # metrics 模块的可选注入（v2.0.8.0 连接质量面板）
+            metrics_mod=None):
     """由 联网_service.py 调用，注入共享对象到本模块命名空间。
 
     设计要点：
@@ -102,6 +104,13 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
     g["api_get_changelog"] = eula_api_get_changelog
     # auto_update 模块（v2.0.2 解耦后注入到 _auto_update_mod; 调用其函数请用 _auto_update_mod._func_name()）
     g["_auto_update_mod"] = auto_update_mod
+    # metrics 模块（v2.0.8.0 连接质量面板；调用走 _metrics_mod.api_get_metrics()）
+    if metrics_mod is None:
+        try:
+            import metrics as metrics_mod  # noqa: E402
+        except ImportError:
+            metrics_mod = None
+    g["_metrics_mod"] = metrics_mod
 
 
 def _log(msg, *args, level=logging.INFO):
@@ -158,6 +167,25 @@ def _read_json_body(handler):
 
 def api_get_status():
     return _snapshot_state()
+
+
+def api_get_metrics(days=7):
+    """GET /api/metrics — 连接质量（近 N 天）：从 logs/campus_login.log 现算。
+
+    刻意不落新状态文件：日志本来就在记录每个检查周期的走向，重启不清零、升级不丢。
+    面板属于「锦上添花」—— 日志被删、模块没注入、统计炸了，都只回一份空指标，
+    绝不把状态页打成 500。
+    """
+    mod = globals().get("_metrics_mod")
+    if mod is None:
+        return {"ok": False, "error": "统计模块未就绪", "checks": 0, "series": []}
+    try:
+        data = mod.api_get_metrics(days=days)
+    except Exception as exc:  # noqa: BLE001 —— 面板崩了不该影响状态页
+        logger.exception("连接质量统计失败: %s", exc)
+        return {"ok": False, "error": "统计失败：{}".format(exc), "checks": 0, "series": []}
+    data["ok"] = True
+    return data
 
 
 def api_get_config():
@@ -706,6 +734,15 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/update/history":
                 _send_json(self, 200, api_get_update_history())
                 return
+            if path == "/api/metrics":
+                _days = 7
+                if "days=" in self.path:
+                    try:
+                        _days = int(self.path.split("days=", 1)[1].split("&", 1)[0])
+                    except (TypeError, ValueError, IndexError):
+                        _days = 7
+                _send_json(self, 200, api_get_metrics(_days))
+                return
             # —— 配置导入/导出（zip）——
             if path == "/api/config/export":
                 api_get_config_export(self)
@@ -1172,6 +1209,14 @@ a:hover { color: var(--accent-hover); }
 .kpi-sub { font-size: 12.5px; color: var(--text-3); }
 .kpi-alert { border-color: rgba(255, 159, 10, 0.45); }
 .kpi-alert-err { border-color: rgba(255, 69, 58, 0.45); }
+/* v2.0.8.0：连接质量小柱图（纯 CSS，不引入图表库） */
+.qbars { display: flex; align-items: flex-end; gap: 10px; height: 68px; margin: 6px 0 4px; }
+.qbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 3px; min-width: 0; }
+.qbar-fill { border-radius: 4px 4px 2px 2px; min-height: 2px;
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.85), rgba(10, 132, 255, 0.40));
+  transition: height 0.32s cubic-bezier(0.32, 0.72, 0, 1); }
+.qbar-fill.qfail { background: linear-gradient(180deg, rgba(255, 159, 10, 0.9), rgba(255, 159, 10, 0.4)); }
+.qbar-day { font-size: 10.5px; color: var(--text-3); text-align: center; white-space: nowrap; }
 .tone-ok { color: var(--ok); }
 .tone-err { color: var(--err); }
 .tone-warn { color: var(--warn); }
@@ -1572,6 +1617,42 @@ code.path {
         <div class="kpi-value mono" id="kpi-next">未计划</div>
         <div class="kpi-sub" id="kpi-next-sub">-</div>
       </article>
+
+      <!-- v2.0.8.0 / B4：连接质量（近 7 天，从日志现算） -->
+      <article class="card kpi" id="card-uptime">
+        <div class="kpi-label">在线率（近 7 天）</div>
+        <div class="kpi-value" id="kpi-uptime">-</div>
+        <div class="kpi-sub" id="kpi-uptime-sub">等待统计</div>
+      </article>
+
+      <article class="card kpi" id="card-relogin">
+        <div class="kpi-label">掉线重登</div>
+        <div class="kpi-value" id="kpi-relogin">-</div>
+        <div class="kpi-sub" id="kpi-relogin-sub">近 7 天</div>
+      </article>
+
+      <article class="card kpi" id="card-recover">
+        <div class="kpi-label">平均恢复耗时</div>
+        <div class="kpi-value small" id="kpi-recover">-</div>
+        <div class="kpi-sub" id="kpi-recover-sub">从开始检查到登录成功</div>
+      </article>
+
+      <article class="card kpi" id="card-latency">
+        <div class="kpi-label">当前延迟</div>
+        <div class="kpi-value" id="kpi-latency">-</div>
+        <div class="kpi-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
+      </article>
+    </div>
+
+    <!-- v2.0.8.0 / B4：近 7 天柱状图（纯 CSS，无图表库） -->
+    <div class="card" id="card-quality">
+      <div class="section-head">
+        <h2 class="section-title">连接质量（近 7 天）</h2>
+        <p class="section-desc" style="margin:0;">数字取自 <span class="mono">logs/campus_login.log</span>：每个检查周期都留下了走向，不再另外存状态文件（重启不清零、升级不丢）。</p>
+        <button class="btn" id="btn-metrics-refresh" type="button">刷新</button>
+      </div>
+      <div class="qbars" id="qbars" aria-label="近 7 天掉线与失败次数柱状图"></div>
+      <div class="kpi-sub" id="quality-note">加载中…</div>
     </div>
 
     <div class="card action-card">
@@ -2973,6 +3054,76 @@ code.path {
         })
         .catch(function () { toast('请求失败', 'error'); });
     });
+  })();
+
+  /* ===== 连接质量（v2.0.8.0 / B4）：进页面拉一次 + 手动刷新 =====
+     数据 5 分钟才变一次，不参与 3 秒轮询（免得白算一遍 1MB 日志）。 */
+  function fmtMs(ms) {
+    if (!isNum(ms)) return '-';
+    if (ms < 1000) return ms + ' ms';
+    return (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + ' s';
+  }
+
+  function renderMetrics(m) {
+    var d = (m && m.ok) ? m : null;
+    var upt = d && isNum(d.uptime_pct) ? d.uptime_pct : null;
+    text($('kpi-uptime'), upt === null ? '-' : upt + '%');
+    $('kpi-uptime').className = 'kpi-value' + (upt === null ? ' tone-muted'
+      : (upt >= 99 ? ' tone-ok' : (upt >= 95 ? ' tone-warn' : ' tone-err')));
+    text($('kpi-uptime-sub'), d ? ('有效周期 ' + d.effective_checks + ' / 共 ' + d.checks
+      + (d.skip > 0 ? '（跳过 ' + d.skip + '）' : '')) : '等待统计');
+
+    text($('kpi-relogin'), d ? String(d.relogin) : '-');
+    $('kpi-relogin').className = 'kpi-value' + (d && d.relogin > 0 ? '' : ' tone-muted');
+    text($('kpi-relogin-sub'), d ? ('登录失败 ' + d.fail + ' · 网关不可达 ' + d.unreachable
+      + (d.last_relogin_at ? ' · 最近 ' + fmtTimeOnly(d.last_relogin_at) : '')) : '近 7 天');
+
+    text($('kpi-recover'), d ? fmtMs(d.avg_recover_ms) : '-');
+    text($('kpi-recover-sub'), d && isNum(d.avg_attempts)
+      ? ('平均 ' + d.avg_attempts + ' 次尝试可达' +
+         (isNum(d.avg_reach_ms) ? ' · ' + fmtMs(d.avg_reach_ms) : ''))
+      : '从开始检查到登录成功');
+
+    text($('kpi-latency'), d && isNum(d.latency_ms) ? (d.latency_ms + ' ms') : '不可达');
+    $('kpi-latency').className = 'kpi-value' + (!d || !isNum(d.latency_ms) ? ' tone-err'
+      : (d.latency_ms < 120 ? ' tone-ok' : (d.latency_ms < 400 ? ' tone-warn' : ' tone-err')));
+    text($('kpi-latency-sub'), d && d.last_unreachable_at
+      ? ('最近一次不可达 ' + fmtTimeOnly(d.last_unreachable_at)) : '到校园网关的 TCP 握手');
+
+    var bars = $('qbars');
+    if (bars) {
+      bars.innerHTML = '';
+      var series = (d && d.series) ? d.series : [];
+      var max = 1;
+      series.forEach(function (s) { max = Math.max(max, (s.relogin || 0) + (s.fail || 0)); });
+      series.forEach(function (s) {
+        var n = (s.relogin || 0) + (s.fail || 0);
+        var col = document.createElement('div'); col.className = 'qbar';
+        var fill = document.createElement('div');
+        fill.className = 'qbar-fill' + ((s.fail || 0) > 0 ? ' qfail' : '');
+        fill.style.height = Math.round(n / max * 100) + '%';
+        fill.title = s.date + '：掉线重登 ' + (s.relogin || 0) + ' · 失败 ' + (s.fail || 0)
+          + ' · 检查 ' + (s.checks || 0) + ' 次';
+        var lab = document.createElement('div'); lab.className = 'qbar-day';
+        lab.textContent = String(s.date || '').slice(5);
+        col.appendChild(fill); col.appendChild(lab);
+        bars.appendChild(col);
+      });
+      text($('quality-note'), d
+        ? ('检查 ' + d.checks + ' 次 · 统计于 ' + (d.generated_at || '-')
+           + (d.avg_reach_ms ? '' : ' · 可达耗时从本版起记录'))
+        : ('暂无数据' + (m && m.error ? '（' + m.error + '）' : '（日志为空）')));
+    }
+  }
+
+  function loadMetrics() {
+    getJson('/api/metrics?days=7').then(renderMetrics).catch(function () { renderMetrics(null); });
+  }
+
+  (function () {
+    var btn = $('btn-metrics-refresh');
+    if (btn) btn.addEventListener('click', loadMetrics);
+    loadMetrics();
   })();
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

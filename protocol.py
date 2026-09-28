@@ -124,9 +124,12 @@ def wait_network(host, port, timeout):
     attempt = 0
     while time.time() < deadline:
         attempt += 1
+        t0 = time.time()
         try:
             with socket.create_connection((host, port), timeout=3):
-                _log("网络已可达（第 %s 次尝试）", attempt)
+                # v2.0.8.0：「连接质量」面板靠这行算「平均可达耗时」（老日志没有这个字段，
+                # 解析器要能容忍 —— 见 metrics.py 的 _ATTEMPT_RE）
+                _log("网络已可达（第 %s 次尝试，耗时 %.2fs）", attempt, time.time() - t0)
                 return True
         except OSError as exc:
             _log("等待中 (%s): %s", attempt, exc)
