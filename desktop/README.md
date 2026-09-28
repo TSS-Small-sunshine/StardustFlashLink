@@ -4,14 +4,15 @@
 > （Windows / Linux AMD64·ARMv8·ARMv7 / macOS Intel·Apple Silicon），
 > 并且**不依赖浏览器** —— GUI 外壳在 M2 接到这个核心上。
 
-## 现在的状态（M0 完成）
+## 现在的状态（M0 完成 · M2 起步）
 
 | 项 | 值 |
 | --- | --- |
-| 单元测试 | **29 项全绿**（核心 18 + 可执行 11） |
-| release 体积 | **0.32 MB**（单文件，无运行时依赖 ✓） |
-| 依赖 | 仅 `serde` / `serde_json`（为了配置与 API 的 JSON） |
-| 覆盖平台 | 交叉编译矩阵见 `.github/workflows/preview-3.0.yml` |
+| 单元测试 | **43 项全绿**（核心 28 + 可执行 9 + 界面 6） |
+| headless 可执行 | **0.32 MB**（单文件，无运行时依赖 ✓） |
+| Slint GUI | **7.83 MB**（Windows x86_64；零 WebView，真机可启动 ✓） |
+| 依赖 | 核心只 2 个（`serde`/`serde_json`）；GUI 另加 Slint（软件渲染器 ✓） |
+| 覆盖平台 | 交叉编译矩阵见 `.github/workflows/preview-3.0.yml`（6 目标；GUI 在原生 runner 上编译） |
 
 ## 本地怎么跑
 
