@@ -469,6 +469,29 @@ check("v2.0.9.0 匹配名去重 + 描述文案",
 check("v2.0.9.0 删方案：删当前方案只清标记",
       _pf.delete(_profs, "家里")[0] == {} and _pf.delete(_profs, "没有这个")[1] is False)
 
+# ---- v2.0.9.1：不得在函数内 import 模块别名（会把模块级同名变量变成局部 → UnboundLocalError）----
+# 真机事故（2026-09-28，v2.0.9.0）：main() 里多了一句 `import protocol as _protocol_mod`，
+# 于是同一函数里更早的 `_protocol_mod._attach(...)` 直接崩：
+#   UnboundLocalError: cannot access local variable '_protocol_mod'
+#   → 服务启动即退（nssm AppExit=Ignore 不重启）→ Web UI 端口消失 ✗
+_svc_lines = src_svc.splitlines()
+_svc_func_imports = []
+for _i, _ln in enumerate(_svc_lines):
+    if not re.match(r'^\s+import\s+\w+\s+as\s+_\w+', _ln):
+        continue
+    # 允许的唯一形式：模块级 `try: import X as _X except ImportError:` 的「可选模块」导入
+    _prev = ""
+    for _j in range(_i - 1, -1, -1):
+        if _svc_lines[_j].strip():
+            _prev = _svc_lines[_j].strip()
+            break
+    if _prev != "try:":
+        _svc_func_imports.append(_ln.strip())
+check("v2.0.9.1 服务里没有「函数内 import 模块别名」（会遮蔽模块级名）",
+      not _svc_func_imports, str(_svc_func_imports))
+check("v2.0.9.1 自动切换回调挂在模块级 _protocol_mod 上（无重复 import）",
+      "_protocol_mod._set_auto_profile(" in src_svc)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -720,7 +743,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.9.0", version.VERSION == "2.0.9.0", version.VERSION)
+check("版本 = 2.0.9.1", version.VERSION == "2.0.9.1", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
