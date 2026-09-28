@@ -101,7 +101,7 @@
 
 ## 🏷 项目状态
 
-**当前版本**：`v2.0.9.1 "Sirius"`（天狼星，2026-09-28） · **状态**：🟢 积极维护
+**当前版本**：`v2.0.10.0 "Sirius"`（天狼星，2026-09-28） · **状态**：🟢 积极维护
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -121,7 +121,7 @@ v2.0.6.0 起另加一个**用户会话**里的托盘小程序：
 | `联网_service.py` | 入口 / 生命周期：路径与常量、配置读写与校验、密码读写、日志、状态与退避、NSSM 重启、`main()` | `DEFAULT_CONFIG`、`_load_config`、`_validate_config`、`_save_config`、`_load_password_from_disk`、`_get_password`、`_save_password_to_disk`、`STATE`、`BACKOFF`、`_startup_trigger`、`run_periodic`、`main` |
 | `protocol.py` | 认证协议层：等网络 → 查在线 → 登录；网络发现 | `run_once`、`wait_network`、`is_online`、`login`、`discover_network` |
 | `web_api.py` | HTTP 路由层：`/`（内联单页）、`/branding/*`、全部 `/api/*`、Host / Origin / 自定义头校验 | `_Handler`、`api_get_status`、`api_post_config`、`api_post_password`、`api_post_login`、`api_post_restart`、`api_get_log_tail`、`_HTML_PAGE` |
-| `auto_update.py` | 自动升级：GitHub 探测、下载与 SHA256 校验、静默安装、升级熔断、启动钩子 | `_check_github_latest`、`_download_installer`、`_do_update_now`、`_auto_update_loop`、`_post_upgrade_startup`、`_ensure_nssm_appexit_sane` |
+| `auto_update.py` | 自动升级：GitHub 探测、下载与 SHA256 校验、静默安装、升级熔断、启动钩子、**升级看门狗**（v2.0.10.0 起探 `/api/health`） | `_check_github_latest`、`_download_installer`、`_do_update_now`、`_auto_update_loop`、`_post_upgrade_startup`、`_ensure_nssm_appexit_sane`、`_build_update_wrapper`、`_build_health_probe_script` |
 | `eula.py` | EULA 与 CHANGELOG 读取 | `api_get_changelog` |
 | `version.py` | **版本号 + 代号唯一来源** | `VERSION`、`CODENAME`、`CODENAME_CN`、`VERSION_FULL` |
 | `tray.py` | **托盘小程序**（v2.0.6.0）：随登录启动，轮询本机 `/api/status` 弹断线通知；`ctypes` 直调 Win32（`Shell_NotifyIcon`），无第三方依赖 | `classify`、`decide_events`、`status_text`、`TrayApp`、`--check`、`--self-test` |
@@ -316,7 +316,7 @@ DrcomAutoLogin-Windows/
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.9.1.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.10.0.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -450,7 +450,8 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | --- | --- | --- |
 | **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
 | **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
-| **v2.0.9.1（当前）** | `Sirius` 天狼星 | 🔴 **紧急修复**：v2.0.9.0 在 `main()` 里多写了一句 `import protocol as _protocol_mod` ✗ —— **函数内的 import 会让该名字在整个函数里变成局部变量**，于是同一函数里更早的 `_protocol_mod._attach(...)` 直接 `UnboundLocalError` → 服务启动即退、Web UI 端口消失 ✗。已删掉该行（模块顶部本来就导入过 ✓），并加**静态守卫**：服务里出现「函数内 import 模块别名」一律判失败 ✗。 |
+| **v2.0.10.0（当前）** | `Sirius` 天狼星 | 把 v2.0.9.1 里自己写下的待办做完：升级**收尾判定改探 HTTP**。执行器跑完安装器后用随包内嵌的 Python 探 `http://127.0.0.1:<ui_port>/api/health` —— 拿到 `{"ok":true}` 才算「服务真的活了」（此前只看 `sc query`，而那是 nssm 的 wrapper：`AppExit=Ignore` 下里面的 Python 崩了它照样 RUNNING ✗，v2.0.8.0 / v2.0.9.0 两次事故就是这么「升完才发现」的）。探不到先**自动「停 + 起」重启一次**再探一次；结论写进 `%TEMP%\drcom_apply_update.rc`（`health=OK\|FAIL`）与 `logs\upgrade.log`（中文告警 —— 服务真起不来时 Web UI 也打不开，那行日志就是唯一告警面，托盘右键「打开日志目录」即可看到）。探针自包含、只用标准库、**不 import 项目模块**、禁用系统代理，缺件时退回旧判据（`health=SKIP`）。顺手修掉一个从 v2.0.4.2 起就在的老坑：执行器的 `installer_rc=` 因为 `echo …=0>"…"` 被 cmd 当成「句柄 0 重定向」而**从来没落盘**（rc 文件是空文件）→「安装器非 0 退出码就告警」一直是死代码 ✗，现改为把重定向写在前面的写法 ✓。 |
+| v2.0.9.1 | `Sirius` 天狼星 | 🔴 **紧急修复**：v2.0.9.0 在 `main()` 里多写了一句 `import protocol as _protocol_mod` ✗ —— **函数内的 import 会让该名字在整个函数里变成局部变量**，于是同一函数里更早的 `_protocol_mod._attach(...)` 直接 `UnboundLocalError` → 服务启动即退、Web UI 端口消失 ✗。已删掉该行（模块顶部本来就导入过 ✓），并加**静态守卫**：服务里出现「函数内 import 模块别名」一律判失败 ✗。 |
 | v2.0.9.0 | `Sirius` 天狼星 | 新增**配置方案**（B5）：教室 / 宿舍 / 家里各存一套「位置相关设置」（网关 / 检查间隔 / 守卫白名单），一键切换；填了 Wi-Fi 名的方案可在打开总开关后**按 SSID 自动切**（默认关，免得手动选择被系统改掉）。方案**只装位置相关字段**（账号密码与升级设置不进方案），切换是**先全量校验再原子写盘**，坏方案永远上不了线。新增 `profiles.py` + 5 个 `/api/profiles*` 端点 + 配置页卡片。 |
 | v2.0.8.1 | `Sirius` 天狼星 | 🔴 **紧急修复**：升级时安装器可能**中途回滚**，把安装弄成「一半新一半旧」（真机实测 2.0.7.1→2.0.8.0：托盘进程锁着 `python\libcrypto-3.dll` → Inno 静默模式 Abort → 回滚删掉了新模块，服务 `import` 崩、Web UI 端口消失 ✗）。修法：**装前先请走托盘**（`stop-tray.ps1`，按「tray.py + 安装目录」精确匹配 ✓）+ **服务侧可选模块降级**（`import metrics` 失败只丢面板、服务照常 ✓）。另加**打包完整性守卫**：服务 import 的本地模块与 `setup.iss` 清单逐一比对，漏一个 CI 就红 ✓。 |
 | v2.0.8.0 | `Sirius` 天狼星 | 新增**连接质量面板**（B4）：状态页给出近 7 天的在线率 / 掉线重登次数 / 平均恢复耗时 / 当前延迟 + 一张纯 CSS 柱状图。数据**全部从已有的 `logs/campus_login.log` 现算**（不落第二份状态文件 → 重启不清零、升级不丢），新增 `metrics.py` 与 `GET /api/metrics?days=N`，接口优雅降级（模块未注入 / 日志被删都只回空指标，绝不 500）。 |
