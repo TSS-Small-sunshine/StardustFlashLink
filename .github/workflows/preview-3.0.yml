@@ -1,0 +1,93 @@
+name: 3.0 预览构建（跨平台矩阵）
+
+# 3.0 线（Altair 牛郎星）：**只发预览版**，正式版留给便携版成型之后。
+# 触发面只在 dev/** 与指向 dev/** 的 PR —— 不碰 main，所以 2.1.x（Vega）稳定线完全不受影响 ✓
+on:
+  push:
+    branches: ['dev/**']
+  pull_request:
+    branches: ['dev/**']
+  workflow_dispatch:
+
+concurrency:
+  group: preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ① 单元测试：三个平台各跑一遍（核心是纯函数 + 本地 API，跨平台必须同绿 ✓）
+  test:
+    name: 测试（${{ matrix.os }}）
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - name: 工具链信息
+        run: |
+          rustup show
+          cargo --version
+      - name: cargo test
+        run: cargo test --workspace --verbose
+      - name: 内置自检（跑真二进制，不是单测 ✓）
+        run: cargo run --release -p drcom-cli -- selfcheck
+
+  # ② 交叉编译矩阵：覆盖需求里的每一类机器
+  build:
+    name: 构建 ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu,   label: linux-x86_64,  apt: '' }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu,  label: linux-aarch64, apt: gcc-aarch64-linux-gnu }
+          - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, label: linux-armv7, apt: gcc-arm-linux-gnueabihf }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   label: windows-x86_64, apt: '' }
+          - { os: macos-14,      target: aarch64-apple-darwin,      label: macos-aarch64, apt: '' }
+          - { os: macos-14,      target: x86_64-apple-darwin,       label: macos-x86_64,  apt: '' }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装交叉编译用的 gcc（仅 Linux 目标）
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.apt }}
+
+      - name: 添加 Rust 目标
+        run: rustup target add ${{ matrix.target }}
+
+      - name: 指定链接器（Linux 交叉编译必需，否则链接阶段会找不到 gcc ✗）
+        if: matrix.apt != ''
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)   echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV ;;
+            armv7-unknown-linux-gnueabihf) echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV ;;
+          esac
+
+      - name: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: 体积报告（用户要求：体积小，所以每版都量一下 ✓）
+        shell: bash
+        run: |
+          find target/${{ matrix.target }}/release -maxdepth 1 -type f \( -name 'stardust-flash-link' -o -name 'stardust-flash-link.exe' \) -printf '%f  %s bytes\n' || true
+
+      - name: 上传产物（预览版：只挂 workflow artifact，不发 Release ✓）
+        uses: actions/upload-artifact@v4
+        with:
+          name: stardust-flash-link-${{ matrix.label }}
+          path: |
+            desktop/target/${{ matrix.target }}/release/stardust-flash-link
+            desktop/target/${{ matrix.target }}/release/stardust-flash-link.exe
+          if-no-files-found: warn
+          retention-days: 14

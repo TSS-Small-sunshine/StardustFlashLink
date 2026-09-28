@@ -1,0 +1,15 @@
+[package]
+name = "drcom-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "星尘闪连 3.0 无界面可执行：本地 API（serve）/ 登录（login）/ 自检（selfcheck）"
+
+[[bin]]
+name = "stardust-flash-link"
+path = "src/main.rs"
+
+[dependencies]
+drcom-core = { path = "../drcom-core" }
+serde_json = "1"

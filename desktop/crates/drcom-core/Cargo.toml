@@ -1,0 +1,11 @@
+[package]
+name = "drcom-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "星尘闪连 3.0 跨平台核心：版本通道 / 配置 / Dr.COM 协议 / 路径 / 脱敏（无 UI、无平台依赖）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

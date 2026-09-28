@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/drcom-core", "crates/drcom-cli"]
+
+[workspace.package]
+# 注意：Cargo 只接受 MAJOR.MINOR.PATCH（三段）✗ 不能用 3.0.0.0。
+# 对外展示的四段版本 + 通道后缀由 drcom-core 的 version/channel 模块生成 ✓
+version = "3.0.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/TSS-Small-sunshine/StardustFlashLink"
+
+# 体积优先（用户要求：体积小、占用小）✓
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+# 不用 panic=abort：托盘/服务场景里 unwind 更容易保住进程与日志 ✓
+
+[profile.dev]
+opt-level = 0
