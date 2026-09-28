@@ -327,6 +327,30 @@ check("v2.0.7.0 OVERLAPPED 自带定义（wintypes 里没有）",
 check("v2.0.7.0 事件模拟入口在位（本机实测用）",
       "--test-event" in _tray_src and "def test_event" in _tray_src)
 
+# ---- v2.0.7.1：升级后托盘自己换上新代码 ----
+# 真机证据（2.0.6.3 → 2.0.7.0 升级后）：tray 进程 PID 没变 —— 安装器确实又拉了一次，
+# 但老实例握着单实例互斥体，新实例一起就秒退 → "文件已换、代码没换"，且完全静默。
+_sig_tmp = os.path.join(tmp, "tray_sig_probe.py")
+pathlib.Path(_sig_tmp).write_text("# probe\n", encoding="utf-8")
+_sig1 = _tray.code_signature(_sig_tmp)
+check("v2.0.7.1 脚本指纹读得到（mtime + size）",
+      isinstance(_sig1, tuple) and len(_sig1) == 2
+      and _sig1[1] == os.path.getsize(_sig_tmp))
+check("v2.0.7.1 文件不在时指纹为 None（不误判成「变了」）",
+      _tray.code_signature(os.path.join(tmp, "no_such_file_xyz.py")) is None)
+os.utime(_sig_tmp, (1000000000, 1000000000))
+check("v2.0.7.1 mtime 一变 → 指纹就变", _tray.code_signature(_sig_tmp) != _sig1)
+check("v2.0.7.1 轮询里会检查指纹并重启自己",
+      "self._code_changed()" in _tray_src and "self._restart_self()" in _tray_src)
+check("v2.0.7.1 重启前先放手单实例互斥体（否则新实例秒退）",
+      "self.kernel32.CloseHandle(self.mutex_handle)" in _tray_src
+      and "app.mutex_handle = handle" in _tray_src)
+check("v2.0.7.1 用独立进程起新实例（DETACHED_PROCESS + 不继承控制台）",
+      "DETACHED_PROCESS" in _tray_src and "subprocess.Popen(" in _tray_src
+      and "subprocess.DEVNULL" in _tray_src)
+check("v2.0.7.1 新实例起不来时把互斥体拿回来（不放弃当前进程）",
+      "self.mutex_handle = _single_instance()[0]" in _tray_src)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -578,7 +602,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.7.0", version.VERSION == "2.0.7.0", version.VERSION)
+check("版本 = 2.0.7.1", version.VERSION == "2.0.7.1", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

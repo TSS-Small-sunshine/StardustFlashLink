@@ -29,6 +29,7 @@ v2.0.7.0（B3）新增**事件驱动重连**：托盘本来就是用户会话里
 import ctypes
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -197,6 +198,20 @@ def should_reconnect(last_at, now, gap=RECONNECT_MIN_GAP_SEC):
     return last_at is None or (now - last_at) >= gap
 
 
+def code_signature(path):
+    """脚本的「版本指纹」= ``(mtime, size)``；读不到就返回 None。
+
+    v2.0.7.1：升级会替换安装目录里的 `tray.py`，但**正在跑的那个进程还是旧代码** ——
+    安装器再拉一个实例也会被单实例互斥体挡掉（v2.0.7.0 真机验证时发现：升级后 PID 没变，
+    新装的唤醒/换网重连等于白装 ✗）。所以托盘自己盯着这个指纹，一变就换个新进程接着跑。
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (int(st.st_mtime), int(st.st_size))
+
+
 def decide_events(prev_kind, cur_kind, down_streak):
     """状态迁移 → 要弹的通知。纯函数，返回 list[(标题, 正文, 级别)]，级别 ∈ {info, warn}。
 
@@ -249,6 +264,7 @@ WM_POWERBROADCAST = 0x0218
 WM_NETCHANGE = WM_APP + 2                     # 自己 PostMessage 的：网络地址变了
 TIMER_POLL, TIMER_WAKE = 1, 2                 # 周期性轮询 / 唤醒后延后触发的一次性重连
 INFINITE = 0xFFFFFFFF
+DETACHED_PROCESS = 0x00000008                 # v2.0.7.1：重启自己时不要继承控制台
 
 
 class OVERLAPPED(ctypes.Structure):
@@ -309,6 +325,8 @@ class TrayApp(object):
         self.last_status = {}
         self._proc = None           # WNDPROC 必须留引用，否则被 GC 掉会崩
         self.last_reconnect_at = None    # v2.0.7.0：上次因事件触发重连的时刻（去抖用）
+        self.code_sig = None             # v2.0.7.1：自己脚本的指纹，变了就换新代码重启
+        self.mutex_handle = None         # v2.0.7.1：单实例互斥体句柄（重启自己前必须放手）
         self.kernel32, self.user32, self.shell32, self.iphlpapi = _libs()
         self._declare_win32()
 
@@ -471,6 +489,41 @@ class TrayApp(object):
             _log("用户从菜单退出托盘")
             self.user32.DestroyWindow(self.hwnd)
 
+    # —— v2.0.7.1：升级后换上新代码（不然托盘一直跑着内存里的旧版本）——
+    def _code_changed(self):
+        """安装目录里的 tray.py 被换过了吗？第一次调用只记指纹。"""
+        sig = code_signature(os.path.join(APP_DIR, "tray.py"))
+        if sig is None:
+            return False                    # 读不到 → 交给上面「已卸载」那套逻辑
+        if self.code_sig is None:
+            self.code_sig = sig
+            return False
+        return sig != self.code_sig
+
+    def _restart_self(self):
+        """换新代码：先放手互斥体 → 起一个新实例 → 自己退出。
+
+        为什么必须**先放手**：新实例起来会抢 `Local\\DrcomAutoLoginTray`，
+        我们不放手它就立刻自己退出（这正是升级后托盘一直是旧代码的原因 ✗）。
+        先记下新指纹再动手：万一这次没起来，也只重试一次，不会每 10 秒刷一遍日志。
+        """
+        self.code_sig = code_signature(os.path.join(APP_DIR, "tray.py"))
+        _log("检测到 tray.py 已被升级 → 换上新代码重启托盘")
+        if self.mutex_handle:
+            self.kernel32.CloseHandle(self.mutex_handle)
+            self.mutex_handle = None
+        try:
+            subprocess.Popen([sys.executable, os.path.join(APP_DIR, "tray.py")],
+                             cwd=APP_DIR, creationflags=DETACHED_PROCESS,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True)
+        except OSError as exc:
+            _log("重启失败：%r（本次继续用旧代码跑，下次升级再试）" % (exc,))
+            self.mutex_handle = _single_instance()[0]        # 把互斥体拿回来
+            return False
+        self.user32.DestroyWindow(self.hwnd)                 # 撤图标 + PostQuitMessage
+        return True
+
     # —— v2.0.7.0（B3）：事件驱动的立即重连 ——
     def _reconnect(self, reason):
         """打一下服务端的 ``/api/login``（服务侧自己会判断「该不该登、能不能登」）。
@@ -536,6 +589,9 @@ class TrayApp(object):
                 return
         else:
             self.missing_streak = 0
+        if self._code_changed():
+            self._restart_self()
+            return
         status = poll_status()
         kind = classify(status)
         self.down_streak = self.down_streak + 1 if kind == "down" else 0
@@ -725,6 +781,7 @@ def main(argv):
         _out("托盘已经在运行了，本次退出。")
         return 0
     app = TrayApp()
+    app.mutex_handle = handle        # v2.0.7.1：换新代码重启自己前要先放手这个互斥体
     if "--self-test" in argv:
         code = app.self_test()
         _out("托盘自检%s" % ("通过 ✓" if code == 0 else "失败 ✗（code=%d）" % code))
