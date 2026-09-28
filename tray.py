@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
-"""tray.py — 登录会话里的托盘小程序（B2：断线通知 + 托盘图标）。
+"""tray.py — 登录会话里的托盘小程序（B2：断线通知 + 托盘图标；B3：唤醒 / 换网立刻重连）。
 
 为什么需要它：服务跑在 LocalSystem / **session 0**，跟用户桌面会话隔离，弹不出任何通知
 （`Shell_NotifyIcon` / 气泡在服务里调等于扔进黑洞）。所以「断线通知 + 托盘图标」必须由
 一个**随登录启动的用户进程**来做：它每 10 秒轮询服务在本机的 `/api/status`，状态迁移
 时弹气泡，右键菜单提供「打开配置页 / 立即登录 / 打开日志目录 / 退出」。
+
+v2.0.7.0（B3）新增**事件驱动重连**：托盘本来就是用户会话里的 GUI 程序（有消息循环），
+于是顺手当事件源 —— 收 ``WM_POWERBROADCAST``（睡眠唤醒；等几秒让网卡连上再触发）
+与 ``NotifyAddrChange``（插网线 / 换 Wi-Fi / DHCP 换地址），事件一到就 POST 一次
+``/api/login``。不用再等服务那边「最长等一个检查周期」的节奏。
 
 只依赖标准库（ctypes 直调 Win32），跟主程序一样不引入第三方依赖。
 
@@ -16,11 +21,16 @@
 
 单次检查（不建图标，只打印一次判定结果；CI / 排障用）：
     "{app}\\python\\python.exe" "{app}\\tray.py" --check
+
+模拟一次事件（本机实测用：走的就是真实处理路径，事件与结论都写进日志）：
+    "{app}\\python\\python.exe" "{app}\\tray.py" --test-event wake     # 当作刚睡醒
+    "{app}\\python\\python.exe" "{app}\\tray.py" --test-event net      # 当作网络变了
 """
 import ctypes
 import json
 import os
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -37,6 +47,10 @@ POLL_SEC = 10                  # 轮询间隔
 DOWN_STREAK_TO_NOTIFY = 3      # 连续几次拿不到服务才报「服务未响应」（避免偶发抖动刷屏）
 DEFAULT_UI_PORT = 8848
 HTTP_TIMEOUT = 5
+
+# —— v2.0.7.0（B3）：事件驱动重连 ——
+RECONNECT_MIN_GAP_SEC = 5      # 事件去抖：唤醒与地址变化常常连着来，别打成一串
+WAKE_SETTLE_SEC = 4            # 唤醒后等几秒再触发：网卡 / 无线这时才刚连上
 
 
 # ============================================================
@@ -154,6 +168,35 @@ def status_text(status):
     return "状态未知" + extra
 
 
+# ============================================================
+# 事件驱动重连（B3）：电源事件 → 事件名；事件去抖（纯函数，单测在这两块上做）
+# ============================================================
+PBT_APMRESUMECRITICAL = 0x0006     # 从关键挂起恢复
+PBT_APMRESUMESUSPEND = 0x0007      # 从睡眠恢复（用户按键 / 开盖）
+PBT_APMRESUMEAUTOMATIC = 0x0012    # 从睡眠自动恢复（定时器 / 网络唤醒）
+
+
+def power_event_kind(wparam):
+    """``WM_POWERBROADCAST`` 的 wparam → 事件名；不是「醒过来」就返回 None。
+
+    只认三种恢复：手动恢复 / 自动恢复 / 关键恢复。
+    进入睡眠（``PBT_APMSUSPEND``）与电源状态变化（``PBT_POWERSETTINGCHANGE``）一律忽略 ——
+    睡着的时候不需要重连，醒着时那些事件也跟「该不该重新登录」无关。
+    """
+    if wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMECRITICAL):
+        return "从睡眠唤醒"
+    return None
+
+
+def should_reconnect(last_at, now, gap=RECONNECT_MIN_GAP_SEC):
+    """事件去抖：距上次触发不足 ``gap`` 秒就跳过。纯函数。
+
+    ``last_at is None`` = 托盘起来后还没因事件触发过 → 允许。
+    没有这道闸，唤醒时「电源广播 + 无线重连 + DHCP 续租」会连打三四个登录请求。
+    """
+    return last_at is None or (now - last_at) >= gap
+
+
 def decide_events(prev_kind, cur_kind, down_streak):
     """状态迁移 → 要弹的通知。纯函数，返回 list[(标题, 正文, 级别)]，级别 ∈ {info, warn}。
 
@@ -201,6 +244,22 @@ TPM_RETURNCMD, TPM_RIGHTBUTTON, TPM_NONOTIFY = 0x100, 0x2, 0x80
 MF_STRING, MF_SEPARATOR = 0x0, 0x800
 ID_OPEN, ID_LOGIN, ID_LOGS, ID_QUIT = 1001, 1002, 1003, 1099
 MUTEX_NAME = "Local\\DrcomAutoLoginTray"      # Local\ = 每个登录会话一个托盘
+# —— v2.0.7.0（B3）：事件驱动重连用到的消息 / 定时器 id ——
+WM_POWERBROADCAST = 0x0218
+WM_NETCHANGE = WM_APP + 2                     # 自己 PostMessage 的：网络地址变了
+TIMER_POLL, TIMER_WAKE = 1, 2                 # 周期性轮询 / 唤醒后延后触发的一次性重连
+INFINITE = 0xFFFFFFFF
+
+
+class OVERLAPPED(ctypes.Structure):
+    """``OVERLAPPED`` —— ctypes.wintypes 里**没有**这个结构（v2.0.7.0 实跑才发现的坑）。
+
+    只用 ``hEvent``：``NotifyAddrChange`` 是异步 API，靠这个事件告诉我们"地址变了"。
+    Internal / InternalHigh 按指针宽度放（64 位下 int 会被截断）。
+    """
+    _fields_ = [("Internal", ctypes.c_void_p), ("InternalHigh", ctypes.c_void_p),
+                ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE)]
 
 
 class GUID(ctypes.Structure):
@@ -233,7 +292,8 @@ _WNDPROC_T = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
 
 
 def _libs():
-    return (ctypes.windll.kernel32, ctypes.windll.user32, ctypes.windll.shell32)
+    return (ctypes.windll.kernel32, ctypes.windll.user32, ctypes.windll.shell32,
+            ctypes.windll.iphlpapi)          # v2.0.7.0：网络地址变化通知（NotifyAddrChange）
 
 
 class TrayApp(object):
@@ -248,7 +308,8 @@ class TrayApp(object):
         self.missing_streak = 0     # 连续几次找不到自己的脚本（用来识别"已卸载"）
         self.last_status = {}
         self._proc = None           # WNDPROC 必须留引用，否则被 GC 掉会崩
-        self.kernel32, self.user32, self.shell32 = _libs()
+        self.last_reconnect_at = None    # v2.0.7.0：上次因事件触发重连的时刻（去抖用）
+        self.kernel32, self.user32, self.shell32, self.iphlpapi = _libs()
         self._declare_win32()
 
     def _declare_win32(self):
@@ -292,6 +353,18 @@ class TrayApp(object):
                                      wintypes.UINT]
         u32.TranslateMessage.argtypes = [ctypes.c_void_p]
         u32.DispatchMessageW.argtypes = [ctypes.c_void_p]
+        # v2.0.7.0：NotifyAddrChange 是**异步** API —— 拿到事件句柄后 WaitForSingleObject
+        # 等它。句柄（HANDLE）不声明 argtypes/restype，64 位下会被 ctypes 按 int 截断。
+        k32.CreateEventW.restype = wintypes.HANDLE
+        k32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL,
+                                     wintypes.LPCWSTR]
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.CloseHandle.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.iphlpapi.NotifyAddrChange.restype = wintypes.DWORD
+        self.iphlpapi.NotifyAddrChange.argtypes = [ctypes.POINTER(wintypes.HANDLE),
+                                                   ctypes.POINTER(OVERLAPPED)]
         self.shell32.Shell_NotifyIconW.restype = wintypes.BOOL
 
     # —— 图标 ——
@@ -398,6 +471,58 @@ class TrayApp(object):
             _log("用户从菜单退出托盘")
             self.user32.DestroyWindow(self.hwnd)
 
+    # —— v2.0.7.0（B3）：事件驱动的立即重连 ——
+    def _reconnect(self, reason):
+        """打一下服务端的 ``/api/login``（服务侧自己会判断「该不该登、能不能登」）。
+
+        只在**事件**到了才走这里，而且带 5 秒去抖：唤醒时「电源广播 + 无线重连 +
+        DHCP 续租」常常连着来，不去抖会连打三四个登录请求。
+        """
+        now = time.time()
+        if not should_reconnect(self.last_reconnect_at, now):
+            _log("事件：%s → 距上次触发不足 %ss，跳过（去抖）" % (reason, RECONNECT_MIN_GAP_SEC))
+            return
+        self.last_reconnect_at = now
+        ok, msg = trigger_login()
+        _log("事件：%s → 立即重连：%s" % (reason, msg))
+        if ok:
+            self._poll()        # 顺手立刻刷新一次状态，不等下一个 10 秒
+
+    def _addr_change_loop(self):
+        """后台线程：等一次网络地址变化 → PostMessage 叫醒主循环 → 再等下一次。
+
+        用 ``NotifyAddrChange``（iphlpapi，XP 起就有）：插网线 / 换 Wi-Fi / DHCP 换地址 /
+        唤醒后网卡重新拿到地址都会触发。**不轮询** —— 事件到了才醒，平时零开销。
+
+        任何异常都只记一行日志并结束线程：托盘主体（10 秒轮询 + 通知）不受影响，
+        最坏情况就是退回 v2.0.6.x 的行为。
+        """
+        ip, k32, u32 = self.iphlpapi, self.kernel32, self.user32
+        while True:
+            try:
+                h_event = k32.CreateEventW(None, False, False, None)
+                if not h_event:
+                    _log("网络变化监听：CreateEventW 失败，退回纯轮询（%ss）" % POLL_SEC)
+                    return
+                h_async = wintypes.HANDLE()
+                ov = OVERLAPPED()               # 必须一直活到 WaitForSingleObject 返回
+                ov.hEvent = h_event
+                rc = ip.NotifyAddrChange(ctypes.byref(h_async), ctypes.byref(ov))
+                try:
+                    if rc not in (0, 997):        # 0=ERROR_SUCCESS / 997=ERROR_IO_PENDING
+                        _log("网络变化监听：NotifyAddrChange 返回 %s，退回纯轮询" % rc)
+                        return
+                    k32.WaitForSingleObject(h_event, INFINITE)   # 等到真的变了才继续
+                finally:
+                    k32.CloseHandle(h_event)
+                    if h_async:
+                        k32.CloseHandle(h_async)
+                if self.hwnd:
+                    u32.PostMessageW(self.hwnd, WM_NETCHANGE, 0, 0)
+            except Exception as exc:            # noqa: BLE001 —— 监听线程绝不拖垮托盘
+                _log("网络变化监听异常：%r（退回纯轮询）" % (exc,))
+                return
+
     # —— 轮询 ——
     def _poll(self):
         # 卸载后自己退出：安装目录里的 tray.py 没了（连续两次轮询都找不到）→ 撤图标退出，
@@ -431,8 +556,23 @@ class TrayApp(object):
                 elif lparam == WM_RBUTTONUP:
                     self._show_menu()
                 return 0
+            if msg == WM_POWERBROADCAST:
+                kind = power_event_kind(wparam)
+                if kind:
+                    _log("事件：%s → %s 秒后触发重连" % (kind, WAKE_SETTLE_SEC))
+                    # 不能在这里直接发请求：WndProc 卡住会把整个托盘冻住。
+                    # 改用一次性定时器延后 —— 刚醒时网卡 / 无线还没连上。
+                    self.user32.SetTimer(self.hwnd, TIMER_WAKE, WAKE_SETTLE_SEC * 1000, None)
+                return 1        # TRUE：电源广播要求「已处理」才回 1
+            if msg == WM_NETCHANGE:
+                self._reconnect("网络地址变化")
+                return 0
             if msg == WM_TIMER:
-                self._poll()
+                if wparam == TIMER_WAKE:
+                    self.user32.KillTimer(self.hwnd, TIMER_WAKE)
+                    self._reconnect("从睡眠唤醒")
+                else:
+                    self._poll()
                 return 0
             if msg in (WM_CLOSE, WM_DESTROY):
                 if self.nid:
@@ -453,12 +593,16 @@ class TrayApp(object):
             return 2
         _log("托盘已启动（每 %ss 轮询 %s）" % (POLL_SEC, api_base()))
         self._poll()                       # 起来就先来一次，别等一个轮询周期
-        self.user32.SetTimer(self.hwnd, 1, POLL_SEC * 1000, None)
+        self.user32.SetTimer(self.hwnd, TIMER_POLL, POLL_SEC * 1000, None)
+        # v2.0.7.0（B3）：另起一个线程等「网络地址变化」（插网线 / 换 Wi-Fi / DHCP 换地址），
+        # 到了就 PostMessage 叫醒上面的消息循环 → 立刻重连，不用等下一个轮询周期。
+        threading.Thread(target=self._addr_change_loop, daemon=True).start()
+        _log("事件监听已就绪：网络地址变化 + 系统唤醒（唤醒后 %s 秒触发重连）" % WAKE_SETTLE_SEC)
         msg = wintypes.MSG()
         while self.user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
             self.user32.TranslateMessage(ctypes.byref(msg))
             self.user32.DispatchMessageW(ctypes.byref(msg))
-        self.user32.KillTimer(self.hwnd, 1)
+        self.user32.KillTimer(self.hwnd, TIMER_POLL)
         if self.nid:
             self.shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(self.nid))
             self.nid = None
@@ -494,6 +638,39 @@ class TrayApp(object):
         _log("自检失败：NIM_DELETE 返回 FALSE")
         return 3
 
+    def test_event(self, kind, wait_sec=15):
+        """模拟一次事件（``--test-event wake|net``）：**真投递那条消息**，走真实处理路径。
+
+        故意**不建图标**：消息循环不需要它，免得测试时通知区闪一下
+        （``_set_tip`` / ``balloon`` 在没有图标时本来就会安静跳过）。
+
+        返回 0 = 消息已投递并跑完消息循环（日志里能看到「事件：… → 立即重连：…」）。
+        """
+        if kind not in ("wake", "net"):
+            _out("--test-event 只认 wake / net（收到 %r）" % kind)
+            return 2
+        if not self._create_window():
+            return 1
+        if kind == "wake":
+            self.user32.PostMessageW(self.hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0)
+            note = "已投递 WM_POWERBROADCAST(PBT_APMRESUMEAUTOMATIC)：%s 秒后应触发重连" % \
+                   WAKE_SETTLE_SEC
+        else:
+            self.user32.PostMessageW(self.hwnd, WM_NETCHANGE, 0, 0)
+            note = "已投递 WM_NETCHANGE：应当立刻触发重连"
+        _log("事件模拟（%s）：%s" % (kind, note))
+        _out(note)
+        deadline = time.time() + wait_sec
+        msg = wintypes.MSG()
+        while time.time() < deadline:          # 真消息循环：事件与定时器都走真代码
+            while self.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                self.user32.TranslateMessage(ctypes.byref(msg))
+                self.user32.DispatchMessageW(ctypes.byref(msg))
+            time.sleep(0.05)
+        self.user32.DestroyWindow(self.hwnd)
+        _out("上面出现「事件：… → 立即重连：…」就说明链路通了；完整日志：%s" % LOG_FILE)
+        return 0
+
 
 # ============================================================
 # 入口
@@ -524,7 +701,7 @@ def _single_instance():
 def main(argv):
     if "--help" in argv or "-h" in argv:
         _out(__doc__ or "")
-        _out("用法：tray.py [--check | --self-test]")
+        _out("用法：tray.py [--check | --self-test | --test-event wake|net]")
         return 0
     if not IS_WIN:
         _out("tray.py 只在 Windows 上有意义（当前平台：%s）" % os.name)
@@ -537,6 +714,12 @@ def main(argv):
         for title, textv, level in decide_events("ok", kind, 1):
             _out("照这个走向会弹：%s —— %s（%s）" % (title, textv, level))
         return 0
+    if "--test-event" in argv:
+        # 本机实测用：**故意**绕开单实例互斥体 —— 真实托盘通常正在跑，
+        # 而模拟事件不需要抢它的窗口（也不建图标，免得通知区闪一下）。
+        _idx = argv.index("--test-event")
+        _kind = argv[_idx + 1] if len(argv) > _idx + 1 else "wake"
+        return TrayApp().test_event(_kind)
     handle, already = _single_instance()
     if already:
         _out("托盘已经在运行了，本次退出。")
