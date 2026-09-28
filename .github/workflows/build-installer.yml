@@ -136,6 +136,21 @@ jobs:
           "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "APP_VERSION = $v"
 
+          # 代号（CODENAME / CODENAME_CN）也一律从 version.py 读 —— v2.1.0.0 的教训：
+          # RELEASE-NOTES 头部曾经硬编码 "Sirius"，换了版本线（Vega）后发布页标题还写着旧名 ✗。
+          # 现在模板里用 {{CODENAME}} / {{CODENAME_CN}} 占位，CI 来填 ✓。
+          $cn = ""
+          $cnCn = ""
+          if (Test-Path $versionFile) {
+            $m1 = Select-String -Path $versionFile -Pattern '^CODENAME\s*=\s*["'']([^"'']+)["'']' | Select-Object -First 1
+            $m2 = Select-String -Path $versionFile -Pattern '^CODENAME_CN\s*=\s*["'']([^"'']+)["'']' | Select-Object -First 1
+            if ($m1) { $cn = $m1.Matches[0].Groups[1].Value }
+            if ($m2) { $cnCn = $m2.Matches[0].Groups[1].Value }
+          }
+          "APP_CODENAME=$cn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "APP_CODENAME_CN=$cnCn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "APP_CODENAME = $cn / $cnCn"
+
       - name: Build installer with ISCC
         shell: pwsh
         run: |
@@ -178,6 +193,8 @@ jobs:
             $body = "Windows 安装程序 v$env:APP_VERSION（Inno Setup 自动构建）。"
           }
           $body = $body.Replace('{{VERSION}}', $env:APP_VERSION)
+          $body = $body.Replace('{{CODENAME}}', $env:APP_CODENAME)
+          $body = $body.Replace('{{CODENAME_CN}}', $env:APP_CODENAME_CN)
           $body = $body.Replace('{{ASSET}}', $exe.Name)
           $body = $body.Replace('{{SIZE}}', "$($exe.Length)")
           $body = $body.Replace('{{SIZE_MB}}', ([math]::Round($exe.Length / 1MB, 2)).ToString())
@@ -215,6 +232,8 @@ jobs:
             $body = "Windows 安装程序 v$env:APP_VERSION（Inno Setup 自动构建）。"
           }
           $body = $body.Replace('{{VERSION}}', $env:APP_VERSION)
+          $body = $body.Replace('{{CODENAME}}', $env:APP_CODENAME)
+          $body = $body.Replace('{{CODENAME_CN}}', $env:APP_CODENAME_CN)
           $body = $body.Replace('{{ASSET}}', $exe.Name)
           $body = $body.Replace('{{SIZE}}', "$($exe.Length)")
           $body = $body.Replace('{{SIZE_MB}}', ([math]::Round($exe.Length / 1MB, 2)).ToString())

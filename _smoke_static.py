@@ -1432,6 +1432,22 @@ check("v2.1.0.0 P7-3：两个批处理都写明了「路径不能含 !」的限�
       "不能含" in _inst14 and "EnableDelayedExpansion" in _inst14
       and "不能含" in _uinst14)
 
+# v2.1.0.0 补丁：发布说明里的代号必须由 CI 从 version.py 填 —— 头部不许再硬编码星名 ✗
+# （事故：换了版本线到 Vega，发布页首行还写着 "Sirius"，因为模板里是死的字面量。）
+_rel_head = pathlib.Path("packaging/RELEASE-NOTES.md").read_text(
+    encoding="utf-8", errors="replace").splitlines()[0]
+_wf_src = pathlib.Path(".github/workflows/build-installer.yml").read_text(
+    encoding="utf-8", errors="replace")
+_ver_mod = importlib.import_module("version")   # 本文件后段才 import version，这里自带 ✓
+check("v2.1.0.0 补丁：RELEASE-NOTES 头部用 {{CODENAME}} 占位（不再硬编码星名）",
+      "{{CODENAME}}" in _rel_head and "{{CODENAME_CN}}" in _rel_head
+      and "Sirius" not in _rel_head and _ver_mod.CODENAME not in _rel_head,
+      _rel_head[:100])
+check("v2.1.0.0 补丁：CI 从 version.py 读代号并替换这两个占位符",
+      "APP_CODENAME=$cn" in _wf_src
+      and "$body.Replace('{{CODENAME}}', $env:APP_CODENAME)" in _wf_src
+      and _wf_src.count("{{CODENAME}}") >= 2 and _wf_src.count("{{CODENAME_CN}}") >= 2)
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
