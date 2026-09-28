@@ -3,8 +3,10 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.0.14.0)
+REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.0.0)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
+REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
+REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
 REM   PowerShell 通过 ASCII 临时 .ps1 文件执行，避开 cmd→ps 编码边界
 REM   含中文路径通过环境变量传递（Unicode 通道）
 REM ============================================================
@@ -60,10 +62,22 @@ if not defined PYTHON (
     )
 )
 if "!PYTHON!"=="" (
-    if exist "C:\Python314\python.exe" set "PYTHON=C:\Python314\python.exe"
+    rem v2.1.0.0（P7-3）：别硬编码 C:\Python314 —— 小版本一升就漂移 ✗。
+    rem 先问官方启动器 `py -3`，再退到 %LOCALAPPDATA%\Programs\Python\Python3* 这一常见位置。
+    where py >nul 2>&1
+    if not errorlevel 1 (
+        for /f "delims=" %%i in ('py -3 -c "import sys;print(sys.executable)" 2^>nul') do (
+            if not defined PYTHON if exist "%%i" set "PYTHON=%%i"
+        )
+    )
 )
 if "!PYTHON!"=="" (
-    echo [ERROR] 未找到 python.exe。请将 Python 加入 PATH、安装到 C:\Python314\，或改用自带内嵌 Python 的安装包
+    for /d %%d in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+        if not defined PYTHON if exist "%%d\python.exe" set "PYTHON=%%d\python.exe"
+    )
+)
+if "!PYTHON!"=="" (
+    echo [ERROR] 未找到 python.exe。请把 Python 加入 PATH（或用 py 启动器），或改用自带内嵌 Python 的安装包（推荐）
     pause
     exit /b 1
 )

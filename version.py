@@ -13,12 +13,13 @@
 `uninstall.bat`、`packaging/build.ps1`、README 与模块 docstring 里的版本必须同步。
 """
 
-VERSION = "2.0.14.0"
+VERSION = "2.1.0.0"
 
 # —— 版本线代号（MAJOR.MINOR 级别；换线必须换名）——
 # 主题：亮星名（中英对照），呼应「星尘闪连」。候选表见 docs/VERSIONING.md。
-CODENAME = "Sirius"
-CODENAME_CN = "天狼星"
+# 2.0 线（Sirius 天狼星）在 v2.0.14.0 收束，v2.1.0.0 起进入 2.1 线。
+CODENAME = "Vega"
+CODENAME_CN = "织女星"
 
 # 展示用全名，如 "2.0.4.0 Sirius（天狼星）"
 VERSION_FULL = "{} {}（{}）".format(VERSION, CODENAME, CODENAME_CN)
