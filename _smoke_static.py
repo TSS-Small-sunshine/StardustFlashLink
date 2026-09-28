@@ -296,6 +296,37 @@ check("v2.0.6.2 安装器把开关记进 HKLM（供服务对齐）",
       "TrayAutostart" in _iss_src and "WizardIsTaskSelected('trayicon')" in _iss_src)
 check("v2.0.6.2 启动钩子会调用自愈", "_ensure_tray_autostart_sane()" in _au_src)
 
+# ---- v2.0.7.0（B3）：唤醒 / 换网 → 事件驱动立即重连 ----
+# 真机证据（2026-09-28 本机实跑 --test-event，日志到秒）：
+#   [08:58:44] 事件：网络地址变化 → 立即重连：已触发一次登录检查
+#   [08:59:00] 事件：从睡眠唤醒 → 4 秒后触发重连
+#   [08:59:04] 事件：从睡眠唤醒 → 立即重连：已触发一次登录检查
+check("v2.0.7.0 三种「醒过来」都识别", _tray.power_event_kind(0x12) == "从睡眠唤醒"
+      and _tray.power_event_kind(0x07) == "从睡眠唤醒"
+      and _tray.power_event_kind(0x06) == "从睡眠唤醒")
+check("v2.0.7.0 进入睡眠 / 无关电源事件不触发重连", _tray.power_event_kind(0x04) is None
+      and _tray.power_event_kind(0x8013) is None and _tray.power_event_kind(0) is None)
+check("v2.0.7.0 事件去抖：5 秒内连着来的只打一次",
+      _tray.should_reconnect(None, 1000) is True
+      and _tray.should_reconnect(999, 1000) is False
+      and _tray.should_reconnect(995, 1000) is True
+      and _tray.should_reconnect(990, 1000) is True)
+check("v2.0.7.0 接电源广播 + 网络地址变化", "WM_POWERBROADCAST" in _tray_src
+      and "NotifyAddrChange" in _tray_src and "WM_NETCHANGE" in _tray_src)
+check("v2.0.7.0 网络变化用后台线程等（不占消息循环）",
+      "def _addr_change_loop" in _tray_src
+      and "threading.Thread(target=self._addr_change_loop, daemon=True)" in _tray_src)
+check("v2.0.7.0 唤醒后延后触发（刚醒时网卡还没连上）",
+      "TIMER_WAKE" in _tray_src and _tray.WAKE_SETTLE_SEC >= 3)
+check("v2.0.7.0 监听线程异常只退化成轮询（不许拖垮托盘）", "退回纯轮询" in _tray_src)
+# 真跑才抓到的坑：ctypes.wintypes **没有** OVERLAPPED —— 直接用会 AttributeError，
+# 而它发生在 _declare_win32 里 → 托盘启动即崩。必须自带结构体定义。
+check("v2.0.7.0 OVERLAPPED 自带定义（wintypes 里没有）",
+      "class OVERLAPPED(ctypes.Structure)" in _tray_src
+      and "wintypes.OVERLAPPED" not in _tray_src)
+check("v2.0.7.0 事件模拟入口在位（本机实测用）",
+      "--test-event" in _tray_src and "def test_event" in _tray_src)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -547,7 +578,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.6.3", version.VERSION == "2.0.6.3", version.VERSION)
+check("版本 = 2.0.7.0", version.VERSION == "2.0.7.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

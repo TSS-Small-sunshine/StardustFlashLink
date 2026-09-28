@@ -5,6 +5,49 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.7.0 (feature) — 2026-09-28 · 代号 `Sirius`（天狼星）
+
+> 以前的「回到网络」体验：合盖睡一觉、插上网线、从教室 Wi-Fi 切回宿舍 ——
+> 服务下一次检查可能要等**一整个检查周期**（默认 30 分钟）才把登录补上 ✗。
+> 而托盘一直醒着（它是用户会话里的 GUI 程序）✓。
+
+### ✨ 新增（B3）：唤醒 / 换网 → 立刻重连
+事件源放在 **`tray.py`**（服务跑在 session 0，既没有窗口，也不该为这种事加线程）：
+
+| 事件 | 来源 | 触发时机 |
+| --- | --- | --- |
+| 睡眠唤醒 | `WM_POWERBROADCAST`（`APMRESUMESUSPEND` / `AUTOMATIC` / `CRITICAL`） | **延后 4 秒**（`WAKE_SETTLE_SEC`）—— 刚醒时网卡 / 无线还没连上 |
+| 网络变化 | `NotifyAddrChange`（iphlpapi，后台线程异步等） | 立刻（插网线 / 换 Wi-Fi / DHCP 换地址 / 唤醒后重新拿到地址） |
+
+事件一到就 `POST /api/login` —— 服务侧自己判断「该不该登、能不能登」（网络位置守卫照样生效）。
+
+- **去抖**：`RECONNECT_MIN_GAP_SEC = 5`（纯函数 `should_reconnect()`）。唤醒时「电源广播 +
+  无线重连 + DHCP 续租」会连着来，不去抖会连打三四个登录请求。
+- **不占消息循环**：`NotifyAddrChange` 在**后台线程**里等，到了才 `PostMessage` 叫醒主循环
+  （`WM_NETCHANGE`）；唤醒走一次性定时器（`TIMER_WAKE`）延后 —— 绝不在 `WndProc` 里发请求。
+- **失败即退化**：事件句柄创建失败 / API 返回异常码 / 线程抛异常 → 只记一行日志并结束线程，
+  行为退回 `v2.0.6.x` 的 10 秒轮询，托盘主体不受影响。
+- **可实测**：`tray.py --test-event wake|net` 真投递那条消息、走真实处理路径
+  （该入口**故意**绕开单实例互斥体 —— 真实托盘通常正在跑）。
+
+### 🧪 自检
+`_smoke_static.py` 新增 9 条（3 条纯函数行为级 + 6 条接线）。其中一条正是本次**真跑才抓到的坑**：
+`ctypes.wintypes` **没有** `OVERLAPPED` —— 直接用会 `AttributeError`，而它发生在
+`_declare_win32()` 里 → **托盘启动即崩** ✗。现在自带 `class OVERLAPPED(ctypes.Structure)`，
+并加断言禁止 `wintypes.OVERLAPPED` 写法。
+
+真机实跑（`--test-event`，日志到秒）：
+
+```
+[08:58:44] 事件：网络地址变化 → 立即重连：已触发一次登录检查
+[08:59:00] 事件：从睡眠唤醒 → 4 秒后触发重连
+[08:59:04] 事件：从睡眠唤醒 → 立即重连：已触发一次登录检查
+```
+
+### 其它
+- 定时器改成具名 id（`TIMER_POLL` / `TIMER_WAKE`），不再是裸 `1`。
+- 接口、配置结构、服务名、`AppId` 全未动（PATCH +1），老配置与升级路径不受影响。
+
 ## v2.0.6.3 (fix) — 2026-09-28 · 代号 `Sirius`（天狼星）
 
 > 上一版做真机验证时自己踩到的坑：先点「立即检查更新」、紧接着点「立即升级」→
