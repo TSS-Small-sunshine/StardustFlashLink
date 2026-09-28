@@ -419,6 +419,56 @@ check("v2.0.8.1 请托盘脚本只按「tray.py + 安装目录」匹配（不误
       "$AppDir" in _ptray_src and "Name='pythonw.exe'" in _ptray_src
       and "-like '*tray.py*'" in _ptray_src and "exit 0" in _ptray_src)
 
+# ---- v2.0.9.0（B5）：配置方案（教室 / 宿舍 / 家里）----
+src_proto = pathlib.Path("protocol.py").read_text(encoding="utf-8")
+_pf = importlib.import_module("profiles")
+check("v2.0.9.0 打包带上 profiles.py", 'Source: "..\\profiles.py"' in _iss_src)
+check("v2.0.9.0 服务按可选模块导入 + 注入",
+      "import profiles as _profiles_mod" in src_svc and "_PROFILES_IMPORT_ERROR" in src_svc
+      and "_profiles_mod._attach(" in src_svc)
+check("v2.0.9.0 协议层只认回调（不 import profiles 模块）",
+      "_set_auto_profile" in src_proto and "import profiles as" not in src_proto
+      and "_auto_profile is not None" in src_proto)
+check("v2.0.9.0 自动切换排在守卫判定之前（否则本次仍按旧白名单 ✗）",
+      src_proto.index("_auto_profile is not None") < src_proto.index("_allowed, _why = guard_allows"))
+check("v2.0.9.0 五个接口 + 配置页卡片在位",
+      all(x in src_web for x in ('"/api/profiles"', '"/api/profiles/save"',
+                                 '"/api/profiles/activate"', '"/api/profiles/delete"',
+                                 '"/api/profiles/auto"', 'id="card-profiles"',
+                                 'id="profile-select"', 'id="profile-auto-switch"')))
+# 行为级：快照 / 新建 / 应用 / 校验 / 自动匹配
+_cfg0 = {"host": "1.2.3.4", "port": 80, "auto_check_interval_min": 30, "account": "2023",
+         "network_guard_enabled": False, "guard_allowed_ssids": "", "guard_allowed_subnets": ""}
+_snap = _pf.snapshot(_cfg0)
+check("v2.0.9.0 快照只含位置相关字段（账号等不进方案）",
+      "account" not in _snap and set(_snap) == set(_pf.PROFILE_KEYS), str(sorted(_snap)))
+_profs, _errs = _pf.upsert({}, "家里",
+                           {"network_guard_enabled": True, "guard_allowed_ssids": "Home-WiFi"},
+                           "Home-WiFi")
+check("v2.0.9.0 新建方案 + 记下自动匹配 Wi-Fi",
+      not _errs and _profs["家里"]["values"]["network_guard_enabled"] is True
+      and _profs["家里"]["match_ssids"] == ["Home-WiFi"], str(_errs))
+check("v2.0.9.0 方案名归一化 / 非法名被拒",
+      _pf.normalize_name("  教  室 ") == "教 室" and _pf.upsert({}, "a/b", {})[1] != [])
+check("v2.0.9.0 未知字段被拒（防止把账号塞进方案）",
+      _pf.validate_values({"account": "2023"}) != [])
+_merged, _errs2 = _pf.apply_to_config(_cfg0, _profs, "家里")
+check("v2.0.9.0 应用方案：覆盖位置字段 + 保留账号 + 不改原对象",
+      not _errs2 and _merged["guard_allowed_ssids"] == "Home-WiFi"
+      and _merged["account"] == "2023" and _merged["active_profile"] == "家里"
+      and _cfg0["guard_allowed_ssids"] == "" and "active_profile" not in _cfg0, str(_errs2))
+_merged2, _errs3 = _pf.apply_to_config(_cfg0, _profs, "家里", lambda cfg: ["故意报错"])
+check("v2.0.9.0 全量校验不过 → 整体拒绝（原配置一动不动）",
+      _errs3 != [] and _merged2 is _cfg0)
+check("v2.0.9.0 按 Wi-Fi 名挑方案（大小写不敏感）",
+      _pf.pick_by_ssid(_profs, "home-wifi") == "家里"
+      and _pf.pick_by_ssid(_profs, "别的网") is None)
+check("v2.0.9.0 匹配名去重 + 描述文案",
+      _pf.normalize_match_ssids("a, b, a") == ["a", "b"]
+      and "守卫开" in _pf.describe({"network_guard_enabled": True, "auto_check_interval_min": 30}))
+check("v2.0.9.0 删方案：删当前方案只清标记",
+      _pf.delete(_profs, "家里")[0] == {} and _pf.delete(_profs, "没有这个")[1] is False)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -670,7 +720,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.8.1", version.VERSION == "2.0.8.1", version.VERSION)
+check("版本 = 2.0.9.0", version.VERSION == "2.0.9.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

@@ -59,7 +59,9 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
             # auto_update 模块的可选注入（commit 5 才存在；现 commit 4 暂不引用）
             auto_update_mod=None,
             # metrics 模块的可选注入（v2.0.8.0 连接质量面板）
-            metrics_mod=None):
+            metrics_mod=None,
+            # profiles 模块的可选注入（v2.0.9.0 配置方案）
+            profiles_mod=None):
     """由 联网_service.py 调用，注入共享对象到本模块命名空间。
 
     设计要点：
@@ -111,6 +113,13 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
         except ImportError:
             metrics_mod = None
     g["_metrics_mod"] = metrics_mod
+    # profiles 模块（v2.0.9.0 配置方案；调用走 _profiles_mod.*）
+    if profiles_mod is None:
+        try:
+            import profiles as profiles_mod  # noqa: E402
+        except ImportError:
+            profiles_mod = None
+    g["_profiles_mod"] = profiles_mod
 
 
 def _log(msg, *args, level=logging.INFO):
@@ -163,6 +172,75 @@ def _read_json_body(handler):
         return json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise ValueError("请求体不是合法 JSON")
+
+
+def api_get_profiles():
+    """GET /api/profiles — 配置方案列表（方案 = 位置相关字段的快照）。"""
+    mod = globals().get("_profiles_mod")
+    if mod is None:
+        return {"ok": False, "error": "方案模块未就绪", "items": []}
+    try:
+        return mod.list_profiles()
+    except Exception as exc:  # noqa: BLE001 —— 面板坏了不影响配置页其它部分
+        logger.exception("读取配置方案失败: %s", exc)
+        return {"ok": False, "error": "读取方案失败：{}".format(exc), "items": []}
+
+
+def api_post_profiles_save(payload):
+    """POST /api/profiles/save — {name, match_ssids?, values?}。
+
+    不给 `values` 时 = **把当前配置存成方案**（最自然的用法：调好配置 → 存成「教室」）。
+    """
+    mod = globals().get("_profiles_mod")
+    if mod is None:
+        return 503, {"ok": False, "error": "方案模块未就绪"}
+    payload = payload if isinstance(payload, dict) else {}
+    values = payload.get("values")
+    if not isinstance(values, dict):
+        try:
+            values = mod.snapshot(_load_config())
+        except Exception as exc:  # noqa: BLE001
+            return 400, {"ok": False, "error": "读取当前配置失败：{}".format(exc)}
+    result = mod.save_profile(payload.get("name"), values, payload.get("match_ssids"))
+    return (200 if result.get("ok") else 400), result
+
+
+def api_post_profiles_activate(payload):
+    """POST /api/profiles/activate — {name}：应用方案（先全量校验，再写盘）。"""
+    mod = globals().get("_profiles_mod")
+    if mod is None:
+        return 503, {"ok": False, "error": "方案模块未就绪"}
+    payload = payload if isinstance(payload, dict) else {}
+    result = mod.activate(payload.get("name"))
+    return (200 if result.get("ok") else 400), result
+
+
+def api_post_profiles_delete(payload):
+    """POST /api/profiles/delete — {name}：删方案（删当前方案只清标记，配置值不动）。"""
+    mod = globals().get("_profiles_mod")
+    if mod is None:
+        return 503, {"ok": False, "error": "方案模块未就绪"}
+    payload = payload if isinstance(payload, dict) else {}
+    result = mod.remove(payload.get("name"))
+    return (200 if result.get("ok") else 400), result
+
+
+def api_post_profiles_auto(payload):
+    """POST /api/profiles/auto — {enabled}：按 Wi-Fi 名自动切换方案的总开关。"""
+    payload = payload if isinstance(payload, dict) else {}
+    if not isinstance(payload.get("enabled"), bool):
+        return 400, {"ok": False, "error": "enabled 必须是布尔值"}
+    try:
+        cfg = dict(_load_config() or {})
+        cfg["profiles_auto_switch"] = payload["enabled"]
+        errors = _validate_config(cfg)
+        if errors:
+            return 400, {"ok": False, "error": "；".join(errors)}
+        _save_config(cfg)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("切换自动方案开关失败: %s", exc)
+        return 500, {"ok": False, "error": "保存失败：{}".format(exc)}
+    return 200, {"ok": True, "auto_switch": payload["enabled"]}
 
 
 def api_get_status():
@@ -743,6 +821,10 @@ class _Handler(BaseHTTPRequestHandler):
                         _days = 7
                 _send_json(self, 200, api_get_metrics(_days))
                 return
+            # —— 配置方案（v2.0.9.0 / B5）——
+            if path == "/api/profiles":
+                _send_json(self, 200, api_get_profiles())
+                return
             # —— 配置导入/导出（zip）——
             if path == "/api/config/export":
                 api_get_config_export(self)
@@ -803,6 +885,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/update/toggle":
                 status, body = api_post_update_toggle(payload)
+                _send_json(self, status, body)
+                return
+            # —— 配置方案（v2.0.9.0 / B5）——
+            if path == "/api/profiles/save":
+                status, body = api_post_profiles_save(payload)
+                _send_json(self, status, body)
+                return
+            if path == "/api/profiles/activate":
+                status, body = api_post_profiles_activate(payload)
+                _send_json(self, status, body)
+                return
+            if path == "/api/profiles/delete":
+                status, body = api_post_profiles_delete(payload)
+                _send_json(self, status, body)
+                return
+            if path == "/api/profiles/auto":
+                status, body = api_post_profiles_auto(payload)
                 _send_json(self, status, body)
                 return
             _send_json(self, 404, {"error": "not found"})
@@ -1666,6 +1765,38 @@ code.path {
 
   <!-- ============ 配置 ============ -->
   <section class="panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config" tabindex="-1">
+    <!-- v2.0.9.0 / B5：配置方案（教室 / 宿舍 / 家里） -->
+    <div class="card section" id="card-profiles">
+      <div class="section-head">
+        <h2 class="section-title">配置方案 <span class="badge badge-muted" id="profile-badge">未使用</span></h2>
+        <p class="section-desc" style="margin:0;">一套方案 = 一组「位置相关设置」（认证网关 / 检查间隔 / 网络位置守卫白名单）。切换方案<b>只改这些</b>，账号、密码、升级设置一律不动。</p>
+      </div>
+      <div class="field">
+        <label for="profile-select">选择方案</label>
+        <select id="profile-select" class="cfg-lg"></select>
+        <div class="hint" id="profile-hint">还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。</div>
+      </div>
+      <div class="field">
+        <label for="profile-new-name">新建 / 覆盖方案</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <input type="text" id="profile-new-name" class="cfg-lg" style="flex:1 1 150px;" placeholder="方案名（例如 家里）" autocomplete="off" spellcheck="false" maxlength="24">
+          <input type="text" id="profile-match-ssids" class="cfg-lg" style="flex:2 1 220px;" placeholder="自动匹配的 Wi-Fi 名（可选，逗号分隔）" autocomplete="off" spellcheck="false">
+          <button class="btn" id="btn-profile-save" type="button">用当前配置保存</button>
+        </div>
+        <div class="hint">填了「自动匹配的 Wi-Fi 名」= <b>自动方案</b>：打开下面的自动切换后，一连上这个 Wi-Fi 就自动切过去。</div>
+      </div>
+      <div class="field">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button class="btn" id="btn-profile-apply" type="button">应用选中方案</button>
+          <button class="btn" id="btn-profile-delete" type="button">删除选中方案</button>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-2);">
+            <input type="checkbox" id="profile-auto-switch"> 按 Wi-Fi 名自动切换
+          </label>
+        </div>
+        <div class="err" id="err-profile" role="alert"></div>
+      </div>
+    </div>
+
     <div class="card section" id="card-password">
       <div class="section-head">
         <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
@@ -3054,6 +3185,92 @@ code.path {
         })
         .catch(function () { toast('请求失败', 'error'); });
     });
+  })();
+
+  /* ===== 配置方案（v2.0.9.0 / B5）：教室 / 宿舍 / 家里 ===== */
+  function renderProfiles(p) {
+    var sel = $('profile-select');
+    var items = (p && p.ok && p.items) ? p.items : [];
+    if (sel) {
+      sel.innerHTML = '';
+      if (!items.length) {
+        var empty = document.createElement('option');
+        empty.value = '';
+        empty.textContent = '（还没有方案）';
+        sel.appendChild(empty);
+      }
+      items.forEach(function (it) {
+        var opt = document.createElement('option');
+        opt.value = it.name;
+        opt.textContent = it.name + (it.active ? '（当前）' : '') + (it.auto ? ' · 自动' : '');
+        sel.appendChild(opt);
+      });
+    }
+    var cur = null;
+    items.forEach(function (it) { if (it.active) cur = it; });
+    var badge = $('profile-badge');
+    if (badge) {
+      badge.textContent = cur ? ('当前：' + cur.name) : (items.length ? (items.length + ' 个方案') : '未使用');
+      badge.className = 'badge ' + (cur ? 'badge-ok' : 'badge-muted');
+    }
+    text($('profile-hint'), cur
+      ? ('当前方案：' + cur.name + ' —— ' + cur.desc
+         + (cur.match_ssids.length ? (' · 自动匹配 ' + cur.match_ssids.join('、')) : ' · 手动方案'))
+      : (items.length
+         ? '在列表里选一个方案，点「应用选中方案」即可切换（账号密码不受影响）。'
+         : '还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。'));
+    var auto = $('profile-auto-switch');
+    if (auto) auto.checked = !!(p && p.auto_switch);
+  }
+
+  function loadProfiles() {
+    getJson('/api/profiles').then(renderProfiles).catch(function () { renderProfiles(null); });
+  }
+
+  function profileAction(path, body, reloadAfter) {
+    text($('err-profile'), '');
+    postJson(path, body || {}).then(function (r) {
+      if (r && r.ok) {
+        toast('配置方案已更新', 'success', 3000);
+        loadProfiles();
+        /* 切方案会改表单里的字段 → 刷新一次页面，免得界面上还是旧值 */
+        if (reloadAfter) setTimeout(function () { location.reload(); }, 700);
+      } else {
+        text($('err-profile'), (r && r.error) || '操作失败');
+      }
+    }).catch(function () { text($('err-profile'), '请求失败，请检查服务状态'); });
+  }
+
+  (function () {
+    var saveBtn = $('btn-profile-save');
+    var applyBtn = $('btn-profile-apply');
+    var delBtn = $('btn-profile-delete');
+    var autoBox = $('profile-auto-switch');
+    if (saveBtn) saveBtn.addEventListener('click', function () {
+      var nameEl = $('profile-new-name'), matchEl = $('profile-match-ssids');
+      var name = nameEl ? nameEl.value : '';
+      if (!name.trim()) { text($('err-profile'), '请先填一个方案名'); return; }
+      profileAction('/api/profiles/save', {
+        name: name, match_ssids: matchEl ? matchEl.value : ''
+      });
+    });
+    if (applyBtn) applyBtn.addEventListener('click', function () {
+      var sel = $('profile-select');
+      var name = sel ? sel.value : '';
+      if (!name) { text($('err-profile'), '先在列表里选一个方案'); return; }
+      profileAction('/api/profiles/activate', { name: name }, true);
+    });
+    if (delBtn) delBtn.addEventListener('click', function () {
+      var sel = $('profile-select');
+      var name = sel ? sel.value : '';
+      if (!name) { text($('err-profile'), '先在列表里选一个方案'); return; }
+      if (!confirm('删除方案「' + name + '」？\n\n只删这个名字，当前配置值保持不变。')) return;
+      profileAction('/api/profiles/delete', { name: name });
+    });
+    if (autoBox) autoBox.addEventListener('change', function () {
+      profileAction('/api/profiles/auto', { enabled: !!autoBox.checked });
+    });
+    loadProfiles();
   })();
 
   /* ===== 连接质量（v2.0.8.0 / B4）：进页面拉一次 + 手动刷新 =====
