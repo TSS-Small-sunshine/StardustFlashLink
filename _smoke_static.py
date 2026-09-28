@@ -474,8 +474,19 @@ check("v2.0.9.0 删方案：删当前方案只清标记",
 # 于是同一函数里更早的 `_protocol_mod._attach(...)` 直接崩：
 #   UnboundLocalError: cannot access local variable '_protocol_mod'
 #   → 服务启动即退（nssm AppExit=Ignore 不重启）→ Web UI 端口消失 ✗
-_svc_func_imports = [ln.strip() for ln in src_svc.splitlines()
-                     if re.match(r'^\s+import\s+\w+\s+as\s+_\w+', ln)]
+_svc_lines = src_svc.splitlines()
+_svc_func_imports = []
+for _i, _ln in enumerate(_svc_lines):
+    if not re.match(r'^\s+import\s+\w+\s+as\s+_\w+', _ln):
+        continue
+    # 允许的唯一形式：模块级 `try: import X as _X except ImportError:` 的「可选模块」导入
+    _prev = ""
+    for _j in range(_i - 1, -1, -1):
+        if _svc_lines[_j].strip():
+            _prev = _svc_lines[_j].strip()
+            break
+    if _prev != "try:":
+        _svc_func_imports.append(_ln.strip())
 check("v2.0.9.1 服务里没有「函数内 import 模块别名」（会遮蔽模块级名）",
       not _svc_func_imports, str(_svc_func_imports))
 check("v2.0.9.1 自动切换回调挂在模块级 _protocol_mod 上（无重复 import）",
