@@ -879,8 +879,11 @@ def _break_app(tag):
 
 
 def _run_rb(*args):
+    # PYTHONIOENCODING=utf-8：子进程 stdout 走管道时默认按控制台代码页（GBK）编码 ✗，
+    # 断言里按 utf-8 解码就会全是乱码 —— 固定子进程编码，让断言可判定 ✓
+    _env = dict(os.environ, PYTHONIOENCODING="utf-8")
     return subprocess.run([sys.executable, _scr, "--rc", _rb_rc, "--log", _rb_log] + list(args),
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, env=_env)
 
 
 def _app_now():
@@ -915,13 +918,15 @@ check("v2.0.11.0 回滚：拒绝时 all-or-nothing（app 文件原样未动）",
 
 _r3 = _run_rb("--backup", _bk, "--expect", "9.9.9")
 check("v2.0.11.0 回滚：--expect 与备份版本不符 → 拒绝（防拿错备份）",
-      _r3.returncode == 1 and "但期望" in _r3.stdout.decode("utf-8", "replace"))
+      _r3.returncode == 1 and "但期望" in _r3.stdout.decode("utf-8", "replace"),
+      repr(_r3.stdout.decode("utf-8", "replace")[:160]))
 
 _bk_no_man = au._backup_dir_for("2.2.2")
 os.makedirs(_bk_no_man, exist_ok=True)
 _r4 = _run_rb("--backup", _bk_no_man)
 check("v2.0.11.0 回滚：清单缺失 → 拒绝",
-      _r4.returncode == 1 and "读不了备份清单" in _r4.stdout.decode("utf-8", "replace"))
+      _r4.returncode == 1 and "读不了备份清单" in _r4.stdout.decode("utf-8", "replace"),
+      repr(_r4.stdout.decode("utf-8", "replace")[:160]))
 
 _bk_evil = au._backup_dir_for("3.3.3")
 os.makedirs(_bk_evil, exist_ok=True)
@@ -930,7 +935,8 @@ with open(os.path.join(_bk_evil, au.BACKUP_MANIFEST_NAME), "w", encoding="utf-8"
 _r5 = _run_rb("--backup", _bk_evil)
 check("v2.0.11.0 回滚：清单里带路径分隔符的文件名 → 拒绝（不许写到 app 外）",
       _r5.returncode == 1 and "非法文件名" in _r5.stdout.decode("utf-8", "replace")
-      and not os.path.isfile(os.path.join(os.path.dirname(_appbox), "evil.py")))
+      and not os.path.isfile(os.path.join(os.path.dirname(_appbox), "evil.py")),
+      repr(_r5.stdout.decode("utf-8", "replace")[:160]))
 
 # 行为级 B：接口层（GET 列表 / 忙时 409 / 非法与不存在的版本 / 默认取最新并真还原）
 _st_rb, _b_rb = au.api_get_rollback()
@@ -1332,6 +1338,100 @@ check("v2.0.14.0 周期自检异常后线程仍活着（不再静默死掉）",
       not _th14.is_alive() and len(_svc14_calls) >= 2 and any("周期自检循环异常" in l for l in _boom_log.lines),
       repr((_th14.is_alive(), len(_svc14_calls), _boom_log.lines[:1])))
 
+# ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
+# P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的
+# 异常（HTTPError / URLError 包装 / socket 层错误）都会顺手把密码写进日志 ✗。
+import urllib.request  # noqa: E402
+
+_p72_pwd = "#Fake-Pwd-7777#"
+_p72_urlish = "http://172.16.80.3:801/eportal/portal/login?user_password={}&callback=dr1".format(_p72_pwd)
+check("v2.1.0.0 P7-2：_scrub_url 能把 URL 与 password= 参数擦掉",
+      _p72_pwd not in _proto._scrub_url("boom " + _p72_urlish)
+      and "http://" not in _proto._scrub_url("boom " + _p72_urlish)
+      and "***" in _proto._scrub_url("user_password=" + _p72_pwd))
+check("v2.1.0.0 P7-2：_safe_error_text 保留有用信息（类型 / HTTP 状态码）",
+      _proto._safe_error_text(OSError("connection refused")) == "OSError: connection refused"
+      and _proto._safe_error_text(urllib.error.HTTPError("http://x", 500, "boom", None, None))
+      .startswith("HTTP 500"))
+
+_p72_logs = []
+_p72_saved = {k: getattr(_proto, k, None) for k in ("_log",)}
+_p72_saved_urlopen = urllib.request.urlopen
+_proto._log = lambda *a, **k: _p72_logs.append((a[0] % a[1:]) if len(a) > 1 else str(a[0]))
+
+
+def _p72_leaky_urlopen(req, timeout=None):
+    """模拟「最坏情况」：底层异常把整条 URL（含密码）原样带出来 ✗。"""
+    raise OSError("connection failed for {}".format(getattr(req, "full_url", _p72_urlish)))
+
+
+urllib.request.urlopen = _p72_leaky_urlopen
+_p72_ok, _p72_msg = _proto.login("172.16.80.3", "2023fake0001", "@yd", _p72_pwd, "10.0.0.2", "E25B367B8DAC")
+urllib.request.urlopen = _p72_saved_urlopen
+_proto._log = _p72_saved["_log"]
+_p72_text = " | ".join(_p72_logs)
+check("v2.1.0.0 P7-2：最坏情况异常下，日志与返回文案里都没有密码 / 没有 URL",
+      _p72_ok is False and _p72_pwd not in _p72_text and _p72_pwd not in _p72_msg
+      and "http://" not in _p72_text and "http://" not in _p72_msg
+      and "OSError" in _p72_text,
+      repr((_p72_msg, _p72_text[:120])))
+
+# P7-4：next_check_at 单写者 —— 无退避时 run_once **不许**改写调度者写的值
+_p74 = importlib.import_module("protocol")
+_p74_saved = {k: getattr(_p74, k, None) for k in
+              ("_RUN_LOCK", "_STATE", "_STATE_LOCK", "_log", "_load_config", "get_current_ssid",
+               "_auto_profile", "get_local_ips", "guard_allows", "_set_state", "wait_network",
+               "is_online", "_get_password", "login", "_now_iso", "_backoff_until",
+               "_set_backoff", "_reset_backoff")}
+_p74._RUN_LOCK = threading.Lock()
+_p74._STATE = {"next_check_at": "SENTINEL"}
+_p74._STATE_LOCK = threading.Lock()
+_p74._log = lambda *a, **k: None
+_p74._load_config = lambda: {"host": "172.16.80.3", "port": 80, "account": "2023fake0001",
+                             "suffix": "@yd", "auto_check_interval_min": 30,
+                             "network_wait_timeout_sec": 10}
+_p74.get_current_ssid = lambda: ""
+_p74._auto_profile = None
+_p74.get_local_ips = lambda: []
+_p74.guard_allows = lambda cfg, ssid, ips: (True, "")
+_p74._set_state = lambda **k: _p74._STATE.update(k)
+_p74.wait_network = lambda *a, **k: True
+_p74.is_online = lambda host: True          # 已在线 → 走最短路径，跳过登录
+_p74._get_password = lambda: "x"
+_p74.login = lambda *a, **k: (True, "x")
+_p74._now_iso = lambda: "2026-09-28T12:00:00"
+_p74._backoff_until = lambda: None
+_p74._set_backoff = lambda *a, **k: None
+_p74._reset_backoff = lambda *a, **k: None
+_p74.run_once("manual")
+_p74_no_backoff = _p74._STATE.get("next_check_at")
+_p74._backoff_until = lambda: "2026-09-28T12:05:00"
+_p74.run_once("manual")
+_p74_with_backoff = _p74._STATE.get("next_check_at")
+for _k, _v in _p74_saved.items():
+    setattr(_p74, _k, _v)
+check("v2.1.0.0 P7-4：无退避时 run_once 不改写 next_check_at（消除双写竞争）",
+      _p74_no_backoff == "SENTINEL" and _p74_with_backoff == "2026-09-28T12:05:00",
+      repr((_p74_no_backoff, _p74_with_backoff)))
+
+# P7-1：os._exit(0) 之前必须先显式放锁（顺序断言：**真正的调用**前 400 字符里必须有放锁 ✓）
+_p71_exit_idx = src_upd.rindex("os._exit(0)")      # rindex：注释里也出现过这个词 ✗
+check("v2.1.0.0 P7-1：os._exit 之前显式放锁（顺序写明白）",
+      "_release_update_lock()" in src_upd[_p71_exit_idx - 400:_p71_exit_idx],
+      repr(src_upd[_p71_exit_idx - 160:_p71_exit_idx]))
+
+# P7-3：批处理细节
+_inst14 = pathlib.Path("install.bat").read_text(encoding="utf-8", errors="replace")
+_uinst14 = pathlib.Path("uninstall.bat").read_text(encoding="utf-8", errors="replace")
+check("v2.1.0.0 P7-3：install.bat 不再硬编码 C:\\Python314（改用 py 启动器 + 常见安装位置）",
+      'set "PYTHON=C:\\Python314' not in _inst14 and "py -3" in _inst14
+      and "Programs\\Python\\Python3*" in _inst14)
+check("v2.1.0.0 P7-3：uninstall.bat 的 choice 补上 /D N /T 30（无人值守不挂死、默认保留数据）",
+      "choice /C YN /N /D N /T 30" in _uinst14)
+check("v2.1.0.0 P7-3：两个批处理都写明了「路径不能含 !」的限制",
+      "不能含" in _inst14 and "EnableDelayedExpansion" in _inst14
+      and "不能含" in _uinst14)
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -1435,7 +1535,11 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.14.0", version.VERSION == "2.0.14.0", version.VERSION)
+check("版本 = 2.1.0.0", version.VERSION == "2.1.0.0", version.VERSION)
+check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
+      version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
+      and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
+      "%s / %s" % (version.CODENAME, version.CODENAME_CN))
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

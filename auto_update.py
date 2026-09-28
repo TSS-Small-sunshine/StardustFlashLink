@@ -1685,6 +1685,13 @@ def _do_update_now():
         # 终止，不调 _nssm_stop_service（之前那种调用会触发 NSSM 把我们和 installer 连带杀掉）。
         # installer 自身在 ssInstall 阶段会调 nssm stop（idempotent）→ 复制文件 → 
         # PostInstall 启动新服务。
+        # v2.1.0.0（P7-1）：`os._exit(0)` **不走 atexit / finally** —— 这是**故意**的
+        # （要立刻把进程让给安装器，别让 nssm 的 stop 卡在我们身上 ✓），但顺序要写明白：
+        #   ① 该落盘的都已落盘（attempt 记录与升级日志在上面写完并 close 过 ✓）；
+        #   ② 显式释放升级锁 —— 正常路径下进程就死了、锁随进程消失，但本模块若被
+        #      嵌入方 / 测试复用，也不会留下「永远忙」的状态 ✓；
+        #   ③ 最后才 _exit ✓。
+        _release_update_lock()
         _log_upgrade("INFO", "升级触发完成，Python 进程立即退出（installer 独立运行）")
         os._exit(0)
 

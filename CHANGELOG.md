@@ -5,6 +5,57 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.0.0 (feature) — 2026-09-28 · 代号 `Vega`（织女星）· **开 2.1 线**
+
+> **2.0 线（`Sirius` 天狼星）在 v2.0.14.0 收束** —— 这一版起进入 **2.1 线，代号 `Vega`** ✓
+> （规则见 docs/VERSIONING.md：代号跟着 `MAJOR.MINOR` 走）。
+> 内容上把 P7 组里 Windows 侧的技术债清了一轮，其中一条是**隐私**：
+> 登录失败时密码有机会被写进日志 ✗ —— 这条优先修。
+
+### 🔒 ① P7-2（隐私）：登录异常不再泄漏密码
+- 登录是 **GET**，`user_password` 就在 URL 的 query 里；旧实现直接
+  `_log("登录请求异常: %s", exc)` ✗ —— `HTTPError` / `URLError` 的包装、底层 socket 错误
+  都可能把**整条 URL** 带进 `logs\campus_login.log`，进而进诊断包 ✗；
+- 现在过 `_safe_error_text()`：优先 `HTTPError.code`、否则「异常类型 + 原因」，
+  最后统一由 `_scrub_url()` 把 `http(s)://…` 换成 `<url>`、`password=…` 换成 `***` ✓；
+- **行为级断言用最坏情况**：桩掉 `urlopen` 让它抛一个**消息里带完整 URL（含密码）**的 `OSError`
+  → 断言「日志与返回文案里既没有密码、也没有 `http://`，但仍然保留 `OSError` 这个有用信息」✓
+  （实测输出：`请求失败: OSError: connection failed for <url>` ✓）。
+
+### 🔧 ② P7-4：`next_check_at` 改单写者（界面倒计时不再跳）
+- `run_periodic` 睡前写一次、`run_once` 结束又无条件写一次 ✗ → 两个值（interval / 退避）
+  在界面上来回跳；
+- 现在分工明确：**平时由调度者写**，`run_once` **只在本次触发了退避时**改写
+  （那种情况下只有它知道）✓ —— 行为级断言：无退避时 `run_once` 不得改动已有的值 ✓。
+
+### 🔧 ③ P7-1：`os._exit(0)` 的语义写明白
+- 升级触发后用 `os._exit(0)` 立刻把进程让给安装器是**故意**的（不走 atexit/finally，
+  免得 nssm 的 stop 卡在我们身上 ✗），但顺序要交代清楚：
+  **先落盘 → 再显式放升级锁 → 才 `_exit`** ✓（断言：真正的调用前 400 字符里必须有放锁 ✓）。
+
+### 🔧 ④ P7-3：批处理细节
+- `install.bat` **不再硬编码 `C:\Python314`** ✗（小版本一升就漂移）→ 先问官方启动器
+  `py -3 -c "import sys;print(sys.executable)"`，再退到 `%LOCALAPPDATA%\Programs\Python\Python3*` ✓；
+- `uninstall.bat` 的 `choice` 补 `/D N /T 30` ✓：无人值守时不会把卸载挂死，
+  默认永远是「保留用户数据」这个安全选项；
+- 两个脚本头部写明**已知限制**：它们用了 `EnableDelayedExpansion`，**安装路径不能含 `!`**
+  （会被当成变量展开吃掉）—— 本次只记录不重构（全量改写风险大）✓。
+
+### 📝 迁移说明（2.0 → 2.1）
+- **不变量全都没动** ✓：NSSM 服务名 / `AppId` / 安装路径 / API 路径与字段 / 配置结构 /
+  `config.json` 与 `password.txt` 的格式；
+- 代号只在展示层（启动横幅 / Web UI / 安装器标题 / Release 标题）✓，
+  **不进文件名、服务名、注册表、API** ✓（VERSIONING §3 第 4 条）；
+- 从 2.0 线任意版本升级到 2.1.0.0：配置、密码、方案、`backup\` 目录全部保持 ✓。
+
+### 🧪 自检
+- `_smoke_static.py` **298/298** ✓：新增 **10 条**（P7-2 三条含最坏情况行为级 ✓、P7-4 行为级 ✓、
+  P7-1 顺序 ✓、P7-3 两条 ✓、代号跟随版本线 ✓）；
+  顺带修掉一个**测试自身的坑**：回滚脚本子进程的 stdout 走管道时按控制台代码页（GBK）编码 ✗，
+  断言端按 utf-8 解码必然乱码 → 现在给子进程设 `PYTHONIOENCODING=utf-8` ✓
+  （**生产无影响**：执行器把探针/回滚脚本的 stdout 重定向到 `nul` ✓）；
+- `_smoke_http.py` **27/27** ✓（请求拦截层未动）。
+
 ## v2.0.14.0 (feature) — 2026-09-28 · 代号 `Sirius`（天狼星）
 
 > 把 P1 / P3 两条线上最后几个「只在特定场景才咬人」的口子补上 ——

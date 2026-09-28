@@ -3,8 +3,10 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   uninstall.bat - 移除 星尘闪连 (Stardust Flash Link) 服务 (v2.0.14.0)
+REM   uninstall.bat - 移除 星尘闪连 (Stardust Flash Link) 服务 (v2.1.0.0)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
+REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
+REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
 REM ============================================================
 
 REM 把脚本自身路径放到环境变量，供 PowerShell 读取
@@ -82,7 +84,9 @@ echo   选择:
 echo     Y = 是，一并删除
 echo     N = 否，保留 (默认)
 echo ============================================================
-choice /C YN /N /M "删除用户数据？(Y/N, 默认 N)"
+rem v2.1.0.0（P7-3）：补 /D N（回车 / 超时走默认）+ /T 30（无人值守时别把卸载挂死）——
+rem 默认永远是「保留用户数据」这个安全选项 ✓
+choice /C YN /N /D N /T 30 /M "删除用户数据？(Y/N, 30 秒无输入按 N)"
 set "REMOVE_DATA=%ERRORLEVEL%"
 echo.
 

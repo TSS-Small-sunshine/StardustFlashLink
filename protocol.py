@@ -230,6 +230,42 @@ def is_online(host):
     return None
 
 
+def _scrub_url(text):
+    """兜底擦除：把文本里可能出现的整条 URL / 密码参数打掉（v2.1.0.0 / P7-2）。
+
+    登录是 **GET**，`user_password` 就在 query 里 —— 任何把 URL 带出来的异常
+    （`HTTPError` / `URLError` 的包装、底层 socket 错误）都会顺手把密码写进日志 ✗。
+    """
+    if not text:
+        return text
+    text = re.sub(r"https?://\S+", "<url>", str(text))
+    text = re.sub(r"(?i)(user_password|password)=[^&\s]*", r"\1=***", text)
+    return text
+
+
+def _safe_error_text(exc, limit=200):
+    """把网络异常变成**可以进日志 / 可以返回给界面**的文本（v2.1.0.0 / P7-2）。
+
+    规则（信息从多到少）：
+      1. `HTTPError.code` → `HTTP 500`（最有用的那一位）✓；
+      2. 否则 `type(exc).__name__` + `exc.reason`（若有）✓；
+      3. 最后整体过一遍 `_scrub_url()`：URL → `<url>`、任何 `password=...` → `***` ✓。
+    这样即使底层异常真把整条 URL 塞进消息里，密码也进不了日志 ✓。
+    """
+    code = getattr(exc, "code", None)
+    reason = getattr(exc, "reason", None)
+    head = "HTTP {}".format(code) if code else type(exc).__name__
+    detail = ""
+    if reason is not None and reason is not exc:
+        detail = ": {}".format(reason)
+    elif str(exc) and str(exc) != "None":
+        # 没有 .reason（普通 OSError / TimeoutError）时带上原文 —— 下面的 _scrub_url
+        # 会把可能藏在里面的 URL 与 password= 参数擦掉，所以「有用」与「安全」可以兼得 ✓
+        detail = ": {}".format(exc)
+    text = _scrub_url("{}{}".format(head, detail))
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
     """Dr.COM JSONP 登录（GET /eportal/portal/login，端口 801）。
 
@@ -265,8 +301,14 @@ def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
         with urllib.request.urlopen(req, timeout=12) as resp:
             txt = resp.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        _log("登录请求异常: %s", exc, level=logging.ERROR)
-        return False, "请求失败: {}".format(exc)
+        # v2.1.0.0（P7-2）：**绝不把异常原文写进日志 / 返回给界面** ——
+        # 这条 GET 的 URL 里带着 `user_password`，而某些异常（HTTPError / URLError 的包装、
+        # 底层 socket 错误）会把整条 URL 原样带出来 ✗ → 密码就进了 logs\campus_login.log，
+        # 进而进诊断包。现在只记「异常类型 / HTTP 状态码 + 安全化后的原因」，
+        # 返回给调用方的也是同一口径 ✓（见 _safe_error_text）。
+        safe = _safe_error_text(exc)
+        _log("登录请求异常: %s", safe, level=logging.ERROR)
+        return False, "请求失败: {}".format(safe)
     # 解析 JSONP：dr1234({...});
     m = re.search(r"\((\{.*?\})\s*\)\s*;?\s*$", txt, re.S)
     if not m:
@@ -484,16 +526,15 @@ def run_once(reason):
             with _STATE_LOCK:
                 _STATE["login_in_progress"] = False
                 _STATE["last_check_at"] = _now_iso()
-            # 更新 next_check_at：退避优先，否则按 interval
+            # 更新 next_check_at：**只在退避生效时写**（v2.1.0.0 / P7-4）。
+            # 双写竞争：`run_periodic` 在睡前会按 interval 写一次，这里旧实现又无条件写一次
+            # （按 interval 或退避）→ 界面上的倒计时会在两个值之间跳 ✗。
+            # 现在分工明确：**平时由调度者（run_periodic）写**；这里只在本次检查触发了退避
+            # 时改写（那种情况下调度者事先不可能知道，只有 run_once 知道）✓。
             bu = _backoff_until()
-            with _STATE_LOCK:
-                if bu:
+            if bu:
+                with _STATE_LOCK:
                     _STATE["next_check_at"] = bu
-                else:
-                    next_min = (cfg or {}).get("auto_check_interval_min", 30)
-                    _STATE["next_check_at"] = (
-                        datetime.now() + timedelta(minutes=next_min)
-                    ).isoformat(timespec="seconds")
     finally:
         # v2.0.4.5：RUN_LOCK 现在是手工非阻塞 acquire 的，必须自己释放
         # （原来靠 `with _RUN_LOCK:` 自动释放；用 try/finally 保证任何 return / 异常都释放）
