@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.9.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.9.1）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -718,8 +718,12 @@ def main():
             save_config=_save_config,
             validate_config=_validate_config,
         )
-        # 把「按 SSID 自动切方案」挂到协议层（protocol 只认回调，不 import profiles）
-        import protocol as _protocol_mod     # noqa: E402 —— 已在模块顶部导入，这里只为拿模块对象
+        # 把「按 SSID 自动切方案」挂到协议层（protocol 只认回调，不 import profiles）。
+        # ⚠️ 这里**绝对不能**再写 `import protocol as _protocol_mod` ✗ ——
+        # 函数内的 import 会让该名字在**整个 main() 里**变成局部变量，
+        # 于是上面更早的 `_protocol_mod._attach(...)` 直接 UnboundLocalError ✗
+        # （v2.0.9.0 真机事故：服务启动即退、Web UI 端口消失）。
+        # `_protocol_mod` 在模块顶部已经导入过，这里直接用即可 ✓。
         _protocol_mod._set_auto_profile(_profiles_mod.auto_switch)
     # 4.8 把共享状态注入 auto_update 模块（后台线程 / 升级流程需要）
     _auto_update_mod._attach(

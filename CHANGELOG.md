@@ -5,6 +5,47 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.9.1 (hotfix) — 2026-09-28 · 代号 `Sirius`（天狼星）
+
+> **v2.0.9.0 的用户如果 Web UI 打不开、托盘说「服务未响应」**：重新运行 v2.0.9.1 安装包即可恢复
+> （配置、密码、方案都不动）。v2.0.9.1 之后的版本不会再犯这个错（已加静态守卫 ✓）。
+
+### 🔴 紧急修复：函数内 import 遮蔽模块级名 → 服务启动即崩
+v2.0.9.0 的真机升级把服务弄挂了 ✗，`logs/campus_login.log` 里一目了然：
+
+```
+[09:48:00] Dr.COM 自动登录服务启动（Web UI 配置版 v2.0.9.0 "Sirius"）
+[09:48:00] [ERROR] main 未捕获异常: cannot access local variable '_protocol_mod'
+  File "...\联网_service.py", line 651, in main
+    _protocol_mod._attach(
+UnboundLocalError: cannot access local variable '_protocol_mod'
+```
+
+**根因**：为了让协议层拿到「按 SSID 自动切方案」的回调 ✓，我在 `main()` 里写了一句
+`import protocol as _protocol_mod` ✗ —— 而 **Python 里函数内任何 `import` 都会让该名字在
+整个函数作用域内变成局部变量** ✗，于是同一函数里**更早**的那行
+`_protocol_mod._attach(...)`（v2.0.2 起就有的老代码 ✓）变成"未赋值先使用" ✗。
+
+**修法**：删掉那句 import ✓（`_protocol_mod` 在模块顶部已经导入过 ✓，直接用即可 ✓）。
+另外在代码里留了 ⚠️ 注释，防止下次又有人"顺手补一句 import" ✗。
+
+### 🛡 新增守卫（这类错静态检查能拦，就该拦）
+`_smoke_static.py` 新增两条：
+- **服务里不允许出现「函数内 import 模块别名」**（`^\s+import \w+ as _\w+`）✗ ——
+  这条规则**正好命中本次事故** ✓；
+- 自动切换回调必须挂在**模块级** `_protocol_mod` 上（不重复 import）✓。
+
+### 🪞 顺带承认一个检测盲区（下一步要补）
+两次事故（v2.0.8.0 回滚、v2.0.9.0 启动崩）之所以"升完才发现"，是因为自动升级的**收尾判定太弱** ✗：
+它只看 `sc query` 的 **服务状态**（那是 nssm 的 wrapper ✓），而 wrapper 活着 ≠ 里面的 Python 进程活着 ✗
+（nssm 配的是 `AppExit=Ignore`，app 死了它也不重启也不报错 ✗）。
+**下一步（v2.0.10.x）**：升级执行器的看门狗改成**探 HTTP 端口**（`http://127.0.0.1:<ui_port>/api/health` ✓）——
+那才是"服务真的活了"的证据 ✓，也才能让这类事故变成"自动重试 / 明确告警"而不是"静默变砖" ✗。
+
+### 🧪 自检
+`compileall` ✓ · `_smoke_static.py` **203/203** ✓ · `_smoke_http.py` **27/27** ✓ ·
+ISCC `packaging/setup.iss` **Verification successful** ✓。
+
 ## v2.0.9.0 (feature) — 2026-09-28 · 代号 `Sirius`（天狼星）
 
 > 笔记本的日常：教室、宿舍、家里三处跑，而**只有校园网里才该尝试登录** ——
