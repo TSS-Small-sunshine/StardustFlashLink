@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.11.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.12.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import signal
@@ -236,7 +237,17 @@ logger = logging.getLogger("campus_network")
 logger.setLevel(logging.INFO)
 logger.propagate = False  # 避免根 logger 重复输出
 
-_file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+# v2.0.12.0：业务日志自动轮转。
+# 以前是 `logging.FileHandler`（无限追加），README 里只能写「不自动轮转，可随时手动清理」——
+# 真机 9 天就到 1.3 MB，一年下来十几 MB，纯属浪费（面板只读尾部）。
+# 现在：单文件超过 5 MB 就滚成 `campus_login.log.1`，保留 `.1`~`.3`（合计 ≤ 20 MB）。
+# metrics.py 会按 `.3 → .1 → 当前` 的顺序一起读，所以「近 7 天」的统计不会因为轮转断档 ✓。
+LOG_ROTATE_MAX_BYTES = 5 * 1024 * 1024
+LOG_ROTATE_BACKUPS = 3
+
+_file_handler = RotatingFileHandler(
+    LOG_FILE, maxBytes=LOG_ROTATE_MAX_BYTES, backupCount=LOG_ROTATE_BACKUPS, encoding="utf-8"
+)
 _file_handler.setFormatter(
     logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 )
