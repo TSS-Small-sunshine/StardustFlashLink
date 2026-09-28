@@ -144,12 +144,64 @@ def _log(msg, *args, level=logging.INFO):
 # ============================================================
 # 原 Web API / _Handler（从 联网_service.py 逐字搬入）
 # ============================================================
-def _send_json(handler, status, payload):
+# ============================================================
+# 安全响应头 + 请求体上限（v2.0.13.0 / P3-6）
+# ============================================================
+# Web UI 是**全内联**页面（无 CDN / 无外部字体 / 无第三方脚本），所以 CSP 可以收得很紧：
+#   default-src 'none'                   默认什么都不许
+#   script-src / style-src 'unsafe-inline'  页面就是内联的（唯一的放宽点）
+#   img-src 'self' data:                 /branding/* 与内联小图标
+#   connect-src 'self'                   fetch 只打本机
+#   base-uri / form-action 'none'        禁基址注入、禁表单外发
+#   frame-ancestors 'none'               禁被任何页面嵌框（配合 X-Frame-Options: DENY）
+# JSON / zip 响应带这些头同样无害，所以统一加，不搞两套 ✓。
+SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Permissions-Policy", "geolocation=(), camera=(), microphone=()"),
+    ("Content-Security-Policy",
+     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+     "img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; "
+     "frame-ancestors 'none'"),
+)
+MAX_JSON_BODY_BYTES = 1024 * 1024        # JSON 端点 1 MB 上限（zip 导入另有 CONFIG_IMPORT_MAX_BYTES）
+BODY_DRAIN_MAX_BYTES = 4 * 1024 * 1024   # 拒收时最多「排空」这么多字节（见 _drain_body 的注释）
+
+
+def _add_security_headers(handler):
+    for _name, _value in SECURITY_HEADERS:
+        handler.send_header(_name, _value)
+
+
+def _drain_body(handler, length, cap=BODY_DRAIN_MAX_BYTES):
+    """拒收请求体前，把它先读掉（最多 cap 字节）。
+
+    为什么必须读掉：Windows 上**带着未读数据关连接会发 RST**，那个 RST 会把刚写出去的
+    响应本身一起冲掉 ✗ —— 表现就是「明明该收到 413，客户端却报连接被重置」。
+    有界排空（cap）保证既不会把资源交出去，也能让 413 稳稳送达 ✓；
+    超出 cap 的荒唐体积直接放弃（那已经不是正常客户端了）。
+    """
+    remaining = min(int(length or 0), cap)
+    while remaining > 0:
+        try:
+            chunk = handler.rfile.read(min(65536, remaining))
+        except OSError:
+            return
+        if not chunk:
+            return
+        remaining -= len(chunk)
+
+
+def _send_json(handler, status, payload, close=False):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "no-store")
+    if close:
+        handler.send_header("Connection", "close")   # 顺带把 close_connection 置上 ✓
+    _add_security_headers(handler)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -161,6 +213,7 @@ def _send_bytes(handler, status, content_type, body, filename=None):
     if filename:
         handler.send_header("Content-Disposition", 'attachment; filename="{}"'.format(filename))
     handler.send_header("Cache-Control", "no-store")
+    _add_security_headers(handler)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -169,6 +222,8 @@ def _read_json_body(handler):
     length = int(handler.headers.get("Content-Length", "0") or "0")
     if length <= 0:
         return {}
+    if length > MAX_JSON_BODY_BYTES:
+        raise ValueError("请求体过大（上限 {} 字节）".format(MAX_JSON_BODY_BYTES))
     raw = handler.rfile.read(length)
     try:
         return json.loads(raw.decode("utf-8"))
@@ -944,6 +999,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        _add_security_headers(self)          # v2.0.13.0：CSP 等（页面全内联，可收得很紧）
         self.end_headers()
         self.wfile.write(body)
 
@@ -1088,6 +1144,12 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0") or "0")
         except ValueError:
             length = 0
+        if length > MAX_JSON_BODY_BYTES:      # v2.0.13.0：JSON 端点也有体积上限
+            _drain_body(self, length)         # 先排空（有界）再拒，否则响应会被 RST 冲掉
+            _send_json(self, 413, {"ok": False,
+                                   "error": "请求体过大（上限 {} 字节）".format(MAX_JSON_BODY_BYTES)},
+                       close=True)
+            return
         raw = self.rfile.read(length) if length > 0 else b""
         try:
             payload = json.loads(raw.decode("utf-8")) if raw else {}

@@ -5,6 +5,50 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.13.0 (feature) — 2026-09-28 · 代号 `Sirius`（天狼星）
+
+> 补三处 Web 层加固（P3-6 / P3-7）。都不是「出过事才修」，而是**迟早会被人试**的三件事：
+> 页面能被别处嵌框吗？请求体能不能把内存灌满？服务能不能被跑第二份？
+
+### 🔒 ① 安全响应头（P3-6）
+Web UI 是**全内联**页面（无 CDN / 无外部字体 / 无第三方脚本），所以 CSP 可以收得很紧 ✓：
+- `Content-Security-Policy`：`default-src 'none'` + `script-src/style-src 'unsafe-inline'`
+  （唯一的放宽点，因为页面就是内联的）+ `img-src 'self' data:` + `connect-src 'self'` +
+  `base-uri 'none'` + `form-action 'none'` + `frame-ancestors 'none'` ✓；
+- `X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、
+  `Permissions-Policy: geolocation=(), camera=(), microphone=()` ✓；
+- **HTML 与 JSON / zip 响应统一带**（不搞两套）✓ —— 行为级断言直接起服务读响应头 ✓。
+
+### 🔒 ② 请求体上限（P3-6）
+- JSON 端点 1 MB（`MAX_JSON_BODY_BYTES`），超限直接 **413**，不再 `rfile.read(length)` 无条件读进来 ✗；
+- **实测踩出来的一个坑**：光回 413 还不够 —— Windows 上**带着未读数据关连接会发 RST**，
+  那个 RST 会把刚写出去的 413 响应本身冲掉 ✗（表现成「客户端报连接被重置」）。
+  现在拒收前**有界排空**（最多 4 MB）再显式 `Connection: close` ✓，
+  响应稳稳送达，连接也是干净关的（有断言：拒收后服务照常可用 ✓）；
+- zip 配置导入的 4 MB 上限沿用原有 `CONFIG_IMPORT_MAX_BYTES` ✓。
+
+### 🔒 ③ 运行时单实例锁（P3-7）
+- `AppMutex` 只管安装器 GUI，服务自己一直没有锁 ✗ —— 手工再跑一份 `联网_service.py` 时，
+  线程与周期自检**会先跑起来**，直到绑 8848 失败才退出（那时可能已经开始检查网络、
+  甚至发起登录了）✗；
+- 新增命名互斥体 `Local\DrcomAutoLoginService`：拿不到就**什么都不做**、打印一行 ERROR 后
+  `return 0`（退出码 0 = nssm 视为成功，不会反复重启 ✓）；
+- **对升级 / 重启路径宽容**：安装器刚 `nssm stop`、旧进程正在退出时，最多等
+  `SINGLETON_WAIT_SEC = 20` 秒再判定 ✓；拿不到互斥体本身（极罕见）按 fail-open 处理
+  —— 宁可多跑一份，也不能让服务起不来 ✓。
+
+### 🧪 自检
+- `_smoke_static.py` **281/281** ✓：新增 **12 条**，其中 **9 条行为级** ——
+  - 真起一个 `_Handler` 服务读响应头：`/` 的 CSP（`default-src 'none'` /
+    `frame-ancestors 'none'` / `base-uri 'none'`）、nosniff / DENY / no-referrer /
+    Permissions-Policy、CSP 的放宽项恰好只有内联脚本与样式 ✓；
+  - `/api/health` 的 JSON 响应同样带安全头 ✓；
+  - **真发一个 1 MB + 100 的请求体**：413 + 中文原因 + `Connection: close` ✓，
+    且**拒收之后服务照常可用** ✓（这条正是上面那个 RST 坑的现场）；
+  - 单实例锁：名字/常量 ✓、宽容等待 ✓、**同进程第二次调用必须被识破**（True → False）✓、
+    以及「排在载配置 / 起线程之前」的顺序断言 ✓。
+- `_smoke_http.py` **27/27** ✓（Host / Origin / 自定义头三道校验未动，只是多了响应头与体积上限）。
+
 ## v2.0.12.0 (feature) — 2026-09-28 · 代号 `Sirius`（天狼星）
 
 > 前两版都在修「升级」这条链（先能**发现**坏、再能**回去**）。这一版补日常运维的两件小事：
