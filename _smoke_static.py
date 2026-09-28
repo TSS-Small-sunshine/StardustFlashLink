@@ -1009,6 +1009,108 @@ if _saved_temp2 is None:
 else:
     os.environ["TEMP"] = _saved_temp2
 
+# ---- v2.0.12.0：日志轮转 + 一键诊断包 ----
+# 背景：业务日志以前是 `logging.FileHandler` 无限追加（README 只能写「请手动清理」）；
+#       出错时让用户自己翻 logs 目录、还容易把账号 / 密码截图发出去。
+import io  # noqa: E402
+import metrics as _metrics  # noqa: E402
+import zipfile  # noqa: E402
+
+_src_svc12 = pathlib.Path("联网_service.py").read_text(encoding="utf-8")
+check("v2.0.12.0 业务日志改用 RotatingFileHandler（5 MB × 3）",
+      "from logging.handlers import RotatingFileHandler" in _src_svc12
+      and "maxBytes=LOG_ROTATE_MAX_BYTES" in _src_svc12
+      and "LOG_ROTATE_MAX_BYTES = 5 * 1024 * 1024" in _src_svc12
+      and "LOG_ROTATE_BACKUPS = 3" in _src_svc12)
+check("v2.0.12.0 升级日志也轮转（2 MB × 2）",
+      "UPGRADE_LOG_MAX_BYTES = 2 * 1024 * 1024" in src_upd and "UPGRADE_LOG_BACKUPS = 2" in src_upd
+      and "def _rotate_upgrade_log" in src_upd and "_rotate_upgrade_log()" in src_upd)
+
+# 行为级：统计必须把归档一起按「由老到新」读 —— 否则轮转一发生，近 7 天统计就断档
+_mlog = os.path.join(tempfile.mkdtemp(prefix="drcom_mlog_"), "campus_login.log")
+pathlib.Path(_mlog + ".3").write_text("L3\n", encoding="utf-8")
+pathlib.Path(_mlog + ".1").write_text("L1\n", encoding="utf-8")
+pathlib.Path(_mlog).write_text("L0\n", encoding="utf-8")
+_mlines = _metrics.collect_lines(_mlog)
+check("v2.0.12.0 面板统计按 .3→.1→当前 顺序读归档（轮转不断档）",
+      _mlines == ["L3", "L1", "L0"], repr(_mlines))
+
+# 行为级：upgrade.log 超限轮转（把上限临时调小，不然真得写 2 MB）
+_ulog_dir = tempfile.mkdtemp(prefix="drcom_ulog_")
+_au_saved12 = {k: au.__dict__.get(k) for k in
+               ("LOG_DIR", "UPGRADE_LOG_FILE", "UPGRADE_LOG_MAX_BYTES", "logger")}
+au.LOG_DIR = _ulog_dir
+au.UPGRADE_LOG_FILE = os.path.join(_ulog_dir, "upgrade.log")
+au.UPGRADE_LOG_MAX_BYTES = 300          # 临时调小
+au.logger = _au_logger
+for _i in range(30):
+    au._log_upgrade("INFO", "第 {} 行 {}".format(_i, "x" * 40))
+_ulog_files = sorted(n for n in os.listdir(_ulog_dir) if n.startswith("upgrade.log"))
+check("v2.0.12.0 upgrade.log 超限后滚成 .1 / .2（当前文件重新变小）",
+      "upgrade.log.1" in _ulog_files and "upgrade.log.2" in _ulog_files
+      and os.path.getsize(au.UPGRADE_LOG_FILE) < 300, repr(_ulog_files))
+check("v2.0.12.0 只保留 2 份旧档（不会无限堆积）",
+      not os.path.isfile(au.UPGRADE_LOG_FILE + ".3"), repr(_ulog_files))
+for _k, _v in _au_saved12.items():
+    if _v is None:
+        au.__dict__.pop(_k, None)
+    else:
+        au.__dict__[_k] = _v
+
+# 行为级：诊断包（组成 + 脱敏 + 不含密码）
+_dlog_dir = tempfile.mkdtemp(prefix="drcom_diag_")
+_FAKE_ACCT = "2023fake0001"
+_FAKE_PWD = "#Fake-Pwd-9999#"
+pathlib.Path(os.path.join(_dlog_dir, "campus_login.log")).write_text(
+    "[t] [INFO] 账号 {} 登录成功，MAC E25B367B8DAC，网关 172.16.80.3，密码 {} 不该出现\n".format(
+        _FAKE_ACCT, _FAKE_PWD), encoding="utf-8")
+pathlib.Path(os.path.join(_dlog_dir, "upgrade.log")).write_text("升级流水\n", encoding="utf-8")
+_wa_saved12 = {k: _wa.__dict__.get(k) for k in
+               ("LOG_DIR", "logger", "_load_config", "_get_password", "_snapshot_state")}
+_wa.LOG_DIR = _dlog_dir
+_wa.logger = _au_logger
+_wa._load_config = lambda: {"account": _FAKE_ACCT, "host": "172.16.80.3", "ui_port": 8848}
+_wa._get_password = lambda: _FAKE_PWD
+_wa._snapshot_state = lambda: {"service_started_at": "2026-09-28T10:31:28", "update_state": None}
+_diag = _wa._build_diagnostics_zip()
+with zipfile.ZipFile(io.BytesIO(_diag)) as _zf:
+    _dnames = set(_zf.namelist())
+    _dsummary = _zf.read("summary.json").decode("utf-8")
+    _dcfg = _zf.read("config.json").decode("utf-8")
+    _dreadme = _zf.read("README.txt").decode("utf-8")
+    _dlog = _zf.read("logs/campus_login.log").decode("utf-8")
+check("v2.0.12.0 诊断包组成（README + 摘要 + 配置 + logs/）",
+      {"README.txt", "summary.json", "config.json"} <= _dnames
+      and "logs/campus_login.log" in _dnames, repr(sorted(_dnames)))
+check("v2.0.12.0 诊断包不含 password.txt、不含密码明文（且日志里的密码被换成 ***）",
+      not any("password" in n.lower() for n in _dnames)
+      and _FAKE_PWD not in (_dsummary + _dcfg + _dreadme + _dlog) and "***" in _dlog)
+check("v2.0.12.0 账号打码（配置与日志都打）",
+      _FAKE_ACCT not in _dcfg and re.search(r"2023\*{4,}", _dcfg) is not None
+      and _FAKE_ACCT not in _dlog and re.search(r"2023\*{4,}", _dlog) is not None)
+check("v2.0.12.0 MAC 打码（前 4 位 + ********）",
+      "E25B367B8DAC" not in _dlog and "E25B********" in _dlog)
+check("v2.0.12.0 摘要带版本 / 环境 / 密码状态；内网 IP 保留（排障必需）",
+      '"version"' in _dsummary and '"platform"' in _dsummary and '"has_password": true' in _dsummary
+      and "172.16.80.3" in _dcfg)
+check("v2.0.12.0 README 写清脱敏范围（账号 / MAC / 密码 + 内网 IP 保留）",
+      "已脱敏" in _dreadme and "不包含" in _dreadme and "内网 IP" in _dreadme)
+_st_logs12, _b_logs12 = _wa.api_get_logs()
+check("v2.0.12.0 GET /api/logs 形状（逐个体积 + 合计 + 轮转提示）",
+      _st_logs12 == 200 and _b_logs12.get("ok") and _b_logs12.get("total_size") > 0
+      and {i["name"] for i in _b_logs12.get("items", [])} >= {"campus_login.log", "upgrade.log"}
+      and all("size_h" in i and "rotate_hint" in i for i in _b_logs12.get("items", [])),
+      repr(_b_logs12)[:150])
+for _k, _v in _wa_saved12.items():
+    if _v is None:
+        _wa.__dict__.pop(_k, None)
+    else:
+        _wa.__dict__[_k] = _v
+check("v2.0.12.0 前端接好（关于面板日志卡片 + 诊断包下载 + 两个路由）",
+      'id="log-list"' in src_web and 'href="/api/diagnostics"' in src_web
+      and 'path == "/api/diagnostics"' in src_web and 'path == "/api/logs"' in src_web
+      and "api_get_diagnostics(self)" in src_web)
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -1112,7 +1214,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.11.0", version.VERSION == "2.0.11.0", version.VERSION)
+check("版本 = 2.0.12.0", version.VERSION == "2.0.12.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

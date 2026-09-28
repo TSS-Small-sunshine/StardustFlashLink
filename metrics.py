@@ -277,15 +277,24 @@ def measure_latency(host, port, timeout=LATENCY_TIMEOUT):
 
 
 def _archive_of(path):
-    """`x.log` → `x.log.1`。我们自己没轮转 campus_login.log，但被外部轮转过的机器上可能有。"""
+    """`x.log` → `x.log.1`（保留这个函数名：老调用点/断言还在用）。"""
     return path + ".1"
 
 
+# v2.0.12.0：业务日志开始自动轮转（联网_service 用 RotatingFileHandler，`LOG_ROTATE_BACKUPS=3`），
+# 所以统计要把 `.3 → .1 → 当前` 按**由老到新**的顺序拼起来读 —— 否则轮转一发生，
+# 「近 7 天」的在线率 / 掉线次数就会凭空少一截 ✗。
+ARCHIVE_PROBE = 3
+
+
 def collect_lines(log_path, max_bytes=MAX_TAIL_BYTES):
-    """日志行 = 归档 `.1`（更老）+ 当前文件；缺哪个都不会炸。"""
+    """日志行 = 各份归档（更老在前）+ 当前文件；缺哪个都不会炸。"""
     if not log_path:
         return []
-    return read_log_tail(_archive_of(log_path), max_bytes) + read_log_tail(log_path, max_bytes)
+    lines = []
+    for i in range(ARCHIVE_PROBE, 0, -1):        # .3 .2 .1
+        lines += read_log_tail("{}.{}".format(log_path, i), max_bytes)
+    return lines + read_log_tail(log_path, max_bytes)
 
 
 def build_metrics(days=DEFAULT_DAYS, now_epoch=None, log_path=None, latency=None,

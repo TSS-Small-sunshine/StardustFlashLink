@@ -19,8 +19,10 @@ import io
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -606,6 +608,203 @@ def _build_config_export_zip():
     return buf.getvalue()
 
 
+# ============================================================
+# 日志与诊断（v2.0.12.0）
+# ============================================================
+_LOG_NAMES = ("campus_login.log", "upgrade.log", "service_stderr.log",
+              "service_stdout.log", "installer-silent.log")
+_LOG_ROTATE_HINT = {"campus_login.log": "5 MB × 3", "upgrade.log": "2 MB × 2"}   # 展示用（实际值在各自模块里）
+DIAGNOSTIC_TAIL_BYTES = 512 * 1024        # 诊断包里每个日志最多带 512 KB 尾部
+DIAGNOSTIC_MAX_FILES = 12
+_MAC_RE = re.compile(r"\b(?:[0-9A-Fa-f]{2}[-:]){5}[0-9A-Fa-f]{2}\b|\b[0-9A-Fa-f]{12}\b")
+
+
+def _log_paths():
+    """要展示 / 打包的日志文件（名字 → 路径），含轮转出来的 `.1`~`.3`。
+
+    取不到 `LOG_DIR`（未经 _attach 注入，例如前端预览）时返回空表 ——
+    面板少一块，也不该把整个页面打成 500 ✓。
+    """
+    log_dir = globals().get("LOG_DIR") or ""
+    if not log_dir:
+        return []
+    out = []
+    for name in _LOG_NAMES:
+        p = os.path.join(log_dir, name)
+        if os.path.isfile(p):
+            out.append((name, p))
+        for i in range(1, 4):
+            q = "{}.{}".format(p, i)
+            if os.path.isfile(q):
+                out.append(("{}.{}".format(name, i), q))
+    return out
+
+
+def _human_size(n):
+    """1536 → '1.5 KB'（面板用）。"""
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "{:.0f} {}".format(n, unit) if unit == "B" else "{:.1f} {}".format(n, unit)
+        n /= 1024.0
+
+
+def _mask_account(text, account):
+    """账号 → 「前 4 位 + ******」（太短的账号整体打码）。"""
+    if not text or not account:
+        return text
+    keep = account[:4] if len(account) > 6 else ""
+    return text.replace(account, keep + "*" * max(4, len(account) - len(keep)))
+
+
+def _desensitize(text, account="", password=""):
+    """诊断包 / 日志展示前的脱敏（v2.0.12.0）。
+
+    - 账号 → 「前 4 位 + ******」✓
+    - 密码 → `***`（正常情况下日志里不该有；这是**兜底**，且它永远不会被写进包 ✓）
+    - MAC → 前 4 位 + `********` ✓
+    - **IP 保留**：校园网内网地址（172.16.x.x 那类网关）是排障必需 ——
+      打包说明 `README.txt` 里会写明「可能含内网 IP 与 Wi-Fi 名」，由用户自己决定要不要外发 ✓
+    """
+    if not text:
+        return text
+    if account:
+        text = _mask_account(text, account)
+    if password:
+        text = text.replace(password, "***")
+    return _MAC_RE.sub(lambda m: m.group(0)[:4] + "*" * (len(m.group(0)) - 4), text)
+
+
+def api_get_logs():
+    """GET /api/logs — 日志清单与体积（只读，供「关于」面板显示占用）。"""
+    items = []
+    total = 0
+    for name, path in _log_paths():
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        total += size
+        items.append({
+            "name": name,
+            "size": size,
+            "size_h": _human_size(size),
+            "rotate_hint": _LOG_ROTATE_HINT.get(name.split(".log")[0] + ".log", ""),
+        })
+    return 200, {
+        "ok": True,
+        "dir": globals().get("LOG_DIR") or "",
+        "total_size": total,
+        "total_h": _human_size(total),
+        "items": items,
+    }
+
+
+def _diagnostic_read(path, limit=DIAGNOSTIC_TAIL_BYTES):
+    """读日志尾部（最多 limit 字节），按整行切开。"""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > limit:
+                f.seek(size - limit)
+                f.readline()          # 丢掉可能被切断的半行
+            data = f.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _diagnostics_readme(summary):
+    """诊断包里的 README.txt（告诉用户包里有什么、脱敏了什么）。"""
+    return (
+        "星尘闪连 (Stardust Flash Link) — 诊断包\r\n"
+        "版本：{version}    生成时间：{generated}\r\n"
+        "\r\n"
+        "包含：\r\n"
+        "  summary.json   版本 / 运行环境 / 服务状态 / 配置摘要（账号已打码）\r\n"
+        "  config.json    当前配置（账号已打码；不含任何密码字段）\r\n"
+        "  logs\\*         各日志的尾部（每个最多 512 KB；已轮转的 .1~.3 也在内）\r\n"
+        "\r\n"
+        "已脱敏：账号（前 4 位 + ******）、MAC 地址（前 4 位 + ********）、"
+        "密码（万一出现在日志里会替换成 ***）。\r\n"
+        "未脱敏：校园网内网 IP、Wi-Fi 名称 —— 它们是排障的关键线索，"
+        "但对外分享前请自行确认。\r\n"
+        "不包含：password.txt、任何密码明文。\r\n"
+        "\r\n"
+        "用途：反馈问题时把它发给维护者，比截图和口述都准。\r\n"
+    ).format(version=summary.get("version") or "?", generated=summary.get("generated_at") or "?")
+
+
+def _build_diagnostics_zip():
+    """组装诊断包（内存 zip）：摘要 + 脱敏配置 + 各日志尾部 + README。
+
+    每个依赖单独兜底（「面板坏了不该影响主功能」的同一原则）：
+    取不到配置 / 密码 / 状态也照样出包，只是那几项为空 ✓。
+    """
+    try:
+        cfg = _load_config() or {}
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    account = str(cfg.get("account") or "")
+    password = ""
+    try:
+        password = _get_password() or ""   # 只为「万一被记进日志」兜底；它本身永不出现在包里
+    except Exception:  # noqa: BLE001
+        password = ""
+    try:
+        snap = _snapshot_state()
+    except Exception:  # noqa: BLE001
+        snap = {}
+    masked_cfg = dict(cfg)
+    if account:
+        masked_cfg["account"] = _mask_account(account, account)
+    summary = {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "version": VERSION,
+        "version_full": VERSION_FULL,
+        "python": sys.version.split()[0],
+        "platform": platform.platform(),
+        "hostname": platform.node(),
+        "service": {
+            "started_at": snap.get("service_started_at"),
+            "uptime_sec": snap.get("service_uptime_sec"),
+            "last_error": snap.get("last_error"),
+            "current_ssid": snap.get("current_ssid"),
+        },
+        "update": {
+            "state": snap.get("update_state"),
+            "last_check_at": snap.get("update_last_check_at"),
+            "last_error": snap.get("update_last_error"),
+        },
+        "has_password": bool(password),
+        "config": masked_cfg,
+        "logs": [{"name": name, "size_h": _human_size(os.path.getsize(path))}
+                 for name, path in _log_paths()],
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("README.txt", _diagnostics_readme(summary))
+        zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=2))
+        zf.writestr("config.json", json.dumps(masked_cfg, ensure_ascii=False, indent=2))
+        for name, path in _log_paths()[:DIAGNOSTIC_MAX_FILES]:
+            zf.writestr("logs/{}".format(name),
+                        _desensitize(_diagnostic_read(path), account, password))
+    return buf.getvalue()
+
+
+def api_get_diagnostics(handler):
+    """GET /api/diagnostics — 下载脱敏诊断包（zip）。"""
+    try:
+        data = _build_diagnostics_zip()
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.exception("diagnostics failed: %s", exc)
+        _send_json(handler, 500, {"ok": False, "error": "生成诊断包失败：{}".format(exc)})
+        return
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    _send_bytes(handler, 200, "application/zip", data,
+                filename="drcom-diagnostics-v{}-{}.zip".format(VERSION, ts))
+
+
 def api_get_config_export(handler):
     """GET /api/config/export — 导出 zip。"""
     try:
@@ -843,6 +1042,13 @@ class _Handler(BaseHTTPRequestHandler):
             if path == "/api/rollback":
                 _status, _body = api_get_rollback()
                 _send_json(self, _status, _body)
+                return
+            if path == "/api/logs":
+                _status, _body = api_get_logs()
+                _send_json(self, _status, _body)
+                return
+            if path == "/api/diagnostics":
+                api_get_diagnostics(self)      # 直接回 zip 字节流（Content-Disposition: attachment）
                 return
             if path == "/api/metrics":
                 _days = 7
@@ -2084,6 +2290,23 @@ code.path {
       </div>
       <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
     </div>
+
+    <div class="card section">
+      <div class="section-head">
+        <h2 class="section-title">日志与诊断</h2>
+        <p class="section-desc" style="margin:0;">业务日志超过 5 MB、升级日志超过 2 MB 会自动轮转（各留几份），不必再手动清理。</p>
+      </div>
+      <div id="log-list" class="hint" style="margin:0 0 12px 0;">正在读取日志占用...</div>
+      <div class="btn-row">
+        <button class="btn btn-secondary" id="btn-logs-refresh" type="button">刷新占用</button>
+        <a class="btn btn-secondary" href="/api/diagnostics">下载诊断包（已脱敏）</a>
+      </div>
+      <p class="hint" style="margin-top:10px;">
+        诊断包 = 版本 / 运行环境 / 服务状态 + 脱敏后的配置 + 各日志尾部（每个 ≤ 512 KB）。
+        账号已打码、MAC 已打码、<strong>不含密码</strong>；校园网内网 IP 与 Wi-Fi 名会保留（排障需要）。
+        反馈问题时把它发给维护者即可。
+      </p>
+    </div>
   </section>
 </main>
 
@@ -3298,6 +3521,30 @@ code.path {
         .catch(function () { toast('请求失败（服务可能正在重启）', 'error', 6000); });
     });
 
+    load();
+  })();
+
+  // —— 日志与诊断（v2.0.12.0）：显示日志占用；诊断包走 <a href> 直接下载（下面这个 IIFE 只管占用）——
+  (function () {
+    var box = $('log-list');
+    if (!box) return;
+    function render(data) {
+      var items = (data && data.ok && data.items) || [];
+      if (!items.length) { box.textContent = '暂无日志文件。'; return; }
+      box.innerHTML = '共 ' + ((data && data.total_h) || '?') + ' —— ' + items.map(function (it) {
+        return '<span style="margin-right:14px;white-space:nowrap;">' + it.name + '：' + it.size_h
+          + (it.rotate_hint ? '（上限 ' + it.rotate_hint + '）' : '') + '</span>';
+      }).join('');
+    }
+    function load() {
+      box.textContent = '正在读取日志占用...';
+      fetch('/api/logs', { cache: 'no-store', headers: { 'Accept': 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(render)
+        .catch(function () { box.textContent = '读取日志占用失败（服务未响应？）'; });
+    }
+    var refresh = $('btn-logs-refresh');
+    if (refresh) refresh.addEventListener('click', load);
     load();
   })();
 

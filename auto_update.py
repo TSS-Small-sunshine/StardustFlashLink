@@ -52,6 +52,9 @@ NSSM_REGISTRY_PATH = r"HKLM\SYSTEM\CurrentControlSet\Services\DrcomAutoLogin"
 NSSM_PARAMETERS_PATH = NSSM_REGISTRY_PATH + r"\Parameters"
 SERVICE_NAME = "DrcomAutoLogin"
 UPGRADE_HISTORY_MAX_LINES = 50
+# v2.0.12.0：升级日志轮转（以前无限追加；真机 9 天 533 KB，而「查看升级历史」只读尾部）
+UPGRADE_LOG_MAX_BYTES = 2 * 1024 * 1024
+UPGRADE_LOG_BACKUPS = 2
 UPGRADE_SUCCESS_TTL_SEC = 5 * 60  # 成功后绿 banner 仅保留 5 分钟
 BACKUP_RETENTION_DAYS = 7
 
@@ -225,14 +228,42 @@ def _compare_versions(local, remote):
     return 0
 
 
+def _rotate_upgrade_log():
+    """把超限的 upgrade.log 滚成 `.1` / `.2`（v2.0.12.0）。
+
+    只有**当前文件**会被滚走，历史不会丢光：`upgrade.log.1` 是最新的旧档，
+    `upgrade.log.2` 更老，再老的就删掉 —— 配合 `UPGRADE_LOG_MAX_BYTES`（2 MB）
+    相当于「最多留 6 MB 升级流水」，对「查看升级历史」这种只读尾部的场景绰绰有余 ✓。
+    """
+    try:
+        if os.path.getsize(UPGRADE_LOG_FILE) < UPGRADE_LOG_MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        oldest = "{}.{}".format(UPGRADE_LOG_FILE, UPGRADE_LOG_BACKUPS)
+        if os.path.isfile(oldest):
+            os.remove(oldest)
+        for i in range(UPGRADE_LOG_BACKUPS - 1, 0, -1):
+            src = "{}.{}".format(UPGRADE_LOG_FILE, i)
+            if os.path.isfile(src):
+                os.replace(src, "{}.{}".format(UPGRADE_LOG_FILE, i + 1))
+        os.replace(UPGRADE_LOG_FILE, UPGRADE_LOG_FILE + ".1")
+        logger.info("upgrade.log 已轮转（超过 %d 字节）", UPGRADE_LOG_MAX_BYTES)
+    except OSError as exc:
+        logger.warning("轮转 upgrade.log 失败: %s", exc)
+
+
 def _ensure_upgrade_log():
-    """确保升级日志文件存在并返回句柄。每次追加写。"""
+    """确保升级日志文件存在（并按需轮转）。每次追加写。"""
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         if not os.path.isfile(UPGRADE_LOG_FILE):
             # 原子创建（utf-8 + LF）
             with open(UPGRADE_LOG_FILE, "a", encoding="utf-8") as f:
                 pass
+        else:
+            _rotate_upgrade_log()
     except OSError as exc:
         logger.warning("无法准备 upgrade.log: %s", exc)
 
