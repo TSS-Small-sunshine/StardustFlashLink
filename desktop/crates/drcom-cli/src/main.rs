@@ -10,8 +10,9 @@
 //! 界面（GUI/托盘）在 M2 接到同一份核心上 —— 这层永远保持「可以 headless 跑」✓，
 //! 因为 Linux 服务器 / 树莓派上的用例就是无界面 ✓。
 
-mod http;
 mod server;
+
+use drcom_core::net;
 
 use drcom_core::{channel::Version, config::Config, platform, protocol, secret, Status};
 use std::time::Duration;
@@ -226,7 +227,7 @@ fn login(args: &[String]) -> i32 {
         eprintln!("配置有问题：\n  - {}", errors.join("\n  - "));
         return 1;
     }
-    let ip = http::local_ip_towards(&cfg.host, cfg.port).unwrap_or_default();
+    let ip = net::local_ip_towards(&cfg.host, cfg.port).unwrap_or_default();
     let req = protocol::LoginRequest {
         host: &cfg.host,
         account: &cfg.account,
@@ -255,7 +256,7 @@ fn login(args: &[String]) -> i32 {
 
     let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SEC);
     let online_url = protocol::build_online_check_url(&cfg.host, "cb");
-    match http::get(&online_url, timeout) {
+    match net::get(&online_url, timeout) {
         Ok(reply) => match protocol::parse_online_state(&reply.body) {
             Ok(protocol::OnlineState::Online) => {
                 println!("已经在线 ✓（无需登录）");
@@ -267,7 +268,7 @@ fn login(args: &[String]) -> i32 {
         Err(e) => println!("在线检查没成功：{}（继续尝试登录）", e),
     }
 
-    match http::get(&url, timeout) {
+    match net::get(&url, timeout) {
         Ok(reply) => match protocol::parse_login_reply(&reply.body) {
             Ok(reply) => {
                 println!(

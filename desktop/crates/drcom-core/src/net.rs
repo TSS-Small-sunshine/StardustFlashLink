@@ -17,6 +17,20 @@ pub struct HttpReply {
     pub body: String,
 }
 
+/// 抽象的 GET —— 让上层逻辑（登录/在线检查）**能在单测里换成假客户端** ✓。
+pub trait HttpGet {
+    fn get(&self, url: &str, timeout: Duration) -> Result<HttpReply, String>;
+}
+
+/// 真实实现（走标准库 TcpStream）。
+pub struct PlainHttp;
+
+impl HttpGet for PlainHttp {
+    fn get(&self, url: &str, timeout: Duration) -> Result<HttpReply, String> {
+        get(url, timeout)
+    }
+}
+
 /// 从 `http://host[:port]/path` 里拆出 (host, port, path)。
 pub fn split_http_url(url: &str) -> Option<(String, u16, String)> {
     let rest = url.strip_prefix("http://")?;
@@ -36,7 +50,8 @@ pub fn split_http_url(url: &str) -> Option<(String, u16, String)> {
 
 /// 发一次 GET（只支持明文 http，够用 ✓）。
 pub fn get(url: &str, timeout: Duration) -> Result<HttpReply, String> {
-    let (host, port, path) = split_http_url(url).ok_or_else(|| "URL 形状不对（只支持 http://）".to_string())?;
+    let (host, port, path) =
+        split_http_url(url).ok_or_else(|| "URL 形状不对（只支持 http://）".to_string())?;
     let addr = format!("{}:{}", host, port);
     let stream = TcpStream::connect(&addr).map_err(|e| format!("连接 {} 失败: {}", addr, e))?;
     stream.set_read_timeout(Some(timeout)).map_err(|e| e.to_string())?;
@@ -52,9 +67,7 @@ pub fn get(url: &str, timeout: Duration) -> Result<HttpReply, String> {
         .map_err(|e| format!("发送请求失败: {}", e))?;
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
-    reader
-        .read_line(&mut status_line)
-        .map_err(|e| format!("读响应失败: {}", e))?;
+    reader.read_line(&mut status_line).map_err(|e| format!("读响应失败: {}", e))?;
     let status = status_line
         .split_whitespace()
         .nth(1)
@@ -105,5 +118,11 @@ mod tests {
         // 用本机回环当目标：一定能拿到 127.0.0.1 ✓（不发包，不需要网络）
         let ip = local_ip_towards("127.0.0.1", 80);
         assert_eq!(ip.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn get_reports_error_for_bad_url_instead_of_panicking() {
+        let err = get("https://example.com", Duration::from_millis(200)).unwrap_err();
+        assert!(err.contains("只支持 http"), "错误信息要能看懂: {}", err);
     }
 }

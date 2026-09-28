@@ -8,13 +8,16 @@
 
 pub mod channel;
 pub mod config;
+pub mod net;
 pub mod platform;
 pub mod protocol;
 pub mod secret;
+pub mod session;
 
 pub use channel::{Channel, Version};
 pub use config::{Config, UpdateChannel};
 pub use protocol::{LoginReply, LoginRequest, OnlineState, ParseError};
+pub use session::{Outcome, RunReport};
 
 /// 3.0 线的版本号（四段，与 2.x tag 习惯一致 ✓）。发布时由 CI 改写这一行。
 pub const APP_VERSION: &str = "3.0.0.0";

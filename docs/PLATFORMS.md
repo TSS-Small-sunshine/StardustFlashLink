@@ -33,13 +33,22 @@
 理由：单一静态二进制 / 无运行时依赖 / 内存占用小（典型 < 20 MB）/ 交叉编译到上面 7 个目标都有成熟路线
 （`cargo-zigbuild`、`cross`）。相比 Python 版：便携版不再需要解释器，冷启动从秒级降到毫秒级。
 
-### 外壳（UI）：两条候选，核心完全共用
+### 外壳（UI）：**已定：Slint 原生控件（零 WebView）** ✅
+
 | 方案 | 体积 | 内存 | UI 工作量 | 依赖 | 结论 |
 | --- | --- | --- | --- | --- | --- |
-| **Tauri 2**（系统 WebView + 复用现有 HTML UI） | ≈5–10 MB | 中（系统 WebView） | **低**（现有 UI 直接搬） | Linux 需 `webkit2gtk-4.1`；Windows 需 WebView2（Win10+ 自带） | 最快出可用 App |
-| **Slint**（原生控件，零 WebView） | ≈3–6 MB | **低** | 中高（UI 要重写） | 无（X11/Wayland 即可） | 最符合「体积小 / 不依赖浏览器 / 便携」 |
+| Tauri 2（系统 WebView + 复用现有 HTML） | ≈5–10 MB | 中 | 低（现有 UI 直接搬） | Linux 需 `webkit2gtk-4.1`；Windows 需 WebView2 | ✗ 未选 |
+| **Slint（原生控件，零 WebView）** | **≈3–5 MB** | **低** | 中（UI 要重写） | 无（X11/Wayland 即可） | ✅ **选它** |
 
-> 决策待定（见第 5 节）。**核心不改**，所以先做核心、UI 后置是安全的。
+**为什么选 Slint**（2026-09-28 决策）：
+1. 「便携版」要求**零系统依赖**：AppImage / 单文件拖到哪都能跑，不想依赖 webkit2gtk 这类运行时 ✓；
+2. 「占用小」：没有 WebView 进程，常驻内存少一大截 ✓；
+3. 用户明确「**不要那么依赖浏览器**」—— Slint 是原生渲染，跟浏览器彻底无关 ✓；
+4. 代价：现有 HTML UI 要用 Slint 重写一遍（设计语言不变：深色星尘渐变、玻璃卡片、
+   `#0071e3` 主色、`#2AA8FF → #3DDC97` 渐变；设计稿见 `_ui_redesign/` ✓）。
+
+> 顺带一个好处：`desktop/crates/drcom-cli`（headless）仍然独立可用 ——
+> Linux 服务器 / 树莓派上不需要图形栈就能跑 ✓。
 
 ---
 
@@ -87,11 +96,14 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 
 ---
 
-## 5. 开放决策（需确认）
+## 5. 开放决策
 
-1. **UI 壳**：Tauri（复用 HTML，快）还是 Slint（零 WebView，小/便携）？还是先 Tauri 后 Slint？
+1. ~~UI 壳：Tauri 还是 Slint？~~ **已定：Slint 原生控件**（2026-09-28，理由见第 2 节）✓
 2. **配置迁移**：3.0 直接读 2.x 的 `config.json` / `password.txt`（推荐，老用户零迁移成本）？
 3. **Linux 守护**：默认 `systemd --user`（无需 root）✓，是否需要额外支持 OpenRC（Alpine 等）？
+4. **ARMv7 上的 GUI**：交叉编译 Slint（需要 GL/X 的 sysroot）打算放到 M3 收尾；
+   ARMv7 在 M1–M2 阶段先保证 **headless 核心**可用（树莓派/服务器场景本来就不需要界面 ✓）。
+   → 若你要「ARMv7 也要图形界面」，我会在 M3 里补 `armv7` 的交叉 sysroot 与 AppImage 打包。
 
 ---
 
