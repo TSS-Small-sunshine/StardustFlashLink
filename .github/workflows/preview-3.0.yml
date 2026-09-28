@@ -80,7 +80,14 @@ jobs:
       - name: 体积报告（用户要求：体积小，所以每版都量一下 ✓）
         shell: bash
         run: |
-          find target/${{ matrix.target }}/release -maxdepth 1 -type f \( -name 'stardust-flash-link' -o -name 'stardust-flash-link.exe' \) -printf '%f  %s bytes\n' || true
+          # 用 wc -c 而不是 find -printf：macOS 的 BSD find 不认 -printf ✗
+          for f in \
+            "target/${{ matrix.target }}/release/stardust-flash-link" \
+            "target/${{ matrix.target }}/release/stardust-flash-link.exe" ; do
+            if [ -f "$f" ]; then
+              echo "SIZE  ${{ matrix.label }}  $(basename "$f")  $(wc -c < "$f") bytes"
+            fi
+          done
 
       - name: 上传产物（预览版：只挂 workflow artifact，不发 Release ✓）
         uses: actions/upload-artifact@v4
