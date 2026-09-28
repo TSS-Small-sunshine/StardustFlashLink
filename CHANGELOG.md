@@ -63,6 +63,45 @@
   安装日志归档回 `{app}\logs` ✓、执行器与探针双双自删 ✓（上面那条「重定向前置」的现场依据 ✓）；
 - `_smoke_http.py` **27/27** ✓（本版没动请求拦截层与任何 API）。
 
+### 🧪 真机验证（补记：2026-09-28，v2.0.9.1 → v2.0.10.0 实机升级）
+本机（装的正是 v2.0.9.1）从 Web UI 点「立即检查更新 → 立即升级」跑了一次真实升级，
+`logs\upgrade.log` 关键行（逐字）：
+
+```
+[10:31:13] [INFO] 检查完成：发现新版本 2.0.10.0
+[10:31:20] [INFO] 检测到新版本 2.0.10.0（当前 2.0.9.1），开始下载
+[10:31:23] [INFO] 下载完成：11898227 字节
+[10:31:23] [INFO] SHA256 校验通过
+[10:31:23] [INFO] 备份到 C:\Windows\TEMP\drcom_backup_20260928_103123.py
+[10:31:23] [INFO] 升级透明：AppExit 保持原值 Ignore（不修改注册表）
+[10:31:23] [INFO] installer 已启动（方式=schtasks，PID=None，第 1 次尝试）
+[10:31:28] [INFO] 升级成功确认：已运行 v2.0.10.0（目标 2.0.10.0，尝试 1 次）
+[10:31:30] [INFO] 清理已安装的安装包：DrcomAutoLogin-Setup-v2.0.10.0.exe
+[10:32:01] [INFO] 检查完成：已是最新 2.0.10.0
+```
+
+- `logs\campus_login.log`：`[10:31:28] Dr.COM 自动登录服务启动（Web UI 配置版 v2.0.10.0 "Sirius"）` ✓
+  （启动后 5 秒内即「已在线，无需登录」→ 登录链路照常 ✓）
+- `logs\installer-silent.log`：`Installation process succeeded.` + `Need to restart Windows? No` ✓
+- `Get-Service DrcomAutoLogin` → **Running / Automatic** ✓；安装目录 `version.py` → `2.0.10.0` ✓
+- `logs\service_stderr.log` 本次启动**没有**新 traceback ✓（末尾只剩 schtasks
+  `/create /sc once /st 00:00` 的两行 `警告: 因为 /ST 早于当前的时间…` —— 这是**设计如此**：
+  该任务只靠 `/run` 立即执行、绝不自行触发；同批的 `成功: 成功创建计划任务 …` 落在
+  `service_stdout.log` ✓）
+
+**新看门狗在真机上的证据**（升级完成后，用装好的 2.0.10.0 代码现场生成探针，对**真在跑的服务**探一次）：
+
+```
+probe generated: 133 lines
+health=OK http=200 ok=true version=2.0.10.0
+```
+
+> ⏱ **时序提醒**：这一次升级用的执行器**仍是 v2.0.9.1 那版**（执行器总是由「升级前那份代码」生成），
+> 所以本次 `upgrade.log` 里**不会**出现 `health=`（新判据）与 `installer_rc=`（本版修的坑）——
+> 二者会在**下一次**升级（2.0.10.0 → 更高版本）自动出现。
+> 想在真机上立刻验到**执行器**这一层：用 `_ui_redesign\verify-executor-v2.0.10.0.ps1 -Run`
+> （需管理员；走生产同一路径静默重装同版本，期望 rc = `installer_rc=0 / health=OK / service=RUNNING`）。
+
 ## v2.0.9.1 (hotfix) — 2026-09-28 · 代号 `Sirius`（天狼星）
 
 > **v2.0.9.0 的用户如果 Web UI 打不开、托盘说「服务未响应」**：重新运行 v2.0.9.1 安装包即可恢复
