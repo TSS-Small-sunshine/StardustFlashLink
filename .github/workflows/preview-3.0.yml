@@ -31,6 +31,14 @@ jobs:
         run: |
           rustup show
           cargo --version
+
+      - name: 装 Slint 的 Linux 依赖（X11/Wayland/fontconfig；GUI 编译需要 ✓）
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev
+
       - name: cargo test
         run: cargo test --workspace --verbose
       - name: 内置自检（跑真二进制，不是单测 ✓）
@@ -82,6 +90,7 @@ jobs:
       - name: 装 Slint 的 Linux 依赖（X11/Wayland 开发库；仅原生 GUI 构建需要）
         if: matrix.ui && startsWith(matrix.os, 'ubuntu')
         run: |
+          sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev \
             libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev
 
