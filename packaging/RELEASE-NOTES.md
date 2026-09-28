@@ -1,4 +1,4 @@
-﻿Windows 安装程序 **v{{VERSION}} "Sirius"（天狼星）**（Inno Setup 自动构建 · 安装包已内嵌 Python，无需预装）。
+﻿Windows 安装程序 **v{{VERSION}} "{{CODENAME}}"（{{CODENAME_CN}}）**（Inno Setup 自动构建 · 安装包已内嵌 Python，无需预装）。
 
 ## 本版变更
 
