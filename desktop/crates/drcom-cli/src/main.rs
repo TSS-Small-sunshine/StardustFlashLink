@@ -12,10 +12,12 @@
 
 mod server;
 
-use drcom_core::net;
-
-use drcom_core::{channel::Version, config::Config, platform, protocol, secret, Status};
-use std::time::Duration;
+use drcom_core::net::{self, PlainHttp};
+use drcom_core::{
+    channel::Version, config::Config, logfile::RotatingLog, platform, protocol,
+    scheduler::Scheduler, secret, session, timefmt, Status,
+};
+use std::time::{Duration, SystemTime};
 
 const DEFAULT_TIMEOUT_SEC: u64 = 12;
 
@@ -54,6 +56,7 @@ fn run(args: Vec<String>) -> i32 {
         }
         Some("selfcheck") => selfcheck(),
         Some("login") => login(&args[1..]),
+        Some("run") => run_loop(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -72,6 +75,7 @@ fn print_help() {
          status                      显示状态 JSON（与本地 API 同一份数据）\n  \
          selfcheck                   内置自检\n  \
          login [--dry-run] [--host H] [--account A] [--suffix S] [--password P]\n  \
+         run [--once]                守护循环：按配置间隔检查、失败走退避（服务化在 M3）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -267,44 +271,117 @@ fn login(args: &[String]) -> i32 {
         return 1;
     }
 
+    // —— 一次检查：守卫 → session::check_once → 写业务日志 ✓（与 GUI 同一套逻辑）——
     let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SEC);
-    let online_url = protocol::build_online_check_url(&cfg.host, "cb");
-    match net::get(&online_url, timeout) {
-        Ok(reply) => match protocol::parse_online_state(&reply.body) {
-            Ok(protocol::OnlineState::Online) => {
-                println!("已经在线 ✓（无需登录）");
-                return 0;
-            }
-            Ok(state) => println!("在线状态: {:?}", state),
-            Err(e) => println!("在线状态解析失败（{}），继续尝试登录", e.label_cn()),
-        },
-        Err(e) => println!("在线检查没成功：{}（继续尝试登录）", e),
+    let probe = drcom_core::probe::snapshot();
+    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
+    if !verdict.allowed {
+        println!("跳过本次检查：{}", verdict.reason);
+        println!(
+            "（当前 Wi-Fi: {} · 本机 IP: {}）",
+            probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
+            if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
+        );
+        return 0;
     }
 
-    match net::get(&url, timeout) {
-        Ok(reply) => match protocol::parse_login_reply(&reply.body) {
-            Ok(reply) => {
-                println!(
-                    "{} {}",
-                    if reply.success { "登录成功 ✓" } else { "登录失败 ✗" },
-                    reply.msg
-                );
-                if reply.success {
-                    0
-                } else {
-                    1
-                }
-            }
-            Err(e) => {
-                eprintln!("登录响应无法解析：{}", e.label_cn());
-                1
-            }
-        },
-        Err(e) => {
-            eprintln!("登录请求失败：{}", e);
-            1
-        }
+    let report = session::check_once(&cfg, &password, &PlainHttp, timeout);
+    let summary = report.outcome.summary_cn();
+    println!("{}", summary);
+    if let Err(e) = log_line(&format!("{} {}", timefmt::format_utc(SystemTime::now()), summary)) {
+        eprintln!("（日志写不进去：{}）", e);
     }
+    if report.outcome.is_ok() {
+        0
+    } else {
+        1
+    }
+}
+
+/// 往业务日志里追加一行（轮转策略与 2.x 一致：5 MB × 3 ✓）。
+fn log_line(line: &str) -> Result<(), String> {
+    let log = RotatingLog::business(platform::log_dir().join("campus_login.log"));
+    log.append_line(line).map_err(|e| e.to_string())
+}
+
+/// `run [--once]`：守护循环（按配置的间隔检查；失败走退避 ✓）。
+///
+/// 这一层是**纯 Rust 跨平台**的：Windows 上可以先手跑，Linux/macOS 上就是 systemd/launchd
+/// 起来要跑的东西 ✓（正式的服务化在 M3 ✓）。
+fn run_loop(args: &[String]) -> i32 {
+    let once = args.iter().any(|a| a == "--once");
+    let cfg_path = platform::config_path();
+    println!("{} 守护循环启动（间隔取自配置；Ctrl+C 退出）", drcom_core::APP_NAME);
+
+    let mut scheduler = Scheduler::new(30);
+    let mut last_interval = 0u32;
+    let mut first = true;
+    loop {
+        let cfg = match Config::load(&cfg_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("{}", e);
+                if once {
+                    return 1;
+                }
+                std::thread::sleep(Duration::from_secs(30));
+                continue;
+            }
+        };
+        // 配置一改就跟着变 ✓（每轮都重读，和 2.x 一样）
+        if cfg.auto_check_interval_min != last_interval {
+            scheduler.set_interval(cfg.auto_check_interval_min);
+            last_interval = cfg.auto_check_interval_min;
+        }
+
+        let now = SystemTime::now();
+        if first || scheduler.is_due(now) {
+            let (ok, summary) = one_check(&cfg);
+            let finished = SystemTime::now();
+            scheduler.record(ok, &summary, finished);
+            let _ = log_line(&format!("{} {}", timefmt::format_utc(finished), summary));
+            println!(
+                "{} · 连续失败 {} 次 · 下次 {} 后",
+                summary,
+                scheduler.backoff.consecutive_failures,
+                timefmt::human_duration(scheduler.remaining(finished))
+            );
+            first = false;
+            if once {
+                return 0;
+            }
+        }
+        // 5 秒醒一次看配置/到点没（很轻；不做网络请求 ✓）
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+/// 跑**一次**检查：守卫 → 账号/密码校验 → `session::check_once`，返回（是否健康, 文案）。
+///
+/// 注意「健康」的口径：**不在校园网 / 账号未设置都不算失败** ✓ —— 不该因此进退避 ✗。
+fn one_check(cfg: &Config) -> (bool, String) {
+    let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SEC);
+    let probe = drcom_core::probe::snapshot();
+    let verdict = drcom_core::guard_allows(cfg, probe.ssid.as_deref(), &probe.ips);
+    if !verdict.allowed {
+        return (
+            true,
+            format!(
+                "{}（Wi-Fi: {}）",
+                verdict.reason,
+                probe.ssid.unwrap_or_else(|| "读不到".to_string())
+            ),
+        );
+    }
+    if !cfg.account_configured() {
+        return (true, "账号未设置，已跳过检查".to_string());
+    }
+    let password = read_password_file();
+    if password.is_empty() {
+        return (false, "密码是空的（去密码文件里写一行）".to_string());
+    }
+    let report = session::check_once(cfg, &password, &PlainHttp, timeout);
+    (report.outcome.is_ok(), report.outcome.summary_cn())
 }
 
 /// 读密码文件：跳过空行与 `#` 注释行，取第一条有效内容 ✓（与 2.x 一致）。

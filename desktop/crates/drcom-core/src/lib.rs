@@ -11,19 +11,24 @@ pub mod channel;
 pub mod cidr;
 pub mod config;
 pub mod guard;
+pub mod logfile;
 pub mod net;
 pub mod platform;
 pub mod probe;
 pub mod profiles;
 pub mod protocol;
+pub mod scheduler;
 pub mod secret;
 pub mod session;
+pub mod timefmt;
 
 pub use backoff::{Backoff, BACKOFF_LEVELS_MIN};
 pub use channel::{Channel, Version};
 pub use config::{Config, UpdateChannel};
 pub use guard::{guard_allows, GuardResult};
+pub use logfile::RotatingLog;
 pub use protocol::{LoginReply, LoginRequest, OnlineState, ParseError};
+pub use scheduler::Scheduler;
 pub use session::{Outcome, RunReport};
 
 /// 3.0 线的版本号（四段，与 2.x tag 习惯一致 ✓）。发布时由 CI 改写这一行。
