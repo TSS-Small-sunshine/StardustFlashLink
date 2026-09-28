@@ -307,6 +307,42 @@ def _release_update_lock():
             STATE["update_lock"] = False
 
 
+# ============================================================
+# v2.0.6.3：忙状态查询（Web 层据此判断「现在能不能开始」）
+# ============================================================
+def is_update_busy():
+    """是否有检查 / 下载 / 升级任务正在执行。只读、不阻塞、不改状态。
+
+    只认**升级锁**本身（任务全程持有它），不认 update_state —— 状态可能是上一轮
+    异常留下的残值（锁已由 finally 释放），拿状态判「忙」会把接口永久锁死。
+
+    未注入时（单元测试 / 非 Windows 下 import）返回 False：宁可不拦，不误拦。
+    """
+    lock = globals().get("UPDATE_LOCK")
+    state = globals().get("STATE")
+    state_lock = globals().get("STATE_LOCK")
+    if lock is None or state is None or state_lock is None:
+        return False
+    with lock:
+        with state_lock:
+            return bool(state.get("update_lock"))
+
+
+def update_busy_message():
+    """「忙」的可读原因（复用当前进度文案）；空闲时返回空串。
+
+    v2.0.6.3：POST /api/update/check|install 会先问这个。此前两个入口一律先回
+    {"ok": true, "已提交..."}，随后后台线程被 _acquire_update_lock 挡掉 ——
+    用户看到「已提交」却什么都没发生（真机验证 v2.0.6.2 时踩到：先点「立即检查更新」、
+    紧接着点「立即升级」，第二个请求被静默丢弃）。
+    """
+    if not is_update_busy():
+        return ""
+    with STATE_LOCK:
+        msg = (STATE.get("update_progress_message") or "").strip()
+    return msg or "已有升级任务在执行"
+
+
 def _download_installer(url, dest_path, expected_size, progress_callback=None):
     """按顺序尝试主源 + 镜像下载 installer；任一成功即返回字节数。
     所有镜像都失败则抛最后一次异常。
