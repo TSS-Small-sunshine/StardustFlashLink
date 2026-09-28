@@ -1,0 +1,129 @@
+// 品牌设计令牌 —— 与 2.x HTML UI / 宣传海报同一套（深色星尘 + 玻璃卡片）✓
+// 改颜色只改这里，界面各处自动跟着变。
+export global Theme {
+    // 底色（深空）
+    out property <color> bg-deep: #070b18;
+    out property <color> bg-mid: #0d1730;
+    out property <color> bg-high: #16233f;
+    // 极光渐变（主视觉）
+    out property <color> aurora-start: #2AA8FF;
+    out property <color> aurora-end: #3DDC97;
+    // 品牌蓝
+    out property <color> accent: #0071e3;
+    out property <color> accent-light: #0a84ff;
+    // 文本
+    out property <color> text-primary: #eaf1ff;
+    out property <color> text-muted: #93a4c4;
+    out property <color> text-dim: #6b7c9c;
+    // 卡片（玻璃）—— 用 rgba() 而不是 #rrggbb.with-alpha()：
+    // 后者会被词法分析当成十六进制字面量的一部分 ✗（官方给的是 rgba()/with-alpha() 两种，前者最稳 ✓）
+    out property <color> card-bg: rgba(255, 255, 255, 0.06);
+    out property <color> card-stroke: rgba(255, 255, 255, 0.12);
+    out property <color> card-bg-hover: rgba(255, 255, 255, 0.10);
+    // 语义色
+    out property <color> ok: #3DDC97;
+    out property <color> warn: #ffb020;
+    out property <color> danger: #ff5d5d;
+    // 尺寸
+    out property <length> radius: 18px;
+    out property <length> radius-sm: 12px;
+    out property <length> pad: 20px;
+    out property <length> gap: 16px;
+    out property <length> gap-sm: 10px;
+}
+
+// 一行「标签 : 值」的统计卡
+export component StatCard inherits Rectangle {
+    in property <string> label: "";
+    in property <string> value: "";
+    in property <string> note: "";
+    in property <color> accent-color: Theme.accent-light;
+
+    height: 84px;
+    border-radius: Theme.radius-sm;
+    background: Theme.card-bg;
+    border-width: 1px;
+    border-color: Theme.card-stroke;
+
+    HorizontalLayout {
+        padding: Theme.gap-sm;
+
+        // 左侧色条（视觉锚点 ✓）
+        Rectangle {
+            width: 4px;
+            border-radius: 2px;
+            background: accent-color;
+        }
+
+        VerticalLayout {
+            padding-left: Theme.gap-sm;
+            spacing: 4px;
+            alignment: start;
+
+            Text {
+                text: root.label;
+                color: Theme.text-muted;
+                font-size: 12px;
+            }
+            Text {
+                text: root.value;
+                color: Theme.text-primary;
+                font-size: 17px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.note;
+                color: Theme.text-dim;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// 自绘胶囊按钮（比 std-widgets 更贴品牌，也更小 ✓）
+export component PillButton inherits Rectangle {
+    in property <string> text: "";
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 38px;
+    min-width: 118px;
+    border-radius: 19px;
+    background: !enabled
+        ? Theme.card-bg
+        : (primary
+            ? (touch.has-hover ? Theme.accent-light : Theme.accent)
+            : (touch.has-hover ? Theme.card-bg-hover : Theme.card-bg));
+    border-width: 1px;
+    border-color: primary ? transparent : Theme.card-stroke;
+    opacity: enabled ? 1.0 : 0.5;
+
+    Text {
+        text: root.text;
+        color: root.primary ? #ffffff : Theme.text-primary;
+        font-size: 14px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// 结果区里的一行（前缀符号用颜色区分 ✓）
+export component LogLine inherits Text {
+    in property <string> kind: "info";   // ok / warn / danger / info
+
+    color: kind == "ok" ? Theme.ok
+        : kind == "danger" ? Theme.danger
+        : kind == "warn" ? Theme.warn
+        : Theme.text-muted;
+    font-size: 12px;
+    wrap: word-wrap;
+}

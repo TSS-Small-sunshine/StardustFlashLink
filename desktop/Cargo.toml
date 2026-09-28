@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/drcom-core", "crates/drcom-cli"]
+members = [
+    "crates/drcom-core",
+    "crates/drcom-cli",
+    "crates/drcom-ui",
+]
 
 [workspace.package]
 # 注意：Cargo 只接受 MAJOR.MINOR.PATCH（三段）✗ 不能用 3.0.0.0。

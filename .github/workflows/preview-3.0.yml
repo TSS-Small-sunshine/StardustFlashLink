@@ -47,12 +47,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu,   label: linux-x86_64,  apt: '' }
-          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu,  label: linux-aarch64, apt: gcc-aarch64-linux-gnu }
-          - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, label: linux-armv7, apt: gcc-arm-linux-gnueabihf }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,   label: windows-x86_64, apt: '' }
-          - { os: macos-14,      target: aarch64-apple-darwin,      label: macos-aarch64, apt: '' }
-          - { os: macos-14,      target: x86_64-apple-darwin,       label: macos-x86_64,  apt: '' }
+          # ui: true = 在该 runner 上原生编译 Slint 界面（交叉编译 GUI 需要目标系统的
+          # GL/X/Wayland sysroot，那是 M3 打包阶段的事 ✓；headless 核心依旧覆盖全部 6 个目标 ✓）
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu,   label: linux-x86_64,  apt: '', ui: true }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu,  label: linux-aarch64, apt: gcc-aarch64-linux-gnu, ui: false }
+          - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, label: linux-armv7, apt: gcc-arm-linux-gnueabihf, ui: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   label: windows-x86_64, apt: '', ui: true }
+          - { os: macos-14,      target: aarch64-apple-darwin,      label: macos-aarch64, apt: '', ui: true }
+          - { os: macos-14,      target: x86_64-apple-darwin,       label: macos-x86_64,  apt: '', ui: false }
     steps:
       - uses: actions/checkout@v4
 
@@ -74,8 +76,18 @@ jobs:
             armv7-unknown-linux-gnueabihf) echo "CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc" >> $GITHUB_ENV ;;
           esac
 
-      - name: cargo build --release
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: cargo build（headless 核心 —— 6 个目标全部构建 ✓）
+        run: cargo build --release --target ${{ matrix.target }} -p drcom-cli
+
+      - name: 装 Slint 的 Linux 依赖（X11/Wayland 开发库；仅原生 GUI 构建需要）
+        if: matrix.ui && startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libfontconfig1-dev
+
+      - name: cargo build（Slint GUI —— 仅原生编译的目标）
+        if: matrix.ui
+        run: cargo build --release --target ${{ matrix.target }} -p drcom-ui
 
       - name: 体积报告（用户要求：体积小，所以每版都量一下 ✓）
         shell: bash
@@ -83,7 +95,9 @@ jobs:
           # 用 wc -c 而不是 find -printf：macOS 的 BSD find 不认 -printf ✗
           for f in \
             "target/${{ matrix.target }}/release/stardust-flash-link" \
-            "target/${{ matrix.target }}/release/stardust-flash-link.exe" ; do
+            "target/${{ matrix.target }}/release/stardust-flash-link.exe" \
+            "target/${{ matrix.target }}/release/stardust-flash-link-app" \
+            "target/${{ matrix.target }}/release/stardust-flash-link-app.exe" ; do
             if [ -f "$f" ]; then
               echo "SIZE  ${{ matrix.label }}  $(basename "$f")  $(wc -c < "$f") bytes"
             fi
@@ -96,5 +110,7 @@ jobs:
           path: |
             desktop/target/${{ matrix.target }}/release/stardust-flash-link
             desktop/target/${{ matrix.target }}/release/stardust-flash-link.exe
+            desktop/target/${{ matrix.target }}/release/stardust-flash-link-app
+            desktop/target/${{ matrix.target }}/release/stardust-flash-link-app.exe
           if-no-files-found: warn
           retention-days: 14

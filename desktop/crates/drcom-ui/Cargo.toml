@@ -1,0 +1,24 @@
+[package]
+name = "drcom-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "星尘闪连 3.0 桌面界面（Slint 原生控件，零 WebView）"
+
+[[bin]]
+name = "stardust-flash-link-app"
+path = "src/main.rs"
+
+[dependencies]
+drcom-core = { path = "../drcom-core" }
+# 体积优先：只要 winit 后端 + **软件渲染器**（不依赖 OpenGL，ARMv7/无 GPU 也能跑 ✓）
+slint = { version = "1", default-features = false, features = [
+    "std",
+    "compat-1-18",
+    "backend-winit",
+    "renderer-software",
+] }
+
+[build-dependencies]
+slint-build = "1"
