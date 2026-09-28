@@ -1111,6 +1111,82 @@ check("v2.0.12.0 前端接好（关于面板日志卡片 + 诊断包下载 + 两
       and 'path == "/api/diagnostics"' in src_web and 'path == "/api/logs"' in src_web
       and "api_get_diagnostics(self)" in src_web)
 
+# ---- v2.0.13.0：Web 层加固（P3-6 / P3-7）----
+# 三件事：① CSP 等安全响应头（页面全内联，所以能收得很紧）；② JSON 端点请求体上限；
+# ③ 运行时单实例锁（AppMutex 只管安装器 GUI，服务自己一直没锁）。
+import http.client  # noqa: E402
+
+_p13 = 18967
+_ph13 = "127.0.0.1:%d" % _p13
+_srv13 = _ThreadingHTTPServer(("127.0.0.1", _p13), _wa._Handler)
+threading.Thread(target=_srv13.serve_forever, daemon=True).start()
+
+
+def _req13(method, path, headers=None, body=None):
+    _c = http.client.HTTPConnection("127.0.0.1", _p13, timeout=15)
+    _h = {"Host": _ph13}
+    _h.update(headers or {})
+    _c.request(method, path, body=body, headers=_h)
+    _r = _c.getresponse()
+    _hdrs = {k.lower(): v for k, v in _r.getheaders()}
+    _data = _r.read()
+    _c.close()
+    return _r.status, _hdrs, _data
+
+
+_st13, _h13, _b13 = _req13("GET", "/")
+check("v2.0.13.0 页面带 CSP（default-src 'none' + frame-ancestors 'none'）",
+      _st13 == 200 and "default-src 'none'" in _h13.get("content-security-policy", "")
+      and "frame-ancestors 'none'" in _h13.get("content-security-policy", "")
+      and "base-uri 'none'" in _h13.get("content-security-policy", ""),
+      _h13.get("content-security-policy", "")[:120])
+check("v2.0.13.0 页面带 nosniff / DENY / no-referrer / Permissions-Policy",
+      _h13.get("x-content-type-options") == "nosniff" and _h13.get("x-frame-options") == "DENY"
+      and _h13.get("referrer-policy") == "no-referrer"
+      and "camera=()" in _h13.get("permissions-policy", ""))
+_st13j, _h13j, _b13j = _req13("GET", "/api/health")
+check("v2.0.13.0 JSON 响应同样带安全头（nosniff / DENY）",
+      _st13j == 200 and _h13j.get("x-content-type-options") == "nosniff"
+      and _h13j.get("x-frame-options") == "DENY")
+check("v2.0.13.0 CSP 只放宽内联脚本 / 样式，其余全禁（无 CDN 依赖）",
+      "script-src 'unsafe-inline'" in _h13.get("content-security-policy", "")
+      and "connect-src 'self'" in _h13.get("content-security-policy", "")
+      and "img-src 'self' data:" in _h13.get("content-security-policy", ""))
+check("v2.0.13.0 JSON 端点请求体上限 = 1 MB",
+      _wa.MAX_JSON_BODY_BYTES == 1024 * 1024 and "MAX_JSON_BODY_BYTES" in src_web)
+_st413, _h413, _b413 = _req13("POST", "/api/login", headers={
+    "Content-Type": "application/json", "X-Requested-With": "DrcomUI"},
+    body=b"0" * (_wa.MAX_JSON_BODY_BYTES + 100))
+_b413j = json.loads(_b413.decode("utf-8")) if _b413 else {}
+check("v2.0.13.0 超大 JSON 请求体被拒 413（不再无条件读进来）",
+      _st413 == 413 and _b413j.get("ok") is False and "过大" in _b413j.get("error", ""),
+      repr((_st413, _b413j)))
+check("v2.0.13.0 拒绝时显式关连接（未读数据不会把 413 冲成 RST）",
+      _h413.get("connection") == "close" and "BODY_DRAIN_MAX_BYTES" in src_web)
+_st13p, _h13p, _b13p = _req13("GET", "/api/health")
+check("v2.0.13.0 拒收后服务照常可用（连接是干净关的）", _st13p == 200)
+_srv13.shutdown()
+
+check("v2.0.13.0 单实例锁用命名互斥体（Local\\ 名字，进程退出自动释放）",
+      svc.SINGLETON_MUTEX_NAME.startswith("Local\\")
+      and svc.ERROR_ALREADY_EXISTS == 183
+      and "CreateMutexW" in src_svc)
+check("v2.0.13.0 单实例锁对升级路径宽容（旧进程退出时最多等 20 秒）",
+      svc.SINGLETON_WAIT_SEC == 20 and "等旧实例退出" in src_svc)
+if os.name != "nt":
+    print("SKIP  v2.0.13.0 单实例锁行为级断言：非 Windows")
+else:
+    _first13 = svc._acquire_singleton(wait_sec=0)
+    _second13 = svc._acquire_singleton(wait_sec=0)   # 本进程已持有 → 必须被识破
+    check("v2.0.13.0 单实例锁真的挡得住第二个实例（行为级）",
+          _first13 is True and _second13 is False and svc._SINGLETON_HANDLE,
+          repr((_first13, _second13)))
+_main_src13 = src_svc[src_svc.index("def main():"):]
+check("v2.0.13.0 单实例锁排在「真正干活」之前（早于载配置 / 起线程）",
+      _main_src13.index("if not _acquire_singleton():") < _main_src13.index("cfg = _load_config()")
+      and "本进程退出" in _main_src13 and "return 0" in _main_src13,
+      "单实例检查必须紧跟在启动横幅之后")
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -1214,7 +1290,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.12.0", version.VERSION == "2.0.12.0", version.VERSION)
+check("版本 = 2.0.13.0", version.VERSION == "2.0.13.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

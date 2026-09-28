@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.12.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.13.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     logs/service_stderr.log — NSSM stderr（由 install.bat 配置）
 """
 
+import ctypes            # v2.0.13.0：运行时单实例锁（命名互斥体）
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -33,6 +34,7 @@ import re
 import signal
 import sys
 import threading
+import time
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer
 
@@ -632,11 +634,74 @@ def _on_signal(signum, frame):
         threading.Thread(target=HTTP_SERVER.shutdown, daemon=True).start()
 
 
+# ============================================================
+# 运行时单实例锁（v2.0.13.0 / P3-7）
+# ============================================================
+# `AppMutex` 只管安装器 GUI，服务自己一直没有锁 ✗ —— 手工再跑一份 联网_service.py 时，
+# 线程与周期自检会**先跑起来**，直到绑 8848 失败才退出（那时已经干了不少事：
+# 可能已经开始检查网络、甚至发起登录）✗。
+# 现在用命名互斥体挡在真正干活之前；对**升级路径保持宽容**：
+# 安装器刚 `nssm stop` 完、旧进程正在退出时，最多等 `SINGLETON_WAIT_SEC` 秒 ✓。
+SINGLETON_MUTEX_NAME = "Local\\DrcomAutoLoginService"
+SINGLETON_WAIT_SEC = 20
+_SINGLETON_HANDLE = None      # 留住句柄：进程退出（或被系统回收）才释放
+ERROR_ALREADY_EXISTS = 183
+
+
+def _acquire_singleton(wait_sec=SINGLETON_WAIT_SEC):
+    """拿运行时单实例锁。返回 True = 可以继续启动。
+
+    拿不到互斥体本身（极罕见）按 fail-open 处理：宁可多跑一份，也不能让服务起不来 ✓。
+    """
+    global _SINGLETON_HANDLE
+    if os.name != "nt":
+        return True
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except (OSError, AttributeError):
+        return True
+
+    def _try():
+        handle = kernel32.CreateMutexW(None, True, SINGLETON_MUTEX_NAME)
+        if not handle:
+            return None                    # 调不动 → fail-open
+        if ctypes.get_last_error() != ERROR_ALREADY_EXISTS:
+            return handle                  # 新拿到（含首次创建）
+        kernel32.CloseHandle(handle)
+        return False                   # 已有人持有
+
+    got = _try()
+    if got is None:
+        return True
+    if got is not False:
+        _SINGLETON_HANDLE = got
+        return True
+    deadline = time.time() + max(0, int(wait_sec))
+    while time.time() < deadline:
+        time.sleep(1.0)                    # 等旧实例退出（升级 / 重启时就是这个场景）
+        got = _try()
+        if got is None:
+            return True
+        if got is not False:
+            _SINGLETON_HANDLE = got
+            return True
+    return False
+
+
 def main():
     global HTTP_SERVER
 
     logger.info("=" * 60)
     logger.info("Dr.COM 自动登录服务启动（Web UI 配置版 v%s \"%s\"）", VERSION, CODENAME)
+
+    # 0. 运行时单实例锁（v2.0.13.0 / P3-7）：拿不到就**什么都不做**直接退出 ✓
+    #    （旧行为是先把线程/周期自检跑起来，直到绑 8848 失败才退出 ✗）
+    if not _acquire_singleton():
+        logger.error("已有 DrcomAutoLogin 服务实例在运行（互斥体 %s 被占）—— 本进程退出，"
+                     "不再启动任何线程。若确认没有其它实例，请看任务管理器里的 python/pythonw；"
+                     "升级 / 重启时这里最多等 %s 秒。",
+                     SINGLETON_MUTEX_NAME, SINGLETON_WAIT_SEC)
+        return 0
 
     # 1. 载入配置
     cfg = _load_config()

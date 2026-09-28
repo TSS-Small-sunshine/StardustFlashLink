@@ -101,7 +101,7 @@
 
 ## 🏷 项目状态
 
-**当前版本**：`v2.0.12.0 "Sirius"`（天狼星，2026-09-28） · **状态**：🟢 积极维护
+**当前版本**：`v2.0.13.0 "Sirius"`（天狼星，2026-09-28） · **状态**：🟢 积极维护
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -318,7 +318,7 @@ DrcomAutoLogin-Windows/
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.12.0.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.13.0.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -413,6 +413,10 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 - **需自行创建 `password.txt`**：本仓库不含该文件，请在使用前于脚本目录下自行创建并写入密码
 - **Web UI 只监听 `127.0.0.1`**：不对局域网 / 外网开放，其它设备无法访问
 - **接口不返回密码**：状态接口只返回 `password_status`（`set` / `missing`），永不返回密码原文
+- **三道请求校验**：Host 白名单（挡 DNS rebinding）+ `Origin` 同源 + 写请求必须带 `X-Requested-With: DrcomUI`（跨站页面发不出该头）—— 纯 CSRF 因此被阻断
+- **安全响应头（v2.0.13.0）**：CSP `default-src 'none'`（页面全内联，只放宽 `script-src/style-src 'unsafe-inline'`）+ `frame-ancestors 'none'`、`X-Frame-Options: DENY`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Permissions-Policy: geolocation=(), camera=(), microphone=()`
+- **请求体上限（v2.0.13.0）**：JSON 端点 1 MB（超限回 413，且**先把已到达的字节有界排空再干净关连接** —— 否则未读数据会让 Windows 发 RST，把 413 本身冲掉）；zip 配置导入 4 MB
+- **运行时单实例锁（v2.0.13.0）**：命名互斥体 `Local\DrcomAutoLoginService`；第二个实例**什么都不做**直接退出（以前会先把线程/周期自检跑起来，直到绑端口失败才退）。升级/重启时对旧进程宽容：最多等 20 秒
 - **日志脱敏**：密码不写入任何日志文件；`config.json` 也不保存密码
 - **权限建议**：`password.txt` 所在目录建议只授予本机账户访问权限（服务以系统账户运行，注意共享机器的风险）
 - **提交前的自动隐私守卫**：`python _smoke_static.py` 会把本机 `password.txt` / `config.json` 里的账号拿去和**所有入库文件**比对，命中即测试失败。想连安装目录一起查，先设 `$env:DRCOM_DATA_DIR = 'D:\Program Files\DrcomAutoLogin'`（CI 上没有这些文件，该项自动跳过）；`logs\*`、`update_attempt.json`、`installer-silent.log`、`config-export-*.zip` 等运行期产物全部在 `.gitignore` 内
@@ -452,7 +456,7 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | --- | --- | --- |
 | **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
 | **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
-| **v2.0.12.0（当前）** | `Sirius` 天狼星 | 运维体验两件事：**日志自动轮转** + **一键脱敏诊断包**。业务日志从 `logging.FileHandler`（无限追加）换成 `RotatingFileHandler`（5 MB × 3 份），升级日志也按 2 MB × 2 份轮转；`metrics.py` 同步改成按「`.3 → .1 → 当前`」一起读，所以「近 7 天在线率」不会因为轮转断档。新增 `GET /api/logs`（逐个体积 + 合计）与 `GET /api/diagnostics`（内存里生成诊断 zip：版本 / 环境 / 服务状态 + 脱敏配置 + 各日志尾部，每个 ≤ 512 KB），「关于」面板有「日志与诊断」卡片：占用一目了然、诊断包一键下载。诊断包**账号与 MAC 打码、密码永不出现在包里**（万一被日志记下也替换成 `***`），内网 IP 与 Wi-Fi 名保留并在 `README.txt` 里写明（排障必需，外发前自行确认）。 |
+| **v2.0.13.0（当前）** | `Sirius` 天狼星 | Web 层加固三件（P3-6 / P3-7）：**① 安全响应头** —— CSP `default-src 'none'`（页面全内联，只放宽 `script-src/style-src 'unsafe-inline'`）+ `frame-ancestors 'none'` / `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / `Permissions-Policy`，HTML 与 JSON / zip 响应**统一带**；**② 请求体上限** —— JSON 端点 1 MB，超限回 413 且**先把已到达的字节有界排空（≤4 MB）再干净关连接**（不排空的话 Windows 会因未读数据发 RST，把 413 本身冲掉 ✗，这条是实测踩出来的）；**③ 运行时单实例锁** —— 命名互斥体 `Local\DrcomAutoLoginService`，第二个实例**什么都不做**直接退出（旧行为会先把线程/周期自检跑起来，直到绑端口失败才退 ✗），对升级 / 重启路径宽容（最多等旧进程 20 秒）。 |
 | v2.0.11.0 | `Sirius` 天狼星 | 给「升坏了」补退路：**整目录备份 + 自动/手动回滚**（P6-6 / 路线图 #16）。升级前把**随包分发的 9 个代码文件**备份到 `{app}\backup\<旧版本>\` 并写 `manifest.json`（逐个 sha256）；执行器在两轮健康探测都不通过时**自动**「停服务 → 校验并还原这些文件 → 起服务 → 再探」，Web UI「配置 → 自动升级 → 版本回滚」也能手动一键回退（跑的是**同一份**回滚脚本，手测到的就是自动会跑的）。回滚三铁律：① **只还原代码**，`config.json` / 密码 / 方案一律不动；② **fail-closed**（清单缺失、备份被改坏、拿错版本、文件名带路径分隔符 → 全部拒绝，且 all-or-nothing）；③ 备份保留 7 天但**至少留最新 2 份**。顺带修掉一个「换备份方案才会暴露」的陷阱：启动钩子原先「%TEMP% 里没有旧式备份就 return」，会把尝试确认 / 执行器结果 / AppExit 自愈 / 托盘自启**整段静默跳过** ✗。 |
 | v2.0.10.0 | `Sirius` 天狼星 | 把 v2.0.9.1 里自己写下的待办做完：升级**收尾判定改探 HTTP**。执行器跑完安装器后用随包内嵌的 Python 探 `http://127.0.0.1:<ui_port>/api/health` —— 拿到 `{"ok":true}` 才算「服务真的活了」（此前只看 `sc query`，而那是 nssm 的 wrapper：`AppExit=Ignore` 下里面的 Python 崩了它照样 RUNNING ✗，v2.0.8.0 / v2.0.9.0 两次事故就是这么「升完才发现」的）。探不到先**自动「停 + 起」重启一次**再探一次；结论写进 `%TEMP%\drcom_apply_update.rc`（`health=OK\|FAIL`）与 `logs\upgrade.log`（中文告警 —— 服务真起不来时 Web UI 也打不开，那行日志就是唯一告警面，托盘右键「打开日志目录」即可看到）。探针自包含、只用标准库、**不 import 项目模块**、禁用系统代理，缺件时退回旧判据（`health=SKIP`）。顺手修掉一个从 v2.0.4.2 起就在的老坑：执行器的 `installer_rc=` 因为 `echo …=0>"…"` 被 cmd 当成「句柄 0 重定向」而**从来没落盘**（rc 文件是空文件）→「安装器非 0 退出码就告警」一直是死代码 ✗，现改为把重定向写在前面的写法 ✓。 |
 | v2.0.9.1 | `Sirius` 天狼星 | 🔴 **紧急修复**：v2.0.9.0 在 `main()` 里多写了一句 `import protocol as _protocol_mod` ✗ —— **函数内的 import 会让该名字在整个函数里变成局部变量**，于是同一函数里更早的 `_protocol_mod._attach(...)` 直接 `UnboundLocalError` → 服务启动即退、Web UI 端口消失 ✗。已删掉该行（模块顶部本来就导入过 ✓），并加**静态守卫**：服务里出现「函数内 import 模块别名」一律判失败 ✗。 |
