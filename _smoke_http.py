@@ -59,6 +59,22 @@ def _check(name, got, want, note=""):
     results.append((ok, name, got, want, note))
 
 
+def _post_json(path, payload):
+    """POST 一个 JSON 接口并解析（写接口要带 X-Requested-With，否则会被 403）。"""
+    body = json.dumps(payload).encode("utf-8")
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=15)
+    conn.request("POST", path, body=body, headers={
+        "Host": HOST, "Content-Type": "application/json",
+        "X-Requested-With": "DrcomUI", "Content-Length": str(len(body))})
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+    try:
+        return resp.status, json.loads(raw)
+    except ValueError:
+        return resp.status, {"_unparsable": raw[:120]}
+
+
 server = ThreadingHTTPServer(("127.0.0.1", PORT), web_api._Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -148,6 +164,56 @@ try:
     web_api._metrics_mod = None
     _check("v2.0.8.0 /api/metrics 模块未注入 → 优雅降级（不 500）",
            (_get_json("/api/metrics?days=7") or {}).get("ok") is False, True)
+
+    # ============================================================
+    # v2.0.9.0（B5）：/api/profiles —— 配置方案端到端（临时 config，真跑增删改切）
+    # ============================================================
+    import profiles as _pf_mod
+
+    _pstore = {}
+
+    def _pload():
+        return json.loads(json.dumps(_pstore))      # 深拷贝：被测代码改了也看得见
+
+    def _psave(cfg):
+        _pstore.clear()
+        _pstore.update(json.loads(json.dumps(cfg)))
+
+    _pstore.update({"host": "1.2.3.4", "port": 80, "auto_check_interval_min": 30,
+                    "account": "2023999999", "network_guard_enabled": False,
+                    "guard_allowed_ssids": "", "guard_allowed_subnets": "",
+                    "profiles": {}, "active_profile": "", "profiles_auto_switch": False})
+    web_api._load_config = _pload
+    web_api._save_config = _psave
+    web_api._validate_config = lambda cfg: []       # 形状校验在 profiles 里已单独测过
+    web_api._profiles_mod = _pf_mod
+    _pf_mod._attach(load_config=_pload, save_config=_psave, validate_config=lambda c: [])
+
+    _st, _b = _post_json("/api/profiles/save", {"name": "家里", "match_ssids": "Home-WiFi"})
+    _check("v2.0.9.0 POST /api/profiles/save（用当前配置存方案）",
+           (_st, _b.get("ok"), _b.get("name")), (200, True, "家里"))
+    _check("v2.0.9.0 坏方案名 → 400",
+           _post_json("/api/profiles/save", {"name": "a/b"})[0], 400)
+    _g = _get_json("/api/profiles")
+    _check("v2.0.9.0 GET /api/profiles 列出方案",
+           (_g.get("ok"), _g.get("count"), (_g.get("items") or [{}])[0].get("name")), (True, 1, "家里"))
+    _st, _b = _post_json("/api/profiles/activate", {"name": "家里"})
+    _check("v2.0.9.0 POST /api/profiles/activate（写盘且账号不动）",
+           (_st, _b.get("ok"), _pstore.get("active_profile"), _pstore.get("account")),
+           (200, True, "家里", "2023999999"))
+    _check("v2.0.9.0 激活后会重新读回（GET 里 active 标记）",
+           (_get_json("/api/profiles") or {}).get("active"), "家里")
+    _check("v2.0.9.0 POST /api/profiles/auto 打开自动切换",
+           (_post_json("/api/profiles/auto", {"enabled": True})[0], _pstore.get("profiles_auto_switch")),
+           (200, True))
+    check_auto = _pf_mod.auto_switch("home-wifi")     # 已激活「家里」→ 不该重复切
+    _check("v2.0.9.0 已是当前方案 → 自动切换不动手", check_auto, "")
+    _st, _b = _post_json("/api/profiles/delete", {"name": "家里"})
+    _check("v2.0.9.0 POST /api/profiles/delete（清标记、配置值保留）",
+           (_st, _b.get("ok"), _pstore.get("profiles"), _pstore.get("active_profile"),
+            _pstore.get("account")), (200, True, {}, "", "2023999999"))
+    _check("v2.0.9.0 删不存在的方案 → 400",
+           _post_json("/api/profiles/delete", {"name": "没有这个"})[0], 400)
 finally:
     server.shutdown()
 

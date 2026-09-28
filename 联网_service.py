@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.8.1）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.9.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -58,6 +58,13 @@ DEFAULT_CONFIG = {
     "network_guard_enabled": False,
     "guard_allowed_ssids": "",      # 逗号分隔（中英文逗号都认），如 Campus-WiFi,Dorm-WiFi
     "guard_allowed_subnets": "",    # 逗号分隔 CIDR，如 172.16.0.0/12,10.0.0.0/8（有线也适用）
+    # —— 配置方案（v2.0.9.0 / B5）：教室 / 宿舍 / 家里各存一份「位置相关字段」——
+    # profiles: {"方案名": {"values": {...PROFILE_KEYS...}, "match_ssids": ["Campus-WiFi"]}}
+    # active_profile: 当前方案名（空 = 没用方案，配置就是手改的）
+    # profiles_auto_switch: 默认**关** —— 免得"我手动选的方案被系统改掉" ✗
+    "profiles": {},
+    "active_profile": "",
+    "profiles_auto_switch": False,
     "ui_port": 8848,
     # —— 自动升级字段（v1.3 新增）——
     # P1-3：默认关闭。升级链路走第三方镜像 + SHA256 可绕过（P1-2 已修），
@@ -304,6 +311,28 @@ def _validate_config(cfg):
             except ValueError:
                 errors.append("guard_allowed_subnets 里有非法网段：{}".format(item))
 
+    # —— 配置方案（v2.0.9.0 / B5）——
+    # 方案内容交给 profiles.py 校验（形状 + 只允许 PROFILE_KEYS）；这里只管别把结构写坏。
+    profs = cfg.get("profiles")
+    if not isinstance(profs, dict):
+        errors.append("profiles 必须是对象（方案名 → 方案内容）")
+    elif _profiles_mod is not None and len(profs) > _profiles_mod.MAX_PROFILES:
+        errors.append("方案数超过上限 {} 个".format(_profiles_mod.MAX_PROFILES))
+    elif _profiles_mod is not None:
+        for pname, pentry in profs.items():
+            if not _profiles_mod.normalize_name(pname):
+                errors.append("方案名不合法：{!r}".format(pname))
+                continue
+            if not isinstance(pentry, dict):
+                errors.append("方案「{}」的内容必须是对象".format(pname))
+                continue
+            errors.extend("方案「{}」：{}".format(pname, e)
+                          for e in _profiles_mod.validate_values(pentry.get("values") or {}))
+    if not isinstance(cfg.get("active_profile", ""), str):
+        errors.append("active_profile 必须是字符串")
+    if not isinstance(cfg.get("profiles_auto_switch", False), bool):
+        errors.append("profiles_auto_switch 必须是布尔值")
+
     # —— 自动升级字段（v1.3 新增）——
     auto_upd = cfg.get("auto_update_enabled")
     if not isinstance(auto_upd, bool):
@@ -488,7 +517,25 @@ except ImportError as _exc:      # 只可能是「文件没装上」这种情况
 else:
     _METRICS_IMPORT_ERROR = ""
 
+# v2.0.9.0：配置方案模块（B5）—— 同样按「可选模块」对待（见上一条注释）
+try:
+    import profiles as _profiles_mod
+except ImportError as _exc:
+    _profiles_mod = None
+    _PROFILES_IMPORT_ERROR = "{}: {}".format(type(_exc).__name__, _exc)
+else:
+    _PROFILES_IMPORT_ERROR = ""
+
 # _metrics_mod._attach() 在 main() 里调用（只需 log_dir / base_dir / load_config / logger）。
+
+
+# ============================================================
+# 配置方案（v2.0.9.0 / B5）已进 profiles.py
+#   —— 纯逻辑：方案 = 位置相关字段的快照；切换 = 合并进 config.json（先校验后写盘）
+# ============================================================
+import profiles as _profiles_mod
+
+# _profiles_mod._attach() 在 main() 里调用（需要 load_config / save_config / validate_config）。
 
 
 # ============================================================
@@ -660,6 +707,20 @@ def main():
             base_dir=BASE_DIR,
             load_config=_load_config,
         )
+    # 4.7c 配置方案（v2.0.9.0）：读写配置 + 复用同一套 _validate_config
+    if _PROFILES_IMPORT_ERROR:
+        logger.warning("配置方案不可用：profiles 模块导入失败（%s）—— 服务其它功能照常",
+                       _PROFILES_IMPORT_ERROR)
+    if _profiles_mod is not None:
+        _profiles_mod._attach(
+            logger=logger,
+            load_config=_load_config,
+            save_config=_save_config,
+            validate_config=_validate_config,
+        )
+        # 把「按 SSID 自动切方案」挂到协议层（protocol 只认回调，不 import profiles）
+        import protocol as _protocol_mod     # noqa: E402 —— 已在模块顶部导入，这里只为拿模块对象
+        _protocol_mod._set_auto_profile(_profiles_mod.auto_switch)
     # 4.8 把共享状态注入 auto_update 模块（后台线程 / 升级流程需要）
     _auto_update_mod._attach(
         logger=logger,

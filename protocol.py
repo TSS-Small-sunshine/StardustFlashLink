@@ -52,6 +52,7 @@ _reset_backoff = None
 _backoff_until = None
 _now_iso = None
 _STOP_EVENT = None
+_auto_profile = None      # v2.0.9.0（B5）：按 SSID 自动切配置方案的回调（可空）
 
 
 def _attach(*,
@@ -97,6 +98,15 @@ def _attach(*,
     _backoff_until = backoff_until
     _now_iso = now_iso
     _STOP_EVENT = stop_event
+
+
+def _set_auto_profile(fn):
+    """v2.0.9.0（B5）：注入「按当前 Wi-Fi 名自动切换配置方案」的回调。
+
+    协议层只认这个回调（不 import profiles）；回调返回切到的方案名或空串。
+    """
+    global _auto_profile
+    _auto_profile = fn
 
 
 def _log(msg, *args, level=logging.INFO):
@@ -383,6 +393,18 @@ def run_once(reason):
             # 1.5 网络位置守卫（v2.0.5.0）：不在校园网就跳过本次，省掉无谓的认证请求。
             # 注意：这里**不算失败**，所以不调 _set_backoff（不会拉长退避）。
             _ssid = get_current_ssid()
+            # v2.0.9.0（B5）：先按当前 Wi-Fi 名看看要不要自动切方案 ——
+            # **必须在守卫判定之前**，否则这次检查还按旧方案的白名单走 ✗。
+            # 切完要重载 cfg（方案改的就是 host/interval/守卫这几个键）。
+            if _auto_profile is not None and _ssid:
+                try:
+                    _switched = _auto_profile(_ssid)
+                except Exception as exc:      # noqa: BLE001 —— 自动切换失败不该影响这次检查
+                    _log("自动切换配置方案失败：%r", exc, level=logging.WARNING)
+                    _switched = ""
+                if _switched:
+                    _log("已按当前 Wi-Fi（%s）自动切换到配置方案「%s」", _ssid, _switched)
+                    cfg = _load_config()
             _ips = get_local_ips()
             _allowed, _why = guard_allows(cfg, _ssid, _ips)
             _set_state(current_ssid=_ssid, guard_allowed=_allowed)
