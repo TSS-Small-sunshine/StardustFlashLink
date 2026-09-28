@@ -5,6 +5,52 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.0.8.1 (hotfix) — 2026-09-28 · 代号 `Sirius`（天狼星）
+
+> **如果你是 v2.0.8.0 的用户且 Web UI（`http://127.0.0.1:8848`）打不开、托盘提示「服务未响应」**：
+> 直接**重新运行 v2.0.8.1 安装包**即可恢复 —— 它会停服务、补齐文件、再启动服务，配置与密码都不动。
+
+### 🔴 紧急修复：安装器中途回滚 → 安装变「一半新一半旧」
+v2.0.8.0 装到一半就中止并回滚了 ✗，`logs/installer-silent.log` 原文：
+
+```
+09:25:48.922  DeleteFile: The existing file appears to be in use (5). Retrying.
+09:25:52.969  D:\...\python\libcrypto-3.dll  拒绝访问 → User canceled the installation process.
+09:25:52.969  Rolling back changes.
+09:25:52.971  Deleting file: D:\...\metrics.py        ← 本次新加的模块被回滚删掉
+```
+
+`logs/service_stderr.log`：`ModuleNotFoundError: No module named 'metrics'` → 服务主进程秒退，
+而 nssm 配的是 `AppExit=Ignore`（不自动重启 ✗）→ **Web UI 端口整个消失** ✗。
+
+**根因链**：
+1. 托盘进程由 `{app}\python\pythonw.exe` 启动，它 `import urllib.request → ssl`，
+   因此**锁住**了 `{app}\python\libcrypto-3.dll`；
+2. 安装器要替换这个 DLL ✗ → 被占用 → 重试 5 秒仍然失败；
+3. 静默安装（`/VERYSILENT`）遇到这种冲突默认 **Abort** ✗ → **回滚**；
+4. 回滚只删「本次新装的文件」→ 新增的 `metrics.py` 被删 ✗，
+   而 `联网_service.py` / `version.py` 已经换成新版 ✗ → 半新半旧 ✗；
+5. 新服务在 **import 期**就崩 ✗ → 端口消失 ✗。
+
+**两条腿修掉**：
+
+- **装前请走托盘** ✓：新增 `packaging/stop-tray.ps1`，由 `PrepareToInstall` 在
+  **写任何文件之前**调用（`ExtractTemporaryFile` 取脚本 → PowerShell 执行 ✓）。
+  脚本只杀「命令行里同时含 `tray.py` 与 `{app}`」的 `pythonw.exe` ✓，**绝不按进程名一刀切** ✓
+  （升级期间托盘图标会消失十几秒，随后由安装器重新拉起 ✓）。
+- **服务侧可选模块降级** ✓：`import metrics` 包进 `try/except ImportError` ✓ ——
+  缺文件时只记一行 WARNING、面板显示空白，**登录与 Web UI 照常工作** ✓✓。
+
+### 🛡 新增守卫（这一类问题以后靠 CI 拦）
+- **打包完整性** ✓：`_smoke_static.py` 把 `联网_service.py` 里 `import` 的本地模块与
+  `setup.iss` 的 `Source: "..\X.py"` 清单**逐一比对**，漏一个就判失败 ✓
+  （本次的 bug 恰好就是这个 ✓）；
+- 装前请走托盘的接线（`dontcopy` + `ExtractTemporaryFile` + `PrepareToInstall` + 脚本过滤条件）✓。
+
+### 🧪 自检
+`compileall` ✓ · `_smoke_static.py` **187/187** ✓ · `_smoke_http.py` **18/18** ✓ ·
+`ISCC packaging/setup.iss` **Verification successful** ✓（新增 Pascal 代码编译通过 ✓）。
+
 ## v2.0.8.0 (feature) — 2026-09-28 · 代号 `Sirius`（天狼星）
 
 > 「最近网络到底稳不稳？」以前只能自己翻日志。这一版把它做成一块面板 ——

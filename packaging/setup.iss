@@ -1,14 +1,14 @@
 ﻿; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.0.8.0
+;   版本: v2.0.8.1
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.0.8.0.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.0.8.1.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.8.0"
+  #define MyAppVersion "2.0.8.1"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -69,6 +69,8 @@ Source: "..\eula.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\web_api.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\auto_update.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\metrics.py"; DestDir: "{app}"; Flags: ignoreversion
+; v2.0.8.1：装前请走托盘用的小脚本（dontcopy = 只供 ExtractTemporaryFile 取用，不落到 {app}）
+Source: "stop-tray.ps1"; Flags: dontcopy
 ; 托盘小程序（v2.0.6.2）：随登录启动，轮询本机 /api/status 弹断线通知
 Source: "..\tray.py"; DestDir: "{app}"; Flags: ignoreversion
 ; Web UI 品牌图片：服务端 /branding/* 静态路由从这里读取（顶栏 logo + favicon）
@@ -273,7 +275,7 @@ begin
   end;
   Exec(NSSM, 'set DrcomAutoLogin AppDirectory "' + AppDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.8.0）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(NSSM, 'set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.0.8.1）"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin Start SERVICE_AUTO_START', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStdout "' + AppDir + '\logs\service_stdout.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(NSSM, 'set DrcomAutoLogin AppStderr "' + AppDir + '\logs\service_stderr.log"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -337,6 +339,40 @@ end;
 //                   服务不存在，跳过整个分支。
 //   - ssPostInstall: 注册服务、生成启动器、创建快捷方式（原有逻辑不变）。
 // ============================================================
+// ---------------------------------------------------------------
+// v2.0.8.1：安装/升级前把「本安装目录的托盘」请走
+//   托盘是 {app}\python\pythonw.exe 起的进程，import urllib.request → ssl
+//   会**锁定** {app}\python\libcrypto-3.dll 等运行库；Inno 替换这些 DLL 时若被占用，
+//   静默模式默认 Abort → 回滚 → 「一半新一半旧」。
+//   真机实测（2026-09-28，2.0.7.1 → 2.0.8.0）：新 service 已就位、新加的 metrics.py
+//   被回滚删掉 → 服务 import 失败 → Web UI 端口整个没了 ✗。
+//   脚本只杀「命令行里同时含 tray.py 与本安装目录」的 pythonw（见 stop-tray.ps1）。
+// ---------------------------------------------------------------
+function KillTray(): Boolean;
+var
+  ResultCode: Integer;
+  Ps: String;
+begin
+  Result := False;
+  try
+    ExtractTemporaryFile('stop-tray.ps1');
+    Ps := ExpandConstant('{tmp}\stop-tray.ps1');
+    Result := Exec('powershell.exe',
+      '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + Ps + '"' +
+      ' -AppDir "' + ExpandConstant('{app}') + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  except
+    // 任何时候都不许因为「请不走托盘」而中断安装
+  end;
+end;
+
+// 在写任何文件之前执行：托盘一走，{app}\python\*.dll 就没进程占用了
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  KillTray();
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   NSSM: string;
