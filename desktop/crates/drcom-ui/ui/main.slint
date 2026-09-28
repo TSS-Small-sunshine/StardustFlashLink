@@ -16,6 +16,7 @@ export component AppWindow inherits Window {
     in property <string> gateway-line: "…";
     in property <string> account-line: "…";
     in property <string> interval-line: "…";
+    in property <string> interval-note: "空闲时按间隔重试";
     in property <string> data-dir-line: "…";
     in property <string> config-line: "…";
     in property <string> service-line: "…";
@@ -103,7 +104,7 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 label: "自动检查";
                 value: root.interval-line;
-                note: "空闲时按间隔重试";
+                note: root.interval-note;
                 accent-color: Theme.aurora-start;
             }
         }

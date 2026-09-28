@@ -101,7 +101,8 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | 核心行为搬移（M1） | `session::check_once`（在线探测 → 需要时登录，四条路径全有单测）；错误文本强制过脱敏器 ✓ |
 | 网络层 | `net`（CLI 与 GUI 共用；`HttpGet` trait 可在测试里注入假客户端 ✓） |
 | 位置守卫 | `guard` 六条分支与 2.x 逐条对齐（含 fail-open）；`probe` 探 Wi-Fi 名/本机 IP（三平台真实样本做单测 ✓）；`cidr` IPv4+IPv6 ✓ |
-| 方案 / 退避 | `profiles`（先全量校验再写盘、按 Wi-Fi 名自动切换）；`backoff`（5/10/20/40/60 封顶）✓ |
+| 方案 / 退避 | `profiles`（**含 `suffix`**：校内公共场合清空尾缀、宿舍带 `@yd` ✓；先全量校验再写盘；`adapt` 按 Wi-Fi 名自动切）；`backoff`（5/10/20/40/60 封顶）✓ |
+| 方案入口 | CLI `profile list/save/activate/delete/auto` —— 不用手改 `config.json` ✓（`--no-suffix` 规避 PowerShell 吃掉空参数的坑 ✗） |
 | 调度 / 日志 | `scheduler`（退避优先、`next_check_at` 单写者、改间隔不跳倒计时）；`logfile`（业务 5 MB×3 / 升级 2 MB×2，读取最旧→最新）；`timefmt`（零依赖 UTC + 中文时长）✓ |
 | 守护循环 | CLI `run [--once]`：每轮重读配置 → 守卫 → 检查 → 写日志 → 按退避排下一次 ✓（服务化在 M3） |
 | **桌面界面（M2）** | **Slint 原生控件，零 WebView** ✓：深色星尘渐变 + 玻璃卡片 + 品牌色（`#0071e3` / `#2AA8FF→#3DDC97`）；4 个操作（立即检查 / 运行自检 / 打开数据目录 / 刷新状态）；账号在界面上脱敏显示 ✓ |

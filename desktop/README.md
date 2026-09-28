@@ -24,7 +24,30 @@ cargo run -p drcom-cli -- selfcheck    # 内置自检（行为级，和 2.x 的 
 cargo run -p drcom-cli -- status       # 状态 JSON（与本地 API 同一份数据）
 cargo run -p drcom-cli -- serve        # 起本地控制 API（http://127.0.0.1:8848）
 cargo run -p drcom-cli -- login --dry-run   # 只打印「脱敏后的」登录 URL ✓
+cargo run -p drcom-cli -- run --once        # 跑一次守护循环（含位置自适应 + 写日志）
 ```
+
+### 位置方案：校内公共场合不带运营商尾缀
+
+同一张学号，**校内公共场合**（图书馆/教学楼 Wi-Fi）走校园网**不需要** `@yd`（移动）这类尾缀，
+而宿舍/校外商用宽带通常要带 ✓ —— 用「配置方案 + 按 Wi-Fi 名自动切」搞定：
+
+```bash
+# 1) 宿舍：带移动尾缀
+stardust-flash-link profile save 宿舍 --ssid Dorm-WiFi --suffix @yd
+# 2) 校内公共场合：**清空**尾缀（`--no-suffix` 最稳，见下面「已知坑」）
+stardust-flash-link profile save 校内公共场合 --ssid Campus-WiFi --no-suffix
+# 3) 打开自动切换（走进匹配的 Wi-Fi 就自动切方案）
+stardust-flash-link profile auto on
+# 4) 看看现状
+stardust-flash-link profile list
+stardust-flash-link run --once     # 日志里会写：位置自适应：切到方案「…」（后缀 …）
+```
+
+> ⚠️ **已知坑**：`--suffix ""` 在 PowerShell 里**传不进去**（空参数被吃掉 ✗）——
+> 所以清空后缀请用 `--no-suffix`，或 `--suffix 空` / `suffix none` / `--suffix -` ✓。
+> 忘了这回事也没事：CLI 检测到「写了 `--suffix` 但没值」会**主动提示**你 ✓。
+
 
 ## 目录
 

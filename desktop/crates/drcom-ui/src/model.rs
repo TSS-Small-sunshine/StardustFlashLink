@@ -18,6 +18,7 @@ pub struct Dashboard {
     pub gateway_line: String,
     pub account_line: String,
     pub interval_line: String,
+    pub interval_note: String,
     pub data_dir_line: String,
     pub config_line: String,
     pub service_line: String,
@@ -38,15 +39,15 @@ pub fn collect() -> Dashboard {
         target_line: status.target.clone(),
         portable_line: if status.portable { "便携模式".to_string() } else { "安装模式".to_string() },
         gateway_line: if cfg.host.is_empty() { "（未填）".to_string() } else { cfg.host.clone() },
-        account_line: if cfg.account_configured() {
-            secret::MaskedAccount(&cfg.account).to_string()
-        } else {
-            "未设置".to_string()
-        },
+        account_line: account_display(&cfg),
         interval_line: if cfg.auto_check_enabled {
             format!("每 {} 分钟", cfg.auto_check_interval_min)
         } else {
             "已关闭".to_string()
+        },
+        interval_note: match drcom_core::profiles::active(&cfg) {
+            Some(name) => format!("方案：{}", name),
+            None => "未启用方案".to_string(),
         },
         data_dir_line: shorten(&status.data_dir, 42),
         config_line: if !platform::config_path().exists() {
@@ -87,6 +88,19 @@ pub fn open_data_dir() -> Result<(), String> {
     result.map(|_| ()).map_err(|e| format!("打不开文件管理器：{}", e))
 }
 
+/// 账号在界面上的显示：脱敏 + 后缀（`2023******@yd` / `2023******（校内直连）`）✓
+pub fn account_display(cfg: &Config) -> String {
+    if !cfg.account_configured() {
+        return "未设置".to_string();
+    }
+    let masked = secret::MaskedAccount(&cfg.account).to_string();
+    if cfg.suffix.trim().is_empty() {
+        format!("{}（校内直连）", masked)
+    } else {
+        format!("{}{}", masked, cfg.suffix)
+    }
+}
+
 /// 路径太长就把中间省掉（避免卡片里被截断得看不懂 ✓）。
 pub fn shorten(text: &str, limit: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -101,7 +115,7 @@ pub fn shorten(text: &str, limit: usize) -> String {
 /// 「立即检查」：读配置 + 密码 → 跑一次 [`session::check_once`] → （颜色, 文本）✓
 pub fn run_check() -> (String, String) {
     let cfg_path = platform::config_path();
-    let cfg = match Config::load(&cfg_path) {
+    let mut cfg = match Config::load(&cfg_path) {
         Ok(cfg) => cfg,
         // 配置文件还不存在 = **首次运行的正常状态** ✓ → 给可执行的指引，而不是抛系统错误 ✗
         Err(_) if !cfg_path.exists() => {
@@ -115,6 +129,22 @@ pub fn run_check() -> (String, String) {
         }
         Err(e) => return ("danger".to_string(), e),
     };
+
+    // 位置自适应：Wi-Fi 命中自动方案就切过去（**尾缀一起换** ✓，这就是「校内公共场合不带 @yd」的落地）
+    let mut adapt_note = String::new();
+    let ssid_now = drcom_core::probe::current_ssid();
+    match drcom_core::profiles::adapt(&mut cfg, ssid_now.as_deref()) {
+        Ok(Some(name)) => {
+            let _ = cfg.save(&cfg_path);
+            adapt_note = format!(
+                "位置自适应：已切到方案「{}」（后缀 {}）\n",
+                name,
+                drcom_core::profiles::suffix_label(&cfg.suffix)
+            );
+        }
+        Ok(None) => {}
+        Err(e) => adapt_note = format!("位置自适应失败：{}\n", e),
+    }
     let errors = cfg.validate();
     if !errors.is_empty() {
         return ("danger".to_string(), format!("配置有问题：\n  - {}", errors.join("\n  - ")));
@@ -147,7 +177,8 @@ pub fn run_check() -> (String, String) {
         return (
             "warn".to_string(),
             format!(
-                "{}\n（当前 Wi-Fi: {} · 本机 IP: {}）\n—— 去「设置」里把白名单改对，或关掉网络位置守卫 ✓",
+                "{}{}\n（当前 Wi-Fi: {} · 本机 IP: {}）\n—— 去「设置」里把白名单改对，或关掉网络位置守卫 ✓",
+                adapt_note,
                 verdict.reason,
                 probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
                 if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
@@ -160,7 +191,8 @@ pub fn run_check() -> (String, String) {
     (
         kind.to_string(),
         format!(
-            "{}\n（在线探测: {:?} · 回调: {}）\n—— 3.0 预览版目前只做「一次检查」，常驻后台在 M3 ✓",
+            "{}{}\n（在线探测: {:?} · 回调: {}）\n—— 3.0 预览版目前只做「一次检查」，常驻后台在 M3 ✓",
+            adapt_note,
             report.outcome.summary_cn(),
             report.online,
             report.callback
@@ -221,6 +253,22 @@ mod tests {
     fn account_is_masked_on_screen() {
         // 界面上永远看不到完整账号 ✓
         assert_eq!(secret::MaskedAccount("2023001234").to_string(), "2023******");
+    }
+
+    #[test]
+    fn account_display_shows_the_suffix_that_will_be_used() {
+        let mut cfg = Config::default();
+        cfg.account = "2023001234".to_string();
+        cfg.suffix = "@yd".to_string();
+        assert_eq!(account_display(&cfg), "2023******@yd", "宿舍移动：带尾缀 ✓");
+        cfg.suffix = String::new();
+        assert_eq!(account_display(&cfg), "2023******（校内直连）", "校内公共场合：无尾缀 ✓");
+        cfg.account = String::new();
+        assert_eq!(account_display(&cfg), "未设置");
+        // 任何情况下都不该出现完整账号 ✗
+        let mut cfg = Config::default();
+        cfg.account = "2023001234".to_string();
+        assert!(!account_display(&cfg).contains("2023001234"));
     }
 
     #[test]

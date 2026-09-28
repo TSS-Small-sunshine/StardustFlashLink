@@ -57,6 +57,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("selfcheck") => selfcheck(),
         Some("login") => login(&args[1..]),
         Some("run") => run_loop(&args[1..]),
+        Some("profile") => profile_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -76,6 +77,7 @@ fn print_help() {
          selfcheck                   内置自检\n  \
          login [--dry-run] [--host H] [--account A] [--suffix S] [--password P]\n  \
          run [--once]                守护循环：按配置间隔检查、失败走退避（服务化在 M3）\n  \
+         profile list|save|activate|delete|auto   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -317,7 +319,7 @@ fn run_loop(args: &[String]) -> i32 {
     let mut last_interval = 0u32;
     let mut first = true;
     loop {
-        let cfg = match Config::load(&cfg_path) {
+        let mut cfg = match Config::load(&cfg_path) {
             Ok(cfg) => cfg,
             Err(e) => {
                 eprintln!("{}", e);
@@ -332,6 +334,27 @@ fn run_loop(args: &[String]) -> i32 {
         if cfg.auto_check_interval_min != last_interval {
             scheduler.set_interval(cfg.auto_check_interval_min);
             last_interval = cfg.auto_check_interval_min;
+        }
+
+        // 位置自适应：Wi-Fi 名命中自动方案就切过去（**尾缀一起换** ✓）
+        // 例：走进图书馆 → 「校内公共场合（无尾缀）」；回宿舍 → 「@yd」✓
+        let ssid_now = drcom_core::probe::current_ssid();
+        match drcom_core::profiles::adapt(&mut cfg, ssid_now.as_deref()) {
+            Ok(Some(name)) => {
+                if let Err(e) = cfg.save(&cfg_path) {
+                    eprintln!("切方案后写盘失败：{}", e);
+                }
+                let line = format!(
+                    "{} 位置自适应：切到方案「{}」（后缀 {}）",
+                    timefmt::format_utc(SystemTime::now()),
+                    name,
+                    drcom_core::profiles::suffix_label(&cfg.suffix)
+                );
+                let _ = log_line(&line);
+                println!("{}", line);
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("位置自适应失败：{}", e),
         }
 
         let now = SystemTime::now();
@@ -384,6 +407,157 @@ fn one_check(cfg: &Config) -> (bool, String) {
     (report.outcome.is_ok(), report.outcome.summary_cn())
 }
 
+/// `profile`：方案管理（list / save / activate / delete / auto）。
+///
+/// 这就是「校内公共场合不带 @yd、宿舍带 @yd」的落地入口 —— **不用手改 config.json** ✓：
+/// ```text
+/// # 校内公共场合：无尾缀，走进校园 Wi-Fi 自动切过去
+/// stardust-flash-link profile save 校内公共场合 --ssid Campus-WiFi --suffix ""
+/// # 宿舍：走移动宽带
+/// stardust-flash-link profile save 宿舍       --ssid Dorm-WiFi   --suffix @yd
+/// stardust-flash-link profile auto on
+/// ```
+fn profile_cmd(args: &[String]) -> i32 {
+    const ACTIONS: [&str; 5] = ["list", "save", "activate", "delete", "auto"];
+    let action = args.first().map(String::as_str).unwrap_or("list");
+    // 先校验子命令：这样「写错命令」不必先有配置文件就能给出正确提示 ✓
+    if !ACTIONS.contains(&action) {
+        eprintln!("未知的 profile 子命令：{}（可用：{}）", action, ACTIONS.join(" / "));
+        return 2;
+    }
+    // 需要名字的子命令：**先校验参数**再读配置 —— 否则「还没配置文件」会把用法提示盖掉 ✗
+    if matches!(action, "save" | "activate" | "delete") && args.get(1).is_none() {
+        eprintln!("用法：profile {} <名字>", action);
+        return 2;
+    }
+
+    let cfg_path = platform::config_path();
+    let mut cfg = match Config::load(&cfg_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("{}", e);
+            return 1;
+        }
+    };
+    let persist = |cfg: &Config| -> i32 {
+        match cfg.save(&cfg_path) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("{}", e);
+                1
+            }
+        }
+    };
+    let use_profiles = drcom_core::profiles::list(&cfg);
+
+    match action {
+        "list" => {
+            if use_profiles.is_empty() {
+                println!("还没有方案。示例：");
+                println!("  profile save 校内公共场合 --ssid Campus-WiFi --suffix \"\"");
+                println!("  profile save 宿舍         --ssid Dorm-WiFi   --suffix @yd");
+                println!("  profile auto on");
+                return 0;
+            }
+            let active = drcom_core::profiles::active(&cfg).unwrap_or("");
+            for name in &use_profiles {
+                let mark = if name == active { "  ← 当前" } else { "" };
+                println!("{}{}", drcom_core::profiles::describe(&cfg, name), mark);
+            }
+            println!(
+                "自动切换：{}",
+                if cfg.profiles_auto_switch { "已开启 ✓" } else { "已关闭（方案只在你手动应用时生效）" }
+            );
+            0
+        }
+        "save" => {
+            let name = match args.get(1) {
+                Some(name) => name.clone(),
+                None => {
+                    eprintln!("用法：profile save <名字> [--ssid Wi-Fi名,另一个] [--suffix @yd|空串]");
+                    return 2;
+                }
+            };
+            // `--suffix ""` 是**显式清空**（校内公共场合 ✓）
+            if suffix_flag_without_value(args) {
+                eprintln!(
+                    "提示：`--suffix` 后面没取到值（PowerShell 会把空参数吃掉 ✗）。\n      要清空后缀请用：--suffix 空　或　--no-suffix"
+                );
+            }
+            if let Some(suffix) = suffix_from_args(args) {
+                cfg.suffix = suffix;
+            }
+            let ssids: Vec<String> = take_opt(args, "--ssid").map(|v| vec![v]).unwrap_or_default();
+            match drcom_core::profiles::save_profile(&mut cfg, &name, &ssids) {
+                Ok(saved) => {
+                    println!(
+                        "已保存方案「{}」：后缀 {} · {}",
+                        saved,
+                        drcom_core::profiles::suffix_label(&cfg.suffix),
+                        if ssids.is_empty() { "手动应用".to_string() } else { format!("匹配 {}", ssids.join(", ")) }
+                    );
+                    persist(&cfg)
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    1
+                }
+            }
+        }
+        "activate" => {
+            let name = match args.get(1) {
+                Some(name) => name.clone(),
+                None => {
+                    eprintln!("用法：profile activate <名字>");
+                    return 2;
+                }
+            };
+            match drcom_core::profiles::activate(&mut cfg, &name) {
+                Ok(()) => {
+                    println!(
+                        "已应用方案「{}」：后缀 {}",
+                        name,
+                        drcom_core::profiles::suffix_label(&cfg.suffix)
+                    );
+                    persist(&cfg)
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    1
+                }
+            }
+        }
+        "delete" => {
+            let name = match args.get(1) {
+                Some(name) => name.clone(),
+                None => {
+                    eprintln!("用法：profile delete <名字>");
+                    return 2;
+                }
+            };
+            match drcom_core::profiles::delete(&mut cfg, &name) {
+                Ok(()) => {
+                    println!("已删除方案「{}」（配置值保持不动 ✓）", name);
+                    persist(&cfg)
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    1
+                }
+            }
+        }
+        // auto on / auto off
+        _ => {
+            let on = matches!(args.get(1).map(String::as_str), Some("on") | Some("true") | Some("1"));
+            cfg.profiles_auto_switch = on;
+            println!(
+                "自动切换：{}",
+                if on { "已开启 ✓（走进匹配的 Wi-Fi 就自动切方案）" } else { "已关闭" }
+            );
+            persist(&cfg)
+        }
+    }
+}
 /// 读密码文件：跳过空行与 `#` 注释行，取第一条有效内容 ✓（与 2.x 一致）。
 fn read_password_file() -> String {
     let text = match std::fs::read_to_string(platform::password_path()) {
@@ -403,6 +577,32 @@ fn take_opt(args: &[String], key: &str) -> Option<String> {
     args.get(idx + 1).cloned()
 }
 
+/// 解析「后缀」参数（纯函数，好测 ✓）。
+///
+/// 为什么要专门的函数：**传空字符串在 PowerShell 里会被吃掉** ✗
+/// （`--suffix ""` 到不了子进程 → 用户以为清空了，实际没清 ✗）。
+/// 所以提供三种等价写法：
+///   - `--no-suffix`（最稳 ✓）
+///   - `--suffix none` / `--suffix 空` / `--suffix -`
+///   - `--suffix @yd`（正常赋值 ✓）
+fn suffix_from_args(args: &[String]) -> Option<String> {
+    if args.iter().any(|a| a == "--no-suffix") {
+        return Some(String::new());
+    }
+    let value = take_opt(args, "--suffix")?;
+    let trimmed = value.trim();
+    if matches!(trimmed, "none" | "空" | "无" | "-") {
+        Some(String::new())
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// `--suffix` 出现了但**没取到值**（正是 PowerShell 吃掉空参数的那种情形 ✗）→ 该提示用户 ✓
+fn suffix_flag_without_value(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--suffix") && take_opt(args, "--suffix").is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +616,37 @@ mod tests {
         assert_eq!(take_opt(&args, "--host").as_deref(), Some("172.16.80.3"));
         assert_eq!(take_opt(&args, "--port"), None);
         assert_eq!(take_opt(&args, "--dry-run"), None, "布尔开关不吃下一个参数 ✓");
+    }
+
+    #[test]
+    fn profile_subcommand_rejects_unknown_action_without_needing_config() {
+        // 子命令校验在「读配置」之前 → 写错命令时不需要配置文件也能拿到正确提示 ✓
+        assert_eq!(profile_cmd(&["nope".to_string()]), 2);
+    }
+
+    #[test]
+    fn profile_save_requires_a_name() {
+        assert_eq!(profile_cmd(&["save".to_string()]), 2, "缺名字要给出用法 ✗");
+        assert_eq!(profile_cmd(&["activate".to_string()]), 2);
+        assert_eq!(profile_cmd(&["delete".to_string()]), 2);
+    }
+
+    #[test]
+    fn suffix_flag_handles_the_powershell_empty_arg_trap() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // 正常赋值 ✓
+        assert_eq!(suffix_from_args(&s(&["save", "宿舍", "--suffix", "@yd"])), Some("@yd".into()));
+        // 显式清空：三种等价写法 ✓
+        assert_eq!(suffix_from_args(&s(&["save", "校内", "--no-suffix"])), Some(String::new()));
+        assert_eq!(suffix_from_args(&s(&["save", "校内", "--suffix", "空"])), Some(String::new()));
+        assert_eq!(suffix_from_args(&s(&["save", "校内", "--suffix", "none"])), Some(String::new()));
+        assert_eq!(suffix_from_args(&s(&["save", "校内", "--suffix", "-"])), Some(String::new()));
+        // 没写 = 不动（None ✓）
+        assert_eq!(suffix_from_args(&s(&["save", "校内", "--ssid", "X"])), None);
+        // 「写了但没值」= PowerShell 吃掉空参数的情形 ✗ → 要能识别出来并提示 ✓
+        assert!(suffix_flag_without_value(&s(&["save", "校内", "--suffix"])));
+        assert!(!suffix_flag_without_value(&s(&["save", "校内", "--suffix", "空"])));
+        assert!(!suffix_flag_without_value(&s(&["save", "校内", "--no-suffix"])));
     }
 
     #[test]

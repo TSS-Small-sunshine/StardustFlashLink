@@ -77,6 +77,7 @@ fn apply(ui: &AppWindow, dash: &model::Dashboard) {
     ui.set_gateway_line(SharedString::from(dash.gateway_line.as_str()));
     ui.set_account_line(SharedString::from(dash.account_line.as_str()));
     ui.set_interval_line(SharedString::from(dash.interval_line.as_str()));
+    ui.set_interval_note(SharedString::from(dash.interval_note.as_str()));
     ui.set_data_dir_line(SharedString::from(dash.data_dir_line.as_str()));
     ui.set_config_line(SharedString::from(dash.config_line.as_str()));
     ui.set_service_line(SharedString::from(dash.service_line.as_str()));
