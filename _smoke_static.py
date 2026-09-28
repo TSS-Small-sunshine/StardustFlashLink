@@ -5,6 +5,7 @@
 隐私守卫：想连真机安装目录一起查，先设 DRCOM_DATA_DIR（见文末「隐私守卫」）。
 """
 import pathlib
+import re
 import sys
 import tempfile
 import os
@@ -390,6 +391,34 @@ check("v2.0.8.0 空输入 / 非法 days 不炸",
       _mx.summarize([], 1000, days=7)["checks"] == 0
       and _mx.summarize([], 1000, days="abc")["days"] == 7)
 
+# ---- v2.0.8.1：安装器中止回滚 → 「半新半旧」→ 服务起不来（真机 2026-09-28 实测）----
+# installer-silent.log：
+#   09:25:48.922  DeleteFile: The existing file appears to be in use (5). Retrying.
+#   09:25:52.969  ...python\libcrypto-3.dll 拒绝访问 → User canceled the installation process.
+#   09:25:52.969  Rolling back changes.  /  09:25:52.971  Deleting file: ...\metrics.py
+# service_stderr.log: ModuleNotFoundError: No module named 'metrics'
+#   → 服务主进程秒退（nssm AppExit=Ignore 不重启）→ Web UI 端口整个消失 ✗
+# 根因：托盘进程（{app}\python\pythonw.exe）import urllib→ssl 锁住了 libcrypto-3.dll，
+#       Inno 替换 DLL 失败后静默 Abort → 回滚，却留下「一半新一半旧」。
+_iss_py_sources = set(re.findall(r'Source:\s*"\.\.\\([A-Za-z_][A-Za-z0-9_]*\.py)"', _iss_src))
+_local_imports = set(re.findall(r'^(?:import|from)\s+([a-z_][a-z0-9_]*)\b', src_svc, re.M))
+_missing_pack = sorted(m for m in _local_imports
+                       if os.path.isfile(m + ".py") and (m + ".py") not in _iss_py_sources)
+check("v2.0.8.1 打包完整性：服务 import 的本地模块全部在 setup.iss 里",
+      not _missing_pack, "漏: %s（已打包: %s）" % (_missing_pack, sorted(_iss_py_sources)))
+check("v2.0.8.1 可选模块导入带降级（缺文件也不许服务崩）",
+      "except ImportError as _exc:" in src_svc and "_METRICS_IMPORT_ERROR" in src_svc
+      and "if _metrics_mod is not None:" in src_svc)
+_ptray_src = pathlib.Path("packaging/stop-tray.ps1").read_text(encoding="utf-8")
+check("v2.0.8.1 装前请走托盘：脚本在位 + dontcopy + ExtractTemporaryFile + PrepareToInstall",
+      "Source: \"stop-tray.ps1\"; Flags: dontcopy" in _iss_src
+      and "ExtractTemporaryFile('stop-tray.ps1')" in _iss_src
+      and "function PrepareToInstall(" in _iss_src
+      and "function KillTray(" in _iss_src)
+check("v2.0.8.1 请托盘脚本只按「tray.py + 安装目录」匹配（不误伤别的 pythonw）",
+      "$AppDir" in _ptray_src and "Name='pythonw.exe'" in _ptray_src
+      and "-like '*tray.py*'" in _ptray_src and "exit 0" in _ptray_src)
+
 # ---- v2.0.4.1：修 PWD_LOCK 自锁死锁（api_get_config 套了两层不可重入锁）----
 _apicfg = src_web.split("def api_get_config()")[1].split("def api_post_config")[0]
 # 只看代码行：注释里出现 "with PWD_LOCK" 不算（注释正是用来解释这条约定的）
@@ -641,7 +670,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.8.0", version.VERSION == "2.0.8.0", version.VERSION)
+check("版本 = 2.0.8.1", version.VERSION == "2.0.8.1", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
