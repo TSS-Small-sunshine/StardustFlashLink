@@ -6,16 +6,23 @@
 //!   - **纯函数优先**：协议拼装、解析、脱敏、校验都是纯函数 → 单元测试就能覆盖 ✓；
 //!   - **与 2.x 契约一致**：配置键名、API 路由、账号/密码文件格式都不变，老用户零迁移 ✓。
 
+pub mod backoff;
 pub mod channel;
+pub mod cidr;
 pub mod config;
+pub mod guard;
 pub mod net;
 pub mod platform;
+pub mod probe;
+pub mod profiles;
 pub mod protocol;
 pub mod secret;
 pub mod session;
 
+pub use backoff::{Backoff, BACKOFF_LEVELS_MIN};
 pub use channel::{Channel, Version};
 pub use config::{Config, UpdateChannel};
+pub use guard::{guard_allows, GuardResult};
 pub use protocol::{LoginReply, LoginRequest, OnlineState, ParseError};
 pub use session::{Outcome, RunReport};
 

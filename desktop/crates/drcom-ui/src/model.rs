@@ -140,6 +140,21 @@ pub fn run_check() -> (String, String) {
         );
     }
 
+    // 网络位置守卫：不在校园网就不白跑一次认证 ✓（读不到 Wi-Fi/IP 时 fail-open ✓）
+    let probe = drcom_core::probe::snapshot();
+    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
+    if !verdict.allowed {
+        return (
+            "warn".to_string(),
+            format!(
+                "{}\n（当前 Wi-Fi: {} · 本机 IP: {}）\n—— 去「设置」里把白名单改对，或关掉网络位置守卫 ✓",
+                verdict.reason,
+                probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
+                if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
+            ),
+        );
+    }
+
     let report = session::check_once(&cfg, &password, &PlainHttp, TIMEOUT);
     let kind = if report.outcome.is_ok() { "ok" } else { "danger" };
     (

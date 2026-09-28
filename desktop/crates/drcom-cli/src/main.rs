@@ -227,6 +227,19 @@ fn login(args: &[String]) -> i32 {
         eprintln!("配置有问题：\n  - {}", errors.join("\n  - "));
         return 1;
     }
+    // —— 网络位置守卫（2.x v2.0.6.2 的功能）：不在校园网就别白跑认证 ✓ ——
+    let probe = drcom_core::probe::snapshot();
+    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
+    if !verdict.allowed {
+        println!("跳过本次检查：{}", verdict.reason);
+        println!(
+            "（当前 Wi-Fi: {} · 本机 IP: {}）",
+            probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
+            if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
+        );
+        return 0;
+    }
+
     let ip = net::local_ip_towards(&cfg.host, cfg.port).unwrap_or_default();
     let req = protocol::LoginRequest {
         host: &cfg.host,

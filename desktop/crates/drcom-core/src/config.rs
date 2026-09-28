@@ -47,7 +47,11 @@ impl From<Channel> for UpdateChannel {
 }
 
 /// 应用配置（字段名 = 2.x `config.json` 的键名 ✓）。
+///
+/// `#[serde(default)]`（**结构级**）是关键：任何缺失字段都退回 [`Config::default`]，
+/// 也就是 2.x 的默认值 —— 这样「老配置 / 手写配置 / 只写几个键」都能读 ✓。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub host: String,
     pub port: u16,
@@ -193,17 +197,9 @@ fn join_numbers(values: &[u32]) -> String {
     values.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(" / ")
 }
 
-/// 极简 CIDR 形状检查（真正的网段判断由守卫逻辑在网络层做 ✓）。
+/// 极简 CIDR 形状检查（真正的网段判断由 [`crate::cidr`] 负责 ✓；这里只做「写没写对形状」）。
 pub fn looks_like_cidr(value: &str) -> bool {
-    let (addr, prefix) = match value.split_once('/') {
-        Some(pair) => pair,
-        None => return false,
-    };
-    let octets: Vec<&str> = addr.split('.').collect();
-    if octets.len() != 4 || !octets.iter().all(|o| o.parse::<u8>().is_ok()) {
-        return false;
-    }
-    matches!(prefix.parse::<u8>(), Ok(p) if p <= 32)
+    crate::cidr::parse_cidr(value).is_some()
 }
 
 /// 逗号分隔（中英文逗号都认，去空白、去空项）—— 与 2.x `_split_csv` 行为一致 ✓。
@@ -214,4 +210,110 @@ pub fn split_csv(value: &str) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_json_uses_defaults_instead_of_failing() {
+        // 只写几个键也必须能读（老配置 / 手写配置 / 我上面那步 end-to-end 就踩了这个 ✗）
+        let cfg = Config::from_json("{\"host\":\"1.2.3.4\"}").expect("缺字段不该报错");
+        assert_eq!(cfg.host, "1.2.3.4");
+        assert_eq!(cfg.port, Config::default().port);
+        assert_eq!(cfg.ui_port, 8848);
+        assert!(cfg.auto_check_enabled, "默认值来自 Config::default ✓");
+        assert_eq!(cfg.update_channel, UpdateChannel::Release);
+        // 空对象 / 两个花括号也要行 ✓
+        assert_eq!(Config::from_json("{}").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn unknown_fields_are_preserved_on_round_trip() {
+        let text = "{\"host\":\"172.16.80.3\",\"future_field\":{\"a\":1},\"another\":7}";
+        let cfg = Config::from_json(text).expect("未知字段不该导致解析失败");
+        assert!(cfg.extra.contains_key("future_field"), "未知字段要留着 ✓");
+        let out = cfg.to_json().unwrap();
+        assert!(out.contains("future_field"), "写回时不能把未知字段丢掉 ✗: {}", out);
+        assert!(out.contains("another"));
+        // 再解析一次还是同一个对象 ✓
+        assert_eq!(Config::from_json(&out).unwrap(), cfg);
+    }
+
+    #[test]
+    fn defaults_match_v2_exactly() {
+        let cfg = Config::default();
+        assert_eq!(cfg.host, "172.16.80.3");
+        assert_eq!(cfg.port, 80);
+        assert_eq!(cfg.auto_check_interval_min, 30);
+        assert_eq!(cfg.network_wait_timeout_sec, 60);
+        assert_eq!(cfg.ui_port, 8848);
+        assert!(!cfg.auto_update_enabled, "2.x 里升级默认关 ✓");
+        assert_eq!(cfg.update_check_interval_hours, 6);
+        assert_eq!(cfg.update_min_free_disk_mb, 200);
+        assert!(!cfg.network_guard_enabled, "守卫默认关 ✓");
+        assert!(!cfg.profiles_auto_switch, "自动切换方案默认关 ✓");
+    }
+
+    #[test]
+    fn validation_reports_all_problems_at_once() {
+        let mut cfg = Config::default();
+        cfg.host = String::new();
+        cfg.suffix = "@xx".to_string();
+        cfg.auto_check_interval_min = 7;
+        cfg.ui_port = 80;
+        cfg.update_check_interval_hours = 5;
+        cfg.guard_allowed_subnets = "172.16.0.0/12, 不是网段".to_string();
+        let errors = cfg.validate();
+        assert!(errors.len() >= 5, "一次全报 ✓: {:?}", errors);
+        assert!(errors.iter().any(|e| e.contains("网关")));
+        assert!(errors.iter().any(|e| e.contains("后缀")));
+        assert!(errors.iter().any(|e| e.contains("间隔")));
+        assert!(errors.iter().any(|e| e.contains("端口")));
+        assert!(errors.iter().any(|e| e.contains("网段")));
+    }
+
+    #[test]
+    fn empty_account_is_ok_but_non_digits_are_not() {
+        let mut cfg = Config::default();
+        cfg.account = String::new();
+        assert!(cfg.validate().is_empty(), "空账号可保存（P1-7 ✓）");
+        assert!(!cfg.account_configured());
+        cfg.account = "2023001234".to_string();
+        assert!(cfg.validate().is_empty());
+        assert!(cfg.account_configured());
+        cfg.account = "abc123".to_string();
+        assert!(cfg.validate().iter().any(|e| e.contains("数字")));
+    }
+
+    #[test]
+    fn split_csv_accepts_both_commas_and_trim() {
+        assert_eq!(split_csv("a, b ，c ,, "), vec!["a", "b", "c"]);
+        assert!(split_csv("   ").is_empty());
+        assert_eq!(split_csv("Campus-WiFi"), vec!["Campus-WiFi"]);
+    }
+
+    #[test]
+    fn save_and_load_round_trip_in_temp_dir() {
+        let dir = std::env::temp_dir().join(format!("sfl-cfg-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let mut cfg = Config::default();
+        cfg.host = "10.20.30.40".to_string();
+        cfg.extra.insert("keep_me".to_string(), serde_json::json!("yes"));
+        cfg.save(&path).expect("写盘");
+        let back = Config::load(&path).expect("读回");
+        assert_eq!(back, cfg);
+        assert!(path.with_extension("json.tmp").exists() == false, "临时文件要改掉 ✗");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn looks_like_cidr_uses_the_real_parser() {
+        assert!(looks_like_cidr("172.16.0.0/12"));
+        assert!(looks_like_cidr("fd00::/8"));
+        assert!(!looks_like_cidr("172.16.0.0"));
+        assert!(!looks_like_cidr("172.16.0.0/33"));
+        assert!(!looks_like_cidr("不是网段"));
+    }
 }
