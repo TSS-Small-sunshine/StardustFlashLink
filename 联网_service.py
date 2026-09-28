@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.13.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.0.14.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -278,8 +278,13 @@ def _validate_config(cfg):
         errors.append("port 必须是 1-65535 之间的整数")
 
     account = cfg.get("account")
-    if not isinstance(account, str) or not account.isdigit():
-        errors.append("account 必须是数字字符串")
+    # v2.0.14.0（P1-7）：**允许留空** —— 新装机还没填账号时，用户仍该能改「自动升级」这类
+    # 与账号无关的开关（旧行为要求 account.isdigit()，于是**整个配置保存被挡住** ✗）；
+    # 非空时仍必须是纯数字 ✓（协议层遇到空账号会跳过登录并提示，见 protocol.run_once）
+    if not isinstance(account, str):
+        errors.append("account 必须是字符串（可留空）")
+    elif account and not account.isdigit():
+        errors.append("account 必须是数字字符串（或留空）")
 
     suffix = cfg.get("suffix")
     if suffix not in ALLOWED_SUFFIXES:
@@ -569,52 +574,68 @@ def _startup_trigger():
         logger.exception("startup trigger 未捕获异常: %s", exc)
 
 
+# v2.0.14.0（P3-2）：周期自检循环体抛异常后的冷却时间（测试里会临时调小）
+PERIODIC_ERROR_BACKOFF_SEC = 60
+
+
 def run_periodic():
-    """周期自检：尊重 auto_check_enabled 与 BACKOFF.until。"""
+    """周期自检：尊重 auto_check_enabled 与 BACKOFF.until。
+
+    v2.0.14.0（P3-2）：循环体包一层兜底 —— 旧行为里 `_load_config()` 抛异常、
+    或 `run_once()` 冒出未捕获异常，都会**直接杀掉这个线程** ✗：此后用户再也不会被
+    自动登录，界面上也没有任何提示（日志里只有一行 traceback）。
+    现在记一条 ERROR（带 traceback）+ 停 60 秒继续 —— 线程必须活着 ✓，也不刷屏 ✓。
+    """
     logger.info("周期自检线程启动")
     while not STOP_EVENT.is_set():
-        cfg = _load_config()
-        if not cfg.get("auto_check_enabled", True):
-            logger.info("auto_check_enabled=False，30s 后重新检查开关")
-            if STOP_EVENT.wait(30):
+        try:
+            cfg = _load_config()
+            if not cfg.get("auto_check_enabled", True):
+                logger.info("auto_check_enabled=False，30s 后重新检查开关")
+                if STOP_EVENT.wait(30):
+                    return
+                continue
+
+            interval_sec = int(cfg.get("auto_check_interval_min") or 30) * 60
+
+            # 计算 wait_sec：取 interval 与剩余退避时间的较小者。
+            # 历史 bug（v2.0.2 修复）：原代码写 max(interval, delta)，导致
+            #   - 开机早期网络未稳 → _startup_trigger 触发 run_once → wait_network 失败 → 5min 退避
+            #   - run_periodic 第一次循环读 BACKOFF.until 后仍按 max 算出 30min interval
+            #   - 用户感知：自启动后 30+ 分钟内没有任何登录尝试
+            # 正确语义：退避已到期（delta<=0）→ 立即重试；否则取 min(interval, delta) 让退避生效
+            bu = _backoff_until()
+            wait_sec = interval_sec
+            if bu:
+                try:
+                    bu_dt = datetime.fromisoformat(bu)
+                    delta = (bu_dt - datetime.now()).total_seconds()
+                    if delta <= 0:
+                        # 退避到期：立即触发一次 run_once（不等 interval）
+                        wait_sec = 0
+                    elif delta < interval_sec:
+                        # 退避 < interval：服从退避（按 delta 比 interval 大 → max 写法的旧 bug）
+                        wait_sec = delta
+                    # else: delta >= interval → 保持 interval（合理：周期性不能比 interval 还短）
+                except ValueError:
+                    pass
+
+            # 写 next_check_at 用于 UI 显示
+            with STATE_LOCK:
+                STATE["next_check_at"] = (
+                    datetime.now() + timedelta(seconds=wait_sec)
+                ).isoformat(timespec="seconds")
+
+            # 中断等待
+            if STOP_EVENT.wait(wait_sec):
                 return
-            continue
 
-        interval_sec = cfg["auto_check_interval_min"] * 60
-
-        # 计算 wait_sec：取 interval 与剩余退避时间的较小者。
-        # 历史 bug（v2.0.2 修复）：原代码写 max(interval, delta)，导致
-        #   - 开机早期网络未稳 → _startup_trigger 触发 run_once → wait_network 失败 → 5min 退避
-        #   - run_periodic 第一次循环读 BACKOFF.until 后仍按 max 算出 30min interval
-        #   - 用户感知：自启动后 30+ 分钟内没有任何登录尝试
-        # 正确语义：退避已到期（delta<=0）→ 立即重试；否则取 min(interval, delta) 让退避生效
-        bu = _backoff_until()
-        wait_sec = interval_sec
-        if bu:
-            try:
-                bu_dt = datetime.fromisoformat(bu)
-                delta = (bu_dt - datetime.now()).total_seconds()
-                if delta <= 0:
-                    # 退避到期：立即触发一次 run_once（不等 interval）
-                    wait_sec = 0
-                elif delta < interval_sec:
-                    # 退避 < interval：服从退避（按 delta 比 interval 大 → max 写法的旧 bug）
-                    wait_sec = delta
-                # else: delta >= interval → 保持 interval（合理：周期性不能比 interval 还短）
-            except ValueError:
-                pass
-
-        # 写 next_check_at 用于 UI 显示
-        with STATE_LOCK:
-            STATE["next_check_at"] = (
-                datetime.now() + timedelta(seconds=wait_sec)
-            ).isoformat(timespec="seconds")
-
-        # 中断等待
-        if STOP_EVENT.wait(wait_sec):
-            return
-
-        run_once("periodic")
+            run_once("periodic")
+        except Exception as exc:  # noqa: BLE001  周期线程绝不能死：停一会儿再来
+            logger.exception("周期自检循环异常（线程继续活着，%s 秒后重试）: %s",
+                             PERIODIC_ERROR_BACKOFF_SEC, exc)
+            if STOP_EVENT.wait(PERIODIC_ERROR_BACKOFF_SEC):
+                return
 
 
 
