@@ -376,6 +376,11 @@ def api_get_update_status():
 
 def api_post_update_check(payload):
     """POST /api/update/check — 立即触发一次 GitHub 检查（不等后台线程）。"""
+    # v2.0.6.3：先看有没有任务在跑 —— 否则后台线程会被 _acquire_update_lock 挡掉，
+    # 而 HTTP 早已回了「已提交检查任务」，用户看到成功、实际什么都没发生（假成功）
+    _busy = _auto_update_mod.update_busy_message()
+    if _busy:
+        return 409, {"ok": False, "error": "任务进行中（{}），请稍候再试".format(_busy)}
     # 异步执行，避免阻塞 HTTP 响应
     # P0-1：解耦后跨模块调用必须走 _auto_update_mod（原裸名 _do_check_now 会 NameError）
     def _runner():
@@ -389,6 +394,10 @@ def api_post_update_check(payload):
 
 def api_post_update_install(payload):
     """POST /api/update/install — 立即开始升级。"""
+    # v2.0.6.3：同上 —— 升级锁被占时直接说清「谁在跑」，不再先回「已提交」再静默丢弃
+    _busy = _auto_update_mod.update_busy_message()
+    if _busy:
+        return 409, {"ok": False, "error": "任务进行中（{}），请稍候再试".format(_busy)}
     # 异步执行完整升级流程（耗时较长，HTTP 先返回）
     # P0-1：同上，_do_update_now / _log_upgrade / _set_update_state 全走 _auto_update_mod
     def _runner():

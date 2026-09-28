@@ -331,6 +331,73 @@ _th.join(3)
 check("v2.0.4.1 api_get_config 3 秒内返回（不再死锁）", "r" in _box, repr(_box.get("e", "")))
 check("v2.0.4.1 api_get_config 返回 password_status", _box.get("r", {}).get("password_status") in ("set", "missing"))
 
+# ---- v2.0.6.3：升级接口不再「假成功」（真机验证 v2.0.6.2 时踩到）----
+# 现象：先点「立即检查更新」、紧接着点「立即升级」，第二个请求被 _acquire_update_lock
+# 挡掉，但 HTTP 早已回了 {"ok": true, "已提交升级任务"} —— 用户以为点了没反应。
+# 断言：忙 → 409 + 真话（且不白启后台线程）；空闲 → 仍走原来的异步成功路径。
+_au.UPDATE_LOCK = _threading.Lock()   # 平时由 _attach() 注入（同上面 _au.BASE_DIR 的处理）
+_au.STATE = {}
+_au.STATE_LOCK = _threading.Lock()
+check("v2.0.6.3 空闲时不忙", _au.is_update_busy() is False)
+check("v2.0.6.3 空闲时不报忙原因", _au.update_busy_message() == "")
+_au._acquire_update_lock()
+check("v2.0.6.3 任务在跑 → 忙", _au.is_update_busy() is True)
+check("v2.0.6.3 忙原因取当前进度文案", "准备升级" in _au.update_busy_message())
+_au._release_update_lock()
+_au._set_update_state(update_state="error", update_progress_message="下载失败：xxx")
+check("v2.0.6.3 锁一放就算空闲（状态残值不得把接口锁死）",
+      _au.is_update_busy() is False and _au.update_busy_message() == "")
+
+
+class _FakeUpdateMod(object):
+    """替身：只验 Web 层「先探再回车」的顺序，不碰网络。"""
+
+    def __init__(self, busy=""):
+        self.busy = busy
+        self.called = []
+        self.evt = _threading.Event()
+
+    def update_busy_message(self):
+        return self.busy
+
+    def _do_check_now(self):
+        self.called.append("check")
+
+    def _do_update_now(self):
+        self.called.append("install")
+        self.evt.set()
+
+    def _log_upgrade(self, *a, **k):
+        pass
+
+    def _set_update_state(self, **k):
+        pass
+
+
+_saved_au_mod = getattr(_wa, "_auto_update_mod", None)
+_wa._auto_update_mod = _FakeUpdateMod("检查 GitHub 最新版本...")
+_st_c, _body_c = _wa.api_post_update_check({})
+check("v2.0.6.3 忙时 check 回 409（不再假成功）",
+      _st_c == 409 and _body_c.get("ok") is False and "任务进行中" in _body_c.get("error", ""),
+      repr((_st_c, _body_c)))
+_st_i, _body_i = _wa.api_post_update_install({})
+check("v2.0.6.3 忙时 install 回 409 + 真话（带当前进度）",
+      _st_i == 409 and _body_i.get("ok") is False
+      and "检查 GitHub 最新版本" in _body_i.get("error", ""), repr((_st_i, _body_i)))
+check("v2.0.6.3 忙时不启后台线程（没白跑一次检查/升级）",
+      _wa._auto_update_mod.called == [])
+
+_wa._auto_update_mod = _FakeUpdateMod("")
+_st_i, _body_i = _wa.api_post_update_install({})
+_ran = _wa._auto_update_mod.evt.wait(2)
+check("v2.0.6.3 空闲时 install 仍回 200「已提交升级任务」并真的开跑",
+      _st_i == 200 and _body_i.get("message") == "已提交升级任务"
+      and _ran and _wa._auto_update_mod.called == ["install"], repr((_st_i, _body_i)))
+if _saved_au_mod is None:
+    del _wa._auto_update_mod
+else:
+    _wa._auto_update_mod = _saved_au_mod
+
 # ---- v2.0.4.2：自动升级执行器（任务计划程序 + 看门狗 + 退出码）----
 # 真机证据：installer 直启时 nssm 一停服务就把它连同 Job 一起杀掉 →
 # installer-silent.log 都没生成、版本号不变、服务停在 StopPending。
@@ -480,7 +547,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.6.2", version.VERSION == "2.0.6.2", version.VERSION)
+check("版本 = 2.0.6.3", version.VERSION == "2.0.6.3", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 

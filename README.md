@@ -101,7 +101,7 @@
 
 ## 🏷 项目状态
 
-**当前版本**：`v2.0.6.2 "Sirius"`（天狼星，2026-09-27） · **状态**：🟢 积极维护
+**当前版本**：`v2.0.6.3 "Sirius"`（天狼星，2026-09-28） · **状态**：🟢 积极维护
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -316,7 +316,7 @@ DrcomAutoLogin-Windows/
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.6.2.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.0.6.3.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -450,7 +450,8 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | --- | --- | --- |
 | **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
 | **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
-| **v2.0.6.2（当前）** | `Sirius` 天狼星 | 修**自动升级上来的用户托盘不自启**：从 2.0.4.4 升到 2.0.6.1 后 `HKLM\...\Run` 的启动项没落地 —— 根因是"新任务没法靠旧版本传"（旧版执行器只会传 `/TASKS=desktopicon,startservice`，Inno 就把新加的 `trayicon` 当成未选中 ✗）。改由**服务启动时对齐**：安装器把「是否自启」写进 `HKLM\SOFTWARE\DrcomAutoLogin\TrayAutostart`，服务每次启动据此建/修/删 `Run` 项 —— 任何升级路径都能自愈。 |
+| **v2.0.6.3（当前）** | `Sirius` 天狼星 | 修**升级接口「假成功」**：先点「立即检查更新」、紧接着点「立即升级」时，第二个请求会被升级锁挡掉，但接口一律先回「已提交」✗ —— 用户以为点了没反应。现在两个入口**先探锁再回车**：忙就回 409 + 当前进度（「任务进行中（检查 GitHub 最新版本...），请稍候再试」）且不白启后台线程，空闲才回「已提交」并真的开跑。 |
+| v2.0.6.2 | `Sirius` 天狼星 | 修**自动升级上来的用户托盘不自启**：从 2.0.4.4 升到 2.0.6.1 后 `HKLM\...\Run` 的启动项没落地 —— 根因是"新任务没法靠旧版本传"（旧版执行器只会传 `/TASKS=desktopicon,startservice`，Inno 就把新加的 `trayicon` 当成未选中 ✗）。改由**服务启动时对齐**：安装器把「是否自启」写进 `HKLM\SOFTWARE\DrcomAutoLogin\TrayAutostart`，服务每次启动据此建/修/删 `Run` 项 —— 任何升级路径都能自愈。 |
 | v2.0.6.1 | `Sirius` 天狼星 | 修 B2 的自启漏洞：托盘启动项原挂 `HKCU`，而自动升级以 SYSTEM 身份运行安装器 → 会写进 SYSTEM 的配置单元 ✗。改挂 `HKLM`；另加「安装目录里 `tray.py` 连续两次不在 → 托盘自行退出」，避免卸载后留孤儿图标。 |
 | v2.0.6.0 | `Sirius` 天狼星 | 新增**托盘小程序 + 断线通知**（B2）：服务跑在 session 0 弹不出通知，所以加了个随登录启动的用户会话小程序 `tray.py`（纯标准库 ctypes 直调 `Shell_NotifyIcon`，无第三方依赖），每 10 秒轮询本机 `/api/status`，掉线 / 恢复 / 服务未响应时弹气泡，右键菜单可「打开配置页 / 立即登录 / 打开日志 / 退出」。安装向导新增「开机自动启动托盘」任务；**真机自检通过**（`tray.py --self-test` 的 `NIM_ADD` 被通知区接受）。 |
 | v2.0.5.0 | `Sirius` 天狼星 | 新增**网络位置守卫**：可配置 Wi-Fi 名（SSID）白名单与网段（CIDR）白名单，只有命中时才执行登录检查 —— 笔记本带回家 / 连热点不再白跑认证请求；默认关闭（`network_guard_enabled`），读不到 Wi-Fi 名时 fail-open 放行。配置页新增开关 + 两个输入框，状态页副标题显示当前 Wi-Fi。接口向后兼容（`PATCH` +1）。 |

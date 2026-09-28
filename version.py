@@ -13,7 +13,7 @@
 `uninstall.bat`、`packaging/build.ps1`、README 与模块 docstring 里的版本必须同步。
 """
 
-VERSION = "2.0.6.2"
+VERSION = "2.0.6.3"
 
 # —— 版本线代号（MAJOR.MINOR 级别；换线必须换名）——
 # 主题：亮星名（中英对照），呼应「星尘闪连」。候选表见 docs/VERSIONING.md。
