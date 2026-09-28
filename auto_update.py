@@ -7,6 +7,8 @@
     - SHA256 校验 + 备份当前服务脚本
     - NSSM 注册表操作（备份 AppExit 等透明升级策略）
     - 后台线程 _auto_update_loop（按 cfg.update_check_interval_hours 周期检查）
+    - 升级执行器 / 看门狗 _build_update_wrapper / _build_health_probe_script
+      （v2.0.10.0：收尾判定从「nssm wrapper 活着」改成「探 HTTP /api/health 能答」）
     - 启动钩子 _post_upgrade_startup（升级完成后清理）
     - 自动升级状态机 _set_update_state / _acquire_update_lock / _release_update_lock
 
@@ -64,6 +66,14 @@ BACKUP_RETENTION_DAYS = 7
 # 于是改成：写一个 .cmd 包装脚本，注册成「一次性 + SYSTEM」计划任务再 /run。
 #   任务由 Task Scheduler 服务托管 → 与 nssm 无 Job 关系 → 服务被停也不连坐。
 #   包装脚本负责：跑 installer → 落盘退出码 → 看门狗拉起服务 → 收尾自删。
+#
+# v2.0.10.0 给包装脚本补了第二只看门狗（两个真机事故的根因，见 CHANGELOG v2.0.9.1）：
+#   `sc query` 说的是 nssm **wrapper** 的状态，而 wrapper 活着 ≠ 里面的 Python 进程活着
+#   （nssm 配的是 AppExit=Ignore：app 崩了它既不重启也不报错）—— 于是 v2.0.8.0
+#   （安装器回滚）与 v2.0.9.0（服务启动即崩）都是「升完才发现」，期间 Web UI 整个消失。
+#   现在判据落在 HTTP 层：能 GET 到 /api/health 且响应 {"ok": true} 才算「服务真的活了」；
+#   探不到就自动「停 + 起」重试一次，并把结论写进 %TEMP%\drcom_apply_update.rc（机器读）
+#   与 logs\upgrade.log（人读 —— 服务真起不来时那是唯一的告警面）。
 # ============================================================
 UPDATE_TASK_NAME = "DrcomAutoLogin-AutoUpdate"
 UPDATE_WRAPPER_NAME = "drcom_apply_update.cmd"
@@ -72,6 +82,21 @@ UPDATE_LOG_NAME = "drcom-installer-silent.log"
 UPDATE_LEFTOVER_STALE_SEC = 5 * 60  # 只清"陈旧"的执行器残留（正在跑的那次绝不碰）
 SCHTASKS_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe")
 SC_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "sc.exe")
+
+# ---- v2.0.10.0：升级看门狗 B —— 探 HTTP /api/health ----
+# 判据：能 GET 到 http://127.0.0.1:<ui_port>/api/health 且响应里 ok 为真。
+# 探针脚本由本模块生成到 %TEMP%，用**随包发的内嵌 python** 跑（不依赖用户装没装 Python、
+# 不依赖 PATH），且不 import 任何项目模块 —— 被升级搞坏的正是那些模块，探针要更「耐活」。
+UPDATE_PROBE_NAME = "drcom_health_probe.py"
+HEALTH_PROBE_HOST = "127.0.0.1"
+HEALTH_PROBE_PATH = "/api/health"
+HEALTH_PROBE_DEFAULT_PORT = 8848
+HEALTH_PROBE_WAIT_SEC = 20          # 首次探测的等待窗口（冷启动：读配置 / 加载密码 / 绑端口）
+HEALTH_PROBE_RETRY_WAIT_SEC = 12    # 「停 + 起」重启之后再给的窗口
+HEALTH_PROBE_INTERVAL_SEC = 1.0
+HEALTH_PROBE_TIMEOUT_SEC = 2.0
+# 随包分发的内嵌解释器（setup.iss 把 python\ 整个拷进 {app}\python）
+EMBEDDED_PYTHON_REL = os.path.join("python", "python.exe")
 # nssm 的 AppExit 是**子键 + 子值**：Default 存在子键的 (默认) 值里，0 存在名为 "0" 的值里
 APPEXIT_SUBKEY = NSSM_PARAMETERS_PATH + r"\AppExit"
 APPEXIT_DEFAULT_VALUE = ""
@@ -722,12 +747,209 @@ def _rc_path():
     return os.path.join(_update_tmp_dir(), UPDATE_RC_NAME)
 
 
+def _health_probe_path():
+    """健康探测脚本路径（%TEMP%，与执行器同级；执行器跑完会删掉它）。"""
+    return os.path.join(_update_tmp_dir(), UPDATE_PROBE_NAME)
+
+
+def _embedded_python_path():
+    """随包分发的内嵌解释器：{app}\\python\\python.exe。
+
+    安装目录优先取 `_attach` 注入的 `BASE_DIR`；未注入时（单测 / 冒烟直接 import 本模块，
+    不经过服务的 main()）退回本文件所在目录 —— 两者在实际部署里是同一个目录。
+    """
+    base = globals().get("BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, EMBEDDED_PYTHON_REL)
+
+
+def _normalize_ui_port(value):
+    """把配置里的 ui_port 归一成合法端口；拿不到 / 不合法就退回默认 8848（纯函数）。
+
+    与 联网_service._validate_config 的口径一致（1024-65535 的 int，bool 不算）。
+    """
+    if isinstance(value, bool):
+        return HEALTH_PROBE_DEFAULT_PORT
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return HEALTH_PROBE_DEFAULT_PORT
+    if not (1024 <= port <= 65535):
+        return HEALTH_PROBE_DEFAULT_PORT
+    return port
+
+
 def _installer_log_path():
     return os.path.join(_update_tmp_dir(), UPDATE_LOG_NAME)
 
 
+# 健康探测脚本的模板（用 .replace 填参数，不用 %-格式化：脚本里有 strftime("%Y-...") 的 %）。
+# 只依赖标准库；**不 import 任何项目模块** —— 服务崩了正是它要报告的情况。
+# 结构：解析参数 → 轮询 /api/health → 结论写 rc（机器读）+ upgrade.log（人读）→ 退出码 0/1。
+_HEALTH_PROBE_TEMPLATE = '''# -*- coding: utf-8 -*-
+"""drcom_health_probe.py — 升级看门狗：探本机 Web UI 的 /api/health（v2.0.10.0）。
+
+由 auto_update.py 生成到 %TEMP%，升级执行器（.cmd）在 installer 跑完后调用它，跑完即删。
+
+为什么不能只看 `sc query`：那说的是 nssm 的 **wrapper** 状态，而 AppExit=Ignore 时里面的
+Python 进程崩了 wrapper 照样 RUNNING —— 「升级成功」的判据必须落在 HTTP 层。
+
+结论写两处：
+  1) `--rc` 指的 rc 文件里追加一行 `health=OK|FAIL`（机器读；多行时以最后一条为准）；
+  2) upgrade.log 追加一行带时间戳的中文结论（人读；服务真起不来时这是唯一的告警面）。
+
+退出码：0 = 健康；1 = 不健康（结论已落盘）。
+"""
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+
+try:  # 控制台编码兜底：非 UTF-8 终端下中文 print 不该把脚本打崩
+    sys.stdout.reconfigure(errors="backslashreplace")
+    sys.stderr.reconfigure(errors="backslashreplace")
+except (AttributeError, ValueError):
+    pass
+
+DEFAULT_HOST = __PROBE_HOST__
+DEFAULT_PORT = __PROBE_PORT__
+DEFAULT_RC = __PROBE_RC__
+DEFAULT_LOG = __PROBE_LOG__
+DEFAULT_WAIT = __PROBE_WAIT__
+DEFAULT_INTERVAL = __PROBE_INTERVAL__
+DEFAULT_TIMEOUT = __PROBE_TIMEOUT__
+
+# 禁用系统代理：IE/环境变量里配的代理可能不把 127.0.0.1 列入绕过表，
+# 那样探针会「连得上代理但连不上本机服务」→ 误报服务没起来。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _parse_args(argv):
+    """极简参数解析：只认 `--key value`，认不出的键跳过。"""
+    opts = {
+        "host": DEFAULT_HOST, "port": DEFAULT_PORT, "rc": DEFAULT_RC, "log": DEFAULT_LOG,
+        "wait": DEFAULT_WAIT, "interval": DEFAULT_INTERVAL, "timeout": DEFAULT_TIMEOUT,
+        "tag": "probe",
+    }
+    i = 0
+    while i + 1 < len(argv):
+        key, val = argv[i], argv[i + 1]
+        i += 2
+        if key == "--host":
+            opts["host"] = val
+        elif key == "--port":
+            try:
+                opts["port"] = int(val)
+            except ValueError:
+                pass
+        elif key == "--rc":
+            opts["rc"] = val
+        elif key == "--log":
+            opts["log"] = val
+        elif key == "--tag":
+            opts["tag"] = val
+        elif key in ("--wait", "--interval", "--timeout"):
+            try:
+                opts[key[2:]] = float(val)
+            except ValueError:
+                pass
+    return opts
+
+
+def _append(path, line):
+    """追加一行（写不了就静默放弃：探针不能因为写日志失败而丢掉结论）。"""
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\\n")
+    except OSError:
+        pass
+
+
+def _probe_once(host, port, timeout):
+    """探一次 /api/health，返回 (ok, detail)。"""
+    url = "http://%s:%d/api/health" % (host, port)
+    try:
+        with _OPENER.open(url, timeout=timeout) as resp:
+            code = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return False, "HTTP %s" % exc.code
+    except Exception as exc:  # noqa: BLE001  连接被拒 / 超时 / URLError 都算「没起来」
+        return False, "%s: %s" % (type(exc).__name__, exc)
+    if code != 200:
+        return False, "HTTP %s" % code
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return False, "响应不是 JSON: %s" % body[:60]
+    if not isinstance(data, dict) or not data.get("ok"):
+        return False, "ok 不为真: %s" % body[:60]
+    return True, "http=200 ok=true version=%s" % (data.get("version") or "?")
+
+
+def main(argv):
+    opts = _parse_args(argv)
+    port = int(opts["port"])
+    url = "http://%s:%d/api/health" % (opts["host"], port)
+    started = time.time()
+    deadline = started + max(0.0, opts["wait"])
+    ok, detail = False, "未开始"
+    while True:
+        ok, detail = _probe_once(opts["host"], port, opts["timeout"])
+        if ok or time.time() >= deadline:
+            break
+        time.sleep(max(0.2, opts["interval"]))
+    spent = time.time() - started
+    _append(opts["rc"], "health=%s" % ("OK" if ok else "FAIL"))
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    if ok:
+        _append(opts["log"], "[%s] [INFO] 升级看门狗（%s）：HTTP 健康检查通过 %s（%s，用时 %.1f 秒）"
+                % (stamp, opts["tag"], url, detail, spent))
+    else:
+        _append(opts["log"], "[%s] [ERROR] 升级看门狗（%s）：HTTP 健康检查未通过 %s"
+                "（等待 %.0f 秒，最后错误：%s）—— 服务可能没起来：请看 logs/service_stderr.log 与 "
+                "logs/installer-silent.log，或重新运行安装包恢复"
+                % (stamp, opts["tag"], url, opts["wait"], detail))
+    print("health=%s %s" % ("OK" if ok else "FAIL", detail))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+'''
+
+
+def _build_health_probe_script(rc_path, log_path, port, host=HEALTH_PROBE_HOST,
+                               wait_sec=HEALTH_PROBE_WAIT_SEC,
+                               interval_sec=HEALTH_PROBE_INTERVAL_SEC,
+                               timeout_sec=HEALTH_PROBE_TIMEOUT_SEC):
+    """生成 HTTP 健康探测脚本内容（纯函数，便于单测 / 行为级冒烟）。
+
+    为什么需要它：
+      - `sc query` 只是 nssm **wrapper** 的状态。AppExit=Ignore 下，里面的 Python 崩了
+        wrapper 照样 RUNNING —— 这就是 v2.0.8.0 / v2.0.9.0 两次事故「升完才发现」的原因；
+      - 判据放 HTTP 层（`/api/health` 返回 {"ok": true}）才算「服务真的活了」。
+
+    参数：
+        rc_path   结论落盘位置（执行器读它写进升级收尾记录；**多行时以最后一条为准**）
+        log_path  人类可读结论（logs\\upgrade.log；服务起不来时这是唯一告警面）
+        port      Web UI 端口（服务只监听 127.0.0.1）
+    """
+    return (_HEALTH_PROBE_TEMPLATE
+            .replace("__PROBE_HOST__", repr(host))
+            .replace("__PROBE_PORT__", repr(int(port)))
+            .replace("__PROBE_RC__", repr(rc_path or ""))
+            .replace("__PROBE_LOG__", repr(log_path or ""))
+            .replace("__PROBE_WAIT__", repr(float(wait_sec)))
+            .replace("__PROBE_INTERVAL__", repr(float(interval_sec)))
+            .replace("__PROBE_TIMEOUT__", repr(float(timeout_sec))))
+
+
 def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name, svc_name=SERVICE_NAME,
-                          sc_path=None, schtasks_path=None):
+                          sc_path=None, schtasks_path=None, python_path=None, probe_path=None,
+                          ui_port=None):
     """生成升级执行器的 .cmd 内容（纯函数，便于单测）。
 
     包装脚本要在一个「不在 NSSM Job 里」的进程里完成这些事：
@@ -735,12 +957,22 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
          Inno 会认为公共桌面快捷方式那个任务未选中，桌面图标就不会被更新）；
       2. 把 installer 退出码落盘（此前完全丢失，失败时无从查起）；
       3. 把 installer 日志复制到安装目录 logs\\ 下，方便用户 / Web UI 查看；
-      4. **看门狗**：服务没跑起来就 sc start —— 升级失败时这是唯一的兜底
+      4. **看门狗 A（服务状态）**：`sc query` 没 RUNNING 就 `sc start`
          （v2.0.4.1 真机：装不上 + 服务停在 StopPending，自动登录直接停摆）；
-      5. 收尾：删计划任务、删自己。
+      5. **看门狗 B（HTTP 健康，v2.0.10.0 新增）**：探 `/api/health`，探不到就
+         「停 + 起」重启一次再给一次窗口。`sc query` 只看 nssm 的 wrapper，
+         AppExit=Ignore 下里面的 Python 崩了 wrapper 照样 RUNNING —— 真机两次事故的根因；
+      6. 收尾：删计划任务、删探针、删自己。
+
+    新增参数都已给默认值（老调用点与老断言不受影响）：
+        python_path / probe_path  显式指定内嵌解释器与探针脚本（默认取实际路径）
+        ui_port                   要探的 Web UI 端口（非法值退回 8848）
     """
     sc = sc_path or SC_PATH
     schtasks = schtasks_path or SCHTASKS_PATH
+    py = python_path if python_path is not None else _embedded_python_path()
+    probe = probe_path if probe_path is not None else _health_probe_path()
+    port = _normalize_ui_port(ui_port)
     lines = [
         "@echo off",
         "rem === 星尘闪连 自动升级执行器（由 auto_update.py 生成；跑完自删）===",
@@ -752,33 +984,60 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         "rem ---- 1) 静默安装（任务：桌面图标 + 启动服务）----",
         '"' + installer_path + '" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL'
         ' /CLOSEAPPLICATIONS /TASKS=desktopicon,startservice,trayicon /LOG="%LOG%"',
-        'echo installer_rc=%ERRORLEVEL%>"%RC%"',
+        # v2.0.10.0 修一个从 v2.0.4.2 起就在的陷阱：`echo installer_rc=0>"%RC%"` 会被 cmd
+        # 当成「**句柄 0** 重定向」（数字紧贴 `>`）→ rc 文件被写成**空文件**、文本跑进 stdout ✗，
+        # 于是 installer_rc= 从来没落盘（`_report_update_runner_result` 里的「非 0 退出码」
+        # 告警一直是死代码）。把重定向写到命令**前面**即可彻底避开：此时行尾没有数字 ✓。
+        '>>"%RC%" echo installer_rc=%ERRORLEVEL%',
         "rem ---- 2) 安装日志归档到安装目录 ----",
         'if exist "%LOG%" copy /y "%LOG%" "' + app_dir + '\\logs\\installer-silent.log" >nul 2>&1',
-        "rem ---- 3) 看门狗：服务没起来就拉起来（用 ping 当 sleep：SYSTEM 会话里没有 timeout 的控制台）----",
+        "rem ---- 3) 看门狗 A：服务状态（用 ping 当 sleep：SYSTEM 会话里没有 timeout 的控制台）----",
         '"' + sc + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
         'if errorlevel 1 "' + sc + '" start ' + svc_name + ' >nul 2>&1',
         'ping -n 6 127.0.0.1 >nul 2>&1',
+        "rem ---- 4) 看门狗 B：探 HTTP /api/health（v2.0.10.0）----",
+        'rem nssm 的 wrapper 活着 != 里面的 Python 进程活着，能拿到 {"ok":true} 才算真的活了。',
+        'if not exist "' + py + '" echo health=SKIP>>"%RC%"',
+        'if not exist "' + py + '" goto after_health',
+        'if not exist "' + probe + '" echo health=SKIP>>"%RC%"',
+        'if not exist "' + probe + '" goto after_health',
+        '"' + py + '" "' + probe + '" --port ' + str(port) + ' --rc "%RC%" --tag first'
+        ' --wait ' + str(int(HEALTH_PROBE_WAIT_SEC)) + ' >nul 2>&1',
+        "rem 探不到 -> 先「停 + 起」重启一次（AppExit=Ignore：服务崩了不会自己回来），再给一次窗口",
+        "if not errorlevel 1 goto after_health",
+        '"' + sc + '" stop ' + svc_name + ' >nul 2>&1',
+        'ping -n 4 127.0.0.1 >nul 2>&1',
+        '"' + sc + '" start ' + svc_name + ' >nul 2>&1',
+        '"' + py + '" "' + probe + '" --port ' + str(port) + ' --rc "%RC%" --tag retry'
+        ' --wait ' + str(int(HEALTH_PROBE_RETRY_WAIT_SEC)) + ' >nul 2>&1',
+        ":after_health",
+        "rem ---- 5) 服务状态回写（放在健康探测之后，取的是最终状态）----",
         '"' + sc + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
         'if errorlevel 1 (echo service=STOPPED>>"%RC%") else (echo service=RUNNING>>"%RC%")',
-        "rem ---- 4) 收尾：删任务、删自己 ----",
+        "rem ---- 6) 收尾：删任务、删探针、删自己 ----",
         '"' + schtasks + '" /delete /tn "' + task_name + '" /f >nul 2>&1',
+        'del /f /q "' + probe + '" >nul 2>&1',
         'del /f /q "%~f0" >nul 2>&1',
     ]
     return "\r\n".join(lines) + "\r\n"
 
 
-def _launch_installer(installer_path):
+def _launch_installer(installer_path, ui_port=None):
     """启动 installer，返回 {"mode": ..., "pid": ...}；抛 OSError 表示全都失败。
 
     v2.0.4.2 修（真机证据见文件头注释）：优先用**任务计划程序**拉起包装脚本 ——
     installer 由 Task Scheduler 服务托管，不在 nssm 的 Job Object 里，所以
     setup.iss 在 ssInstall 阶段 `nssm stop` 服务时不会把它连带杀死。
     任务计划程序不可用时才退回旧的 DETACHED_PROCESS 直启（保持旧行为）。
+
+    v2.0.10.0：顺带把健康探测脚本写到 %TEMP%（执行器在 installer 跑完后用它探
+    `/api/health`）。写失败不致命 —— 执行器会落一行 `health=SKIP` 退回旧判据。
     """
     log_path = _installer_log_path()
     wrapper = _wrapper_path()
     rc_path = _rc_path()
+    probe = _health_probe_path()
+    port = _normalize_ui_port(ui_port)
     try:
         if os.path.isfile(rc_path):
             os.remove(rc_path)  # 清掉上次结果，避免下次启动读到陈旧数据
@@ -786,8 +1045,16 @@ def _launch_installer(installer_path):
         pass
 
     try:
+        with open(probe, "w", encoding="utf-8", newline="\n") as f:
+            f.write(_build_health_probe_script(rc_path, UPGRADE_LOG_FILE, port))
+    except OSError as exc:
+        _log_upgrade("WARN", "写健康探测脚本失败：{}（本次升级只看服务状态）".format(exc))
+        probe = None
+
+    try:
         with open(wrapper, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(_build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME))
+            f.write(_build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME,
+                                          probe_path=probe, ui_port=port))
     except OSError as exc:
         _log_upgrade("WARN", "写升级执行器失败：{}（退回直启）".format(exc))
         wrapper = None
@@ -981,9 +1248,10 @@ def _do_update_now():
         prev_count = int(prev_attempt.get("count") or 0) if prev_attempt.get("target") == remote_ver else 0
         _write_update_attempt(remote_ver, count=prev_count + 1, state="attempted")
         try:
-            launch = _launch_installer(installer_path)
-            _log_upgrade("INFO", "installer 已启动（方式={}，PID={}，第 {} 次尝试）".format(
-                launch.get("mode"), launch.get("pid"), prev_count + 1))
+            launch = _launch_installer(installer_path, cfg.get("ui_port"))
+            _log_upgrade("INFO", "installer 已启动（方式={}，PID={}，第 {} 次尝试；收尾将探 http://{}:{}{}）".format(
+                launch.get("mode"), launch.get("pid"), prev_count + 1,
+                HEALTH_PROBE_HOST, _normalize_ui_port(cfg.get("ui_port")), HEALTH_PROBE_PATH))
         except OSError as exc:
             # 启动失败：不让 Python 退出，保持服务运行 + Web UI 显示 error
             _write_update_attempt(remote_ver, count=prev_count + 1, state="failed")
@@ -1238,6 +1506,24 @@ def _report_update_runner_result(wait_sec=0):
     else:
         _log_upgrade("INFO", "升级执行器结果：{}".format(detail))
 
+    # v2.0.10.0：HTTP 健康探测的结论（多行时**以最后一条为准** —— 先 FAIL 后 OK
+    # 表示「停 + 起」重启后服务自己活了过来，那是正常收尾，不是故障）。
+    #
+    # 注意：这里**只等 rc 文件出现**，绝不等 `health=` 那一行 —— 探针探的正是本进程
+    # 正在启动的 HTTP 服务，若在此阻塞等探测结论就会互相等成死锁（探针 20 秒窗口
+    # 内服务一直不答 → 误报失败）。结论的「人读」那半由探针**自己**写进 upgrade.log。
+    health = None
+    for l in lines:
+        if l.startswith("health="):
+            health = l.split("=", 1)[1].strip()
+    if health == "OK":
+        _log_upgrade("INFO", "升级看门狗：HTTP 健康探测通过（/api/health 答了 {\"ok\": true}，服务真的活了）")
+    elif health == "FAIL":
+        _log_upgrade("WARN", "升级看门狗：HTTP 健康探测未通过（{}）；本进程现在已经跑起来了，"
+                             "多半只是启动慢于探测窗口。若反复出现，请看 logs\\service_stderr.log".format(detail))
+    elif health == "SKIP":
+        _log_upgrade("WARN", "升级看门狗：本次没做 HTTP 健康探测（缺内嵌 python 或探测脚本），只看服务状态")
+
 
 def _cleanup_update_leftovers():
     """清掉升级残留：包装脚本 / 结果文件 / 计划任务 / 已装上的安装包。
@@ -1260,8 +1546,8 @@ def _cleanup_update_leftovers():
                 _log_upgrade("INFO", "已归档安装日志：{}".format(dst))
     except OSError as exc:
         logger.warning("归档 installer 日志失败: %s", exc)
-    # 2) 包装脚本 / 结果文件：只清陈旧的（刚跑完那次的交给执行器自己收尾）
-    for p in (_wrapper_path(), _rc_path()):
+    # 2) 包装脚本 / 结果文件 / 健康探测脚本：只清陈旧的（刚跑完那次的交给执行器自己收尾）
+    for p in (_wrapper_path(), _rc_path(), _health_probe_path()):
         try:
             if os.path.isfile(p) and os.path.getmtime(p) < stale_before:
                 os.remove(p)

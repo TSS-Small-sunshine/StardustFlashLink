@@ -640,6 +640,169 @@ check("v2.0.4.3 _hklm_subpath 去前缀且幂等",
 check("v2.0.4.3 AppExit 注册表路径可用于 winreg",
       au._hklm_subpath(au.APPEXIT_SUBKEY).upper().startswith("SYSTEM\\")
       and "Parameters\\AppExit" in au._hklm_subpath(au.APPEXIT_SUBKEY))
+# ---- v2.0.10.0：升级看门狗改探 HTTP /api/health（「wrapper 活着」≠「服务真的活了」）----
+# 真机证据：v2.0.8.0（安装器回滚）与 v2.0.9.0（服务启动即崩）两次都是「升完才发现」，
+# 因为收尾判定只看 `sc query` —— 那是 nssm 的 wrapper，而 AppExit=Ignore 下里面的
+# Python 进程崩了 wrapper 照样 RUNNING（既不重启也不报错）。
+import subprocess  # noqa: E402  （本文件后段才 import 它，这里必须先用上）
+import threading  # noqa: E402
+import time  # noqa: E402
+from http.server import BaseHTTPRequestHandler as _BaseHTTPRequestHandler  # noqa: E402
+from http.server import ThreadingHTTPServer as _ThreadingHTTPServer  # noqa: E402
+
+
+class _HealthStub(_BaseHTTPRequestHandler):
+    """只回 /api/health 的假服务（模拟真服务的健康端点，供行为级断言使用）。"""
+
+    def do_GET(self):  # noqa: N802
+        body = b'{"ok": true, "version": "0.0.0-stub"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):  # 静音（否则每个请求都往 stderr 刷一行）
+        pass
+
+
+check("v2.0.10.0 健康探测端点就是 /api/health", au.HEALTH_PROBE_PATH == "/api/health")
+check("v2.0.10.0 启动钩子读执行器的 health= 结论",
+      'l.startswith("health=")' in src_upd and "HTTP 健康探测" in src_upd)
+check("v2.0.10.0 探针用随包内嵌 python（不依赖 PATH / 用户装没装 Python）",
+      au.EMBEDDED_PYTHON_REL == os.path.join("python", "python.exe"))
+check("v2.0.10.0 启动钩子绝不等 health=（否则与探针互相等成死锁）",
+      "绝不等" in src_upd or "deadlock" in src_upd)
+check("v2.0.10.0 非法 ui_port 退回 8848",
+      au._normalize_ui_port(None) == 8848 and au._normalize_ui_port("x") == 8848
+      and au._normalize_ui_port(70000) == 8848 and au._normalize_ui_port(18899) == 18899
+      and au._normalize_ui_port(True) == 8848,
+      repr([au._normalize_ui_port(v) for v in (None, "x", 70000, 18899, True)]))
+
+# 执行器（.cmd）：探针接线 + 失败重试 + 缺件退回旧判据 + 收尾删探针
+_wrap_h = au._build_update_wrapper(
+    r"C:\T\DrcomAutoLogin-Setup-v9.9.9.exe", r"D:\App", r"C:\T\l.log", r"C:\T\r.txt", "MyTask",
+    python_path=r"C:\App\python\python.exe", probe_path=r"C:\T\drcom_health_probe.py", ui_port=18899)
+check("v2.0.10.0 执行器调探针（内嵌 python + 端口 + rc）",
+      r'"C:\App\python\python.exe" "C:\T\drcom_health_probe.py" --port 18899 --rc "%RC%" --tag first'
+      in _wrap_h)
+check("v2.0.10.0 探测失败先「停 + 起」重启，再给一次窗口",
+      ("stop %s" % au.SERVICE_NAME) in _wrap_h and ("start %s" % au.SERVICE_NAME) in _wrap_h
+      and "--tag retry" in _wrap_h and str(au.HEALTH_PROBE_RETRY_WAIT_SEC) in _wrap_h)
+check("v2.0.10.0 探针 / 内嵌 python 缺失时退回旧判据（health=SKIP）",
+      _wrap_h.count("health=SKIP") == 2)
+check("v2.0.10.0 执行器收尾删探针", 'del /f /q "C:\\T\\drcom_health_probe.py"' in _wrap_h)
+check("v2.0.10.0 rc 里仍写 service=（既有格式不变）", "service=RUNNING" in _wrap_h)
+check("v2.0.10.0 执行器仍不外泄凭据", "password" not in _wrap_h.lower() and "PWD" not in _wrap_h)
+
+# v2.0.10.0 修的老坑：`echo installer_rc=0>"%RC%"` 会被 cmd 当成「**句柄 0** 重定向」
+# （数字紧贴 `>`）→ 落盘的是**空文件**、文本跑进 stdout，于是 installer_rc= 从来没写进去过
+# （「非 0 退出码」告警因此一直是死代码）。现在把重定向写到命令**前面**。
+check("v2.0.10.0 rc 写入用「重定向前置」写法",
+      '>>"%RC%" echo installer_rc=%ERRORLEVEL%' in _wrap_h
+      and 'echo installer_rc=%ERRORLEVEL%>"%RC%"' not in _wrap_h)
+if os.name != "nt":
+    print("SKIP  v2.0.10.0 rc 重定向前置行为级断言：非 Windows（没有 cmd）")
+else:
+    _rdir = tempfile.mkdtemp(prefix="drcom_redir_")
+    _rfile = os.path.join(_rdir, "r.txt")
+    _rcmd = os.path.join(_rdir, "redir.cmd")
+    with open(_rcmd, "w", encoding="utf-8", newline="") as _f:
+        # 注意 newline=""：文本模式的通用换行转换会把 \r\n 变成 \r\r\n，cmd 会整行失效。
+        _f.write('@echo off\r\nset "RC=' + _rfile + '"\r\n>>"%RC%" echo installer_rc=0\r\n')
+    subprocess.run(["cmd", "/c", _rcmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+    _rtxt = pathlib.Path(_rfile).read_text(encoding="utf-8", errors="replace") if os.path.isfile(_rfile) else ""
+    check("v2.0.10.0 rc 重定向前置真的落盘（installer_rc=0）", _rtxt.strip() == "installer_rc=0", repr(_rtxt))
+
+# 行为级：把生成的探针**真跑起来** —— 对着在跑的服务 → OK；对着空端口 → FAIL
+_pdir = tempfile.mkdtemp(prefix="drcom_probe_")
+_pport = 18931
+_pprobe = os.path.join(_pdir, "drcom_health_probe.py")
+_prc_ok = os.path.join(_pdir, "rc_ok.txt")
+_plog_ok = os.path.join(_pdir, "upgrade_ok.log")
+_pprobe_txt = au._build_health_probe_script(_prc_ok, _plog_ok, _pport,
+                                            wait_sec=6, interval_sec=0.5, timeout_sec=2)
+pathlib.Path(_pprobe).write_text(_pprobe_txt, encoding="utf-8")
+_psrv = _ThreadingHTTPServer(("127.0.0.1", _pport), _HealthStub)
+threading.Thread(target=_psrv.serve_forever, daemon=True).start()
+_po = subprocess.run([sys.executable, _pprobe], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+_prc_txt = pathlib.Path(_prc_ok).read_text(encoding="utf-8") if os.path.isfile(_prc_ok) else ""
+_plog_txt = pathlib.Path(_plog_ok).read_text(encoding="utf-8") if os.path.isfile(_plog_ok) else ""
+check("v2.0.10.0 探针：服务在 → 退出码 0 / rc 落 health=OK",
+      _po.returncode == 0 and _prc_txt.strip() == "health=OK",
+      repr((_po.returncode, _prc_txt, _po.stdout.decode("utf-8", "replace").strip())))
+check("v2.0.10.0 探针：把「通过」写进 upgrade.log（人读）",
+      "[INFO]" in _plog_txt and "HTTP 健康检查通过" in _plog_txt, repr(_plog_txt[:120]))
+check("v2.0.10.0 探针不 import 任何项目模块（要比被探的服务更耐活）",
+      "import auto_update" not in _pprobe_txt and "联网_service" not in _pprobe_txt
+      and "urllib.request.ProxyHandler({})" in _pprobe_txt)  # 顺带禁用系统代理
+
+_prc_bad = os.path.join(_pdir, "rc_bad.txt")
+_plog_bad = os.path.join(_pdir, "upgrade_bad.log")
+_t0 = time.time()
+_pb = subprocess.run([sys.executable, _pprobe, "--port", "18932", "--rc", _prc_bad, "--log", _plog_bad,
+                      "--tag", "retry", "--wait", "2", "--interval", "0.3"],
+                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+_prc_bad_txt = pathlib.Path(_prc_bad).read_text(encoding="utf-8") if os.path.isfile(_prc_bad) else ""
+_plog_bad_txt = pathlib.Path(_plog_bad).read_text(encoding="utf-8") if os.path.isfile(_plog_bad) else ""
+check("v2.0.10.0 探针：服务不在 → 退出码 1 / rc 落 health=FAIL",
+      _pb.returncode == 1 and _prc_bad_txt.strip() == "health=FAIL",
+      repr((_pb.returncode, _prc_bad_txt)))
+check("v2.0.10.0 探针：失败写中文告警（服务起不来时唯一的告警面）",
+      "[ERROR]" in _plog_bad_txt and "HTTP 健康检查未通过" in _plog_bad_txt
+      and "service_stderr.log" in _plog_bad_txt, repr(_plog_bad_txt[:160]))
+check("v2.0.10.0 探针遵守 --wait 窗口（不无限等）", (time.time() - _t0) < 30,
+      "%.1fs" % (time.time() - _t0))
+_psrv.shutdown()
+
+# 行为级：启动钩子解析 rc 里的 health=（多行时以**最后一条**为准 —— 先 FAIL 后 OK = 重启后自己好了）
+import logging  # noqa: E402
+
+_rcbox = tempfile.mkdtemp(prefix="drcom_rc_")
+_saved_g = {k: au.__dict__.get(k) for k in ("LOG_DIR", "UPGRADE_LOG_FILE", "logger")}
+_saved_temp = os.environ.get("TEMP")
+_au_logger = logging.getLogger("smoke_auto_update")
+_au_logger.addHandler(logging.NullHandler())
+au.LOG_DIR = _rcbox
+au.UPGRADE_LOG_FILE = os.path.join(_rcbox, "upgrade.log")
+au.logger = _au_logger
+os.environ["TEMP"] = _rcbox  # _rc_path() / _wrapper_path() 都取 TEMP
+
+
+def _runner_result(rc_lines):
+    """把合成 rc 写进 %TEMP%，跑一次启动钩子的收尾读取，返回 upgrade.log 全文。"""
+    with open(au._rc_path(), "w", encoding="utf-8") as f:
+        f.write("\n".join(rc_lines) + "\n")
+    if os.path.isfile(au.UPGRADE_LOG_FILE):
+        os.remove(au.UPGRADE_LOG_FILE)
+    au._report_update_runner_result(wait_sec=0)
+    return pathlib.Path(au.UPGRADE_LOG_FILE).read_text(encoding="utf-8")
+
+
+_rc_fail = _runner_result(["installer_rc=0", "service=RUNNING", "health=FAIL"])
+check("v2.0.10.0 收尾记录：health=FAIL → WARN + 中文原因",
+      "[WARN]" in _rc_fail and "HTTP 健康探测未通过" in _rc_fail, repr(_rc_fail[-140:]))
+_rc_ok2 = _runner_result(["installer_rc=0", "service=RUNNING", "health=FAIL", "health=OK"])
+check("v2.0.10.0 收尾记录：先 FAIL 后 OK → 按最后一条判（重启后自己好了）",
+      "[INFO]" in _rc_ok2 and "HTTP 健康探测通过" in _rc_ok2 and "未通过" not in _rc_ok2,
+      repr(_rc_ok2[-140:]))
+_rc_skip = _runner_result(["installer_rc=0", "service=STOPPED", "health=SKIP"])
+check("v2.0.10.0 收尾记录：health=SKIP → 说明没做探测（退回旧判据）",
+      "没做 HTTP 健康探测" in _rc_skip, repr(_rc_skip[-140:]))
+_rc_old = _runner_result(["installer_rc=0", "service=RUNNING"])
+check("v2.0.10.0 收尾记录：旧执行器没有 health= 行也不炸",
+      "升级执行器结果" in _rc_old and "HTTP 健康探测" not in _rc_old, repr(_rc_old[-140:]))
+
+for _k, _v in _saved_g.items():
+    if _v is None:
+        au.__dict__.pop(_k, None)
+    else:
+        au.__dict__[_k] = _v
+if _saved_temp is None:
+    os.environ.pop("TEMP", None)
+else:
+    os.environ["TEMP"] = _saved_temp
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
@@ -743,7 +906,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.0.9.1", version.VERSION == "2.0.9.1", version.VERSION)
+check("版本 = 2.0.10.0", version.VERSION == "2.0.10.0", version.VERSION)
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
 
