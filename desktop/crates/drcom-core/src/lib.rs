@@ -9,6 +9,7 @@
 pub mod autostart;
 pub mod backoff;
 pub mod channel;
+pub mod checksum;
 pub mod cidr;
 pub mod config;
 pub mod diagnostics;
@@ -17,6 +18,7 @@ pub mod instance;
 pub mod logfile;
 pub mod metrics;
 pub mod net;
+pub mod package;
 pub mod password;
 pub mod platform;
 pub mod portal;

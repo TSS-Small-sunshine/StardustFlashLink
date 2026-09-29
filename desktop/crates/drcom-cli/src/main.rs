@@ -62,6 +62,8 @@ fn run(args: Vec<String>) -> i32 {
         Some("portal") => portal_cmd(&args[1..]),
         Some("autostart") => autostart_cmd(&args[1..]),
         Some("service") => service_cmd(&args[1..]),
+        Some("checksum") => checksum_cmd(&args[1..]),
+        Some("package-files") => package_files_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -86,6 +88,8 @@ fn print_help() {
          portal [--url U] [--timeout N]         门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页）\n  \
          autostart on|off|status [--dry-run]    开机自启（当前用户级，免管理员 ✓；跑的是无界面循环）\n  \
          service install|uninstall|start|stop|restart|status [--dry-run]   注册成常驻服务（Windows 走 NSSM ✓）\n  \
+         checksum [文件]             算 SHA-256（不给文件就算自己 ✓）—— 打包校验 / 升级凭据 ✓\n  \
+         package-files --out DIR     写出该平台随包分发的说明文件（.desktop / Info.plist / README ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -313,6 +317,115 @@ fn login(args: &[String]) -> i32 {
 }
 
 /// `diagnostics [--out FILE] [--days N]`：生成**脱敏**诊断包（ZIP ✓）。
+/// 写一个文件并把名字记下来 ✓。
+fn write_package_file(
+    dir: &std::path::Path,
+    name: &str,
+    content: &str,
+    written: &mut Vec<String>,
+) -> Result<(), String> {
+    let path = dir.join(name);
+    std::fs::write(&path, content).map_err(|e| format!("写 {} 失败: {}", path.display(), e))?;
+    written.push(name.to_string());
+    Ok(())
+}
+
+/// `package-files --out DIR`：写出该平台随包分发的说明文件 ✓。
+///
+/// CI 打包时会先调它 ✓ —— 于是 `.desktop` / `Info.plist` / `deb-control` 的内容
+/// 也就**受单测保护**了 ✓（比把这些字符串散在 YAML 里可控 ✓）。
+/// 第一行输出的是产物基名（`stardust-flash-link-<版本>-<目标>` ✓），脚本可以直接拿去用 ✓。
+fn package_files_cmd(args: &[String]) -> i32 {
+    let out_dir = std::path::PathBuf::from(take_opt(args, "--out").unwrap_or_else(|| ".".to_string()));
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        eprintln!("创建 {} 失败: {}", out_dir.display(), e);
+        return 1;
+    }
+    let current = std::env::current_exe().ok();
+    let exe_name = current
+        .as_ref()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "stardust-flash-link".to_string());
+    let size = current
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let info = drcom_core::package::PackageInfo::current(&exe_name, size);
+
+    let mut written: Vec<String> = Vec::new();
+    let mut result = write_package_file(
+        &out_dir,
+        "README.txt",
+        &drcom_core::package::readme_txt(&info),
+        &mut written,
+    );
+    if result.is_ok() {
+        result = match platform::Os::current() {
+            platform::Os::Linux => write_package_file(
+                &out_dir,
+                &format!("{}.desktop", platform::APP_ID),
+                &drcom_core::package::desktop_entry(&info),
+                &mut written,
+            )
+            .and_then(|()| {
+                write_package_file(
+                    &out_dir,
+                    "deb-control",
+                    &drcom_core::package::deb_control(&info),
+                    &mut written,
+                )
+            }),
+            platform::Os::MacOs => write_package_file(
+                &out_dir,
+                "Info.plist",
+                &drcom_core::package::macos_info_plist(&info),
+                &mut written,
+            ),
+            // Windows 先用 zip 分发 ✓（安装器在 M3 后续做 ✓）
+            platform::Os::Windows => Ok(()),
+        };
+    }
+    match result {
+        Ok(()) => {
+            println!("{}", drcom_core::package::artifact_base(&info));
+            for name in &written {
+                println!("  已写出 {}", name);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}
+
+/// `checksum`：算 SHA-256 ✓（只读 ✓）—— 打包校验与自动升级的凭据都走它 ✓。
+fn checksum_cmd(args: &[String]) -> i32 {
+    let target = match args.first() {
+        Some(path) if !path.starts_with("--") => std::path::PathBuf::from(path),
+        _ => match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                eprintln!("拿不到自身路径: {}", e);
+                return 1;
+            }
+        },
+    };
+    match drcom_core::checksum::sha256_file(&target) {
+        Ok(hex) => {
+            // 格式与 `sha256sum` 对齐：`<hex>  <文件名>` ✓（两个空格 ✓）
+            println!("{}  {}", hex, target.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            1
+        }
+    }
+}
+
 /// `service`：把常驻循环注册成系统服务 ✓
 /// （Windows = NSSM 托管的服务；Linux = systemd --user；macOS = LaunchAgent ✓）。
 fn service_cmd(args: &[String]) -> i32 {
@@ -887,6 +1000,48 @@ fn suffix_flag_without_value(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_files_writes_into_a_temp_dir() {
+        let dir = std::env::temp_dir().join("drcom-package-files");
+        let _ = std::fs::remove_dir_all(&dir);
+        let args = vec!["--out".to_string(), dir.display().to_string()];
+        assert_eq!(package_files_cmd(&args), 0, "写出成功 ✓");
+        assert!(dir.join("README.txt").is_file(), "README 必须有 ✓");
+        if cfg!(target_os = "linux") {
+            assert!(dir.join("deb-control").is_file(), "Linux 要带 deb 元数据 ✓");
+            assert!(
+                dir.join(format!("{}.desktop", platform::APP_ID)).is_file(),
+                "Linux 要带桌面项 ✓"
+            );
+        }
+        if cfg!(target_os = "macos") {
+            assert!(dir.join("Info.plist").is_file(), "macOS 要带 Info.plist ✓");
+        }
+        // 目录不存在时要能自己建出来 ✓（CI 里就是这么用的 ✓）
+        let nested = dir.join("a/b/c");
+        assert_eq!(
+            package_files_cmd(&["--out".to_string(), nested.display().to_string()]),
+            0,
+            "多级目录也该自动创建 ✓"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checksum_cmd_hashes_real_files_and_fails_softly() {
+        let dir = std::env::temp_dir().join("drcom-cli-checksum");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hello.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(checksum_cmd(&[path.display().to_string()]), 0, "真实文件 ✓");
+        assert_eq!(
+            checksum_cmd(&[dir.join("missing.bin").display().to_string()]),
+            1,
+            "文件不存在 → 退出码 1（不 panic ✗）"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn service_cmd_validates_actions_and_dry_run_touches_nothing() {

@@ -203,3 +203,39 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 
 > 小坑记录：改完 UI 只跑 `cargo test` **不会刷新 GUI 二进制** ✗ ——
 > 启动前要先 `cargo build -p drcom-ui` ✓（第一次真机验证单实例就是被旧二进制骗了 ✗）。
+
+---
+
+## 10. 打包地基（SHA-256 + 包内文件生成）
+
+### SHA-256：自己实现（`core::checksum`）
+
+**为什么不用 crate**：① 更新包校验要**每平台行为一致**，多一个依赖就多一处版本差异 ✗；
+② 这段算法**公开、短、能对着官方向量逐条验** ✓，比引 crate 更好审计 ✓；③ 守住「零第三方依赖」✓。
+
+验证做到了三层（都在单测/真机里 ✓）：
+1. **NIST/FIPS 官方向量**逐字节对照 ✓（空串 / `abc` / 448 位 / 896 位 / 100 万个 `a` ✓）；
+2. **切块一致性**：按 1/3/7/64/65/128/999 字节切着喂，结果必须与一次性完全一样 ✓；
+3. **真机外部交叉验证** ✓：对一个真实 3MB 二进制，`stardust-flash-link checksum` 与
+   Windows 自带 `Get-FileHash -Algorithm SHA256` **逐位一致** ✓（与 2.x 用 Python `zipfile` 互验同一思路 ✓）。
+
+### 包内文件生成（`core::package`）
+
+| 生成物 | 用在哪 |
+| --- | --- |
+| `.desktop` | Linux 桌面项（`Exec=… run`、`Terminal=false`、Network 分类 ✓） |
+| `deb-control` | Debian 元数据（**架构名换算** `x86_64→amd64` / `aarch64→arm64` / `armv7→armhf` ✓，体积换算成 KB ✓） |
+| `Info.plist` | macOS `.app`（BundleIdentifier / Executable / Version / `CFBundlePackageType=APPL` ✓） |
+| `README.txt` | 包里那封「怎么用」说明（**首句就写清是预览版** ✓，命令清单 + 配置兼容说明 ✓） |
+| 产物命名 | `stardust-flash-link-<版本>-<目标>.tar.gz|.zip|.dmg|.deb` ✓（无空格无斜杠 ✓ 有单测 ✓） |
+| `SHA256SUMS` 行 | coreutils 格式（**两个空格** ✓），自动升级对着它校验 ✓ |
+
+用法（也是 CI 会做的两步 ✓）：
+
+```bash
+stardust-flash-link package-files --out pkg     # 第一行输出产物基名，脚本直接拿去用 ✓
+stardust-flash-link checksum pkg/README.txt     # → "<hex>  <文件>" / sha256sum 兼容 ✓
+```
+
+> ⏭ 下一步：把这两条接进 `preview-3.0.yml` 的 build 矩阵（各平台打 tar.gz/zip/dmg +
+> `SHA256SUMS` + 上传 artifact ✓），安装器（Inno/deb/dmg 正式包）随后 ✓。
