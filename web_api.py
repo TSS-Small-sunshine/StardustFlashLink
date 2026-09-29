@@ -2222,6 +2222,10 @@ code.path {
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <input type="text" id="profile-new-name" class="cfg-lg" style="flex:1 1 150px;" placeholder="方案名（例如 家里）" autocomplete="off" spellcheck="false" maxlength="24">
           <input type="text" id="profile-match-ssids" class="cfg-lg" style="flex:2 1 220px;" placeholder="自动匹配的 Wi-Fi 名（可选，逗号分隔）" autocomplete="off" spellcheck="false">
+        <!-- v2.1.1.0：当前 Wi-Fi 名一键填进「自动匹配」（不用手打，少一个字母就白配） -->
+        <div class="ssid-chips" style="margin:0;">
+          <button type="button" id="profile-use-current-ssid">用当前 Wi-Fi</button>
+        </div>
           <button class="btn" id="btn-profile-save" type="button">用当前配置保存</button>
         </div>
         <div class="hint">填了「自动匹配的 Wi-Fi 名」= <b>自动方案</b>：打开下面的自动切换后，一连上这个 Wi-Fi 就自动切过去。</div>
@@ -2737,6 +2741,9 @@ code.path {
     return fetch(url, opt).then(function (r) { return r.json(); });
   }
 
+  /* v2.1.1.0：最近一次 /api/wifi 的结果（给「用当前 Wi-Fi」这类按钮复用） */
+  var lastWifi = null;
+
   var API = {
     status: getJson.bind(null, '/api/status'),
     config: getJson.bind(null, '/api/config'),
@@ -3051,6 +3058,7 @@ code.path {
     chips.textContent = '';
     API.wifi().then(function (w) {
       if (!w || w.ok === false) { now.textContent = '读不到'; return; }
+      lastWifi = w;
       now.textContent = w.current ? w.current : '读不到（有线 / 没连 Wi-Fi）';
       var names = [];
       (w.known || []).forEach(function (n) { if (n && names.indexOf(n) < 0) names.push(n); });
@@ -3821,7 +3829,11 @@ code.path {
       items.forEach(function (it) {
         var opt = document.createElement('option');
         opt.value = it.name;
-        opt.textContent = it.name + (it.active ? '（当前）' : '') + (it.auto ? ' · 自动' : '');
+        /* v2.1.1.0：方案里现在带账号与后缀（多网络多账号）→ 列表里就能看出用的是哪个 */
+        var acc = (it.values && it.values.account) ? String(it.values.account) : '';
+        var suf = (it.values && it.values.suffix) ? String(it.values.suffix) : '';
+        opt.textContent = it.name + (it.active ? '（当前）' : '') + (it.auto ? ' · 自动' : '')
+          + (acc ? (' · ' + acc + suf) : '');
         sel.appendChild(opt);
       });
     }
@@ -3834,9 +3846,11 @@ code.path {
     }
     text($('profile-hint'), cur
       ? ('当前方案：' + cur.name + ' —— ' + cur.desc
+         + ((cur.values && cur.values.account)
+            ? (' · 账号 ' + cur.values.account + (cur.values.suffix || '')) : '')
          + (cur.match_ssids.length ? (' · 自动匹配 ' + cur.match_ssids.join('、')) : ' · 手动方案'))
       : (items.length
-         ? '在列表里选一个方案，点「应用选中方案」即可切换（账号密码不受影响）。'
+         ? '在列表里选一个方案，点「应用选中方案」即可切换 —— 账号与后缀会一起切过来。'
          : '还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。'));
     var auto = $('profile-auto-switch');
     if (auto) auto.checked = !!(p && p.auto_switch);
@@ -3865,6 +3879,22 @@ code.path {
     var applyBtn = $('btn-profile-apply');
     var delBtn = $('btn-profile-delete');
     var autoBox = $('profile-auto-switch');
+    var useCurSsidBtn = $('profile-use-current-ssid');
+    if (useCurSsidBtn) useCurSsidBtn.addEventListener('click', function () {
+      var box = $('profile-match-ssids');
+      if (!box) return;
+      var current = (lastWifi && lastWifi.current) ? String(lastWifi.current) : '';
+      if (!current) {
+        text($('err-profile'), '读不到当前 Wi-Fi 名（有线 / 没连 Wi-Fi 时是正常的）');
+        return;
+      }
+      var parts = box.value.replace(/，/g, ',').split(',').map(function (s) { return s.trim(); })
+        .filter(function (s) { return s; });
+      if (parts.indexOf(current) < 0) parts.push(current);
+      box.value = parts.join(',');
+      text($('err-profile'), '');
+      toast('已加入匹配：' + current, 'success', 2000);
+    });
     if (saveBtn) saveBtn.addEventListener('click', function () {
       var nameEl = $('profile-new-name'), matchEl = $('profile-match-ssids');
       var name = nameEl ? nameEl.value : '';

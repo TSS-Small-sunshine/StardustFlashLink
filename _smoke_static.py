@@ -1482,6 +1482,12 @@ check("v2.1.1.0 诊断包里**没有任何密码文件**，密码原文也不在
       repr(_sec_names))
 check("v2.1.1.0 诊断包 config.json：两个账号都已脱敏",
       "2023000001" not in _sec_cfg_text and "2023999999" not in _sec_cfg_text)
+check("v2.1.1.0 配置页：方案卡片显示账号、匹配名可一键用当前 Wi-Fi",
+      "profile-use-current-ssid" in src_web
+      and "var lastWifi = null;" in src_web
+      and "cur.values.account" in src_web
+      and "账号与后缀会一起切过来" in src_web
+      and "账号密码不受影响" not in src_web)
 
 # ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
 # P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的
@@ -1696,7 +1702,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.0.0", version.VERSION == "2.1.0.0", version.VERSION)
+check("版本 = 2.1.1.0", version.VERSION == "2.1.1.0", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
