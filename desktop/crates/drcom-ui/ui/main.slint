@@ -22,6 +22,8 @@ export component AppWindow inherits Window {
     in property <string> data-dir-line: "…";
     in property <string> config-line: "…";
     in property <string> service-line: "…";
+    /// v3.0：界面自带的后台检查状态（由 worker 线程每秒刷新 ✓）
+    in property <string> background-line: "…";
     in property <string> result-text: "点「立即检查」或「运行自检」看这里。";
     in property <string> result-kind: "info";
     in property <bool>   busy: false;
@@ -125,7 +127,7 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 label: "运行方式";
                 value: root.service-line;
-                note: root.portable-line;
+                note: root.background-line;
                 accent-color: Theme.text-muted;
             }
             StatCard {

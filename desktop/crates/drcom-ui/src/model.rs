@@ -25,6 +25,8 @@ pub struct Dashboard {
     pub data_dir_line: String,
     pub config_line: String,
     pub service_line: String,
+    /// v2.1.1.0 风格：界面自带的后台检查状态（由 worker 每秒刷新 ✓）
+    pub background_line: String,
 }
 
 /// 采集一次（只读 ✓；界面点「刷新」也是走它）。
@@ -61,6 +63,8 @@ pub fn collect() -> Dashboard {
             format!("{} 个问题", errors.len())
         },
         service_line: os.service_flavor().to_string(),
+        // 只是初值 ✓ —— 真正的状态由 worker 线程每秒刷进界面 ✓
+        background_line: "后台检查启动中…".to_string(),
     }
 }
 

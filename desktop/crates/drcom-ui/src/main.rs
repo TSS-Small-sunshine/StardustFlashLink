@@ -7,6 +7,7 @@
 //! 回主线程更新界面（Slint 的界面属性只能在事件循环线程改 ✓）。
 
 mod model;
+mod worker;
 
 use drcom_core::{instance, platform};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
@@ -119,7 +120,27 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     let _keep_timer_alive = instance_timer;
 
-    ui.run()
+    // —— v3.0：界面自带的后台检查（**不必装系统服务** ✓）；服务在跑时它会自动让位 ✓ ——
+    let ui_weak_for_background = ui.as_weak();
+    let background = worker::Worker::start();
+    let background_for_ui = background.clone();
+    let background_timer = slint::Timer::default();
+    background_timer.start(
+        slint::TimerMode::Repeated,
+        std::time::Duration::from_millis(1000),
+        move || {
+            if let Some(ui) = ui_weak_for_background.upgrade() {
+                ui.set_background_line(SharedString::from(
+                    background_for_ui.snapshot().line.as_str(),
+                ));
+            }
+        },
+    );
+
+    let result = ui.run();
+    background.stop();
+    drop(background_timer);
+    result
 }
 
 /// 打开（或把已开着的抬到前面）设置窗口 ✓
@@ -361,6 +382,7 @@ fn apply(ui: &AppWindow, dash: &model::Dashboard) {
     ui.set_data_dir_line(SharedString::from(dash.data_dir_line.as_str()));
     ui.set_config_line(SharedString::from(dash.config_line.as_str()));
     ui.set_service_line(SharedString::from(dash.service_line.as_str()));
+    ui.set_background_line(SharedString::from(dash.background_line.as_str()));
 }
 
 /// 更新结果区（颜色 + 文本一起给，省得界面自己判断 ✓）。
