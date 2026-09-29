@@ -107,7 +107,10 @@
 
 ## 🏷 项目状态
 
-**当前版本**：`v2.1.0.0 "Vega"`（织女星，2026-09-28） · **状态**：🟢 积极维护
+| 版本线 | 版本 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| **2.x（稳定线）** | `v2.1.0.0 "Vega"`（织女星，2026-09-28） | 🟢 积极维护 | **你现在用的这条**：Windows 10/11 —— [Release](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/latest) 与自动升级通道都以它为准 ✓ |
+| **3.0（DEV 线）** | `3.0.0.0-preview.1` | 🚧 开发中（**仅预览**） | 跨平台重写（Rust + Slint：Windows / Linux / macOS 同源）；只发预览版，**正式用户的自动升级收不到它** ✓ → [看进展](#开发中30-跨平台版dev-线) |
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
