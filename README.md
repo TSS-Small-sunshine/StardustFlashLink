@@ -89,7 +89,7 @@
   <img src="docs/screenshot-webui.png" alt="Web UI 亮色主题" width="760"/>
 </p>
 
-**Web UI 主界面（暗色）** — 右上角可一键切换，或跟随系统 `prefers-color-scheme`
+**Web UI 主界面（暗色）** — 右上角一键三态循环：星尘主题（v2.1.2.0 起的默认）→ 亮色 → 暗色
 
 <p align="center">
   <img src="docs/screenshot-webui-dark.png" alt="Web UI 暗色主题" width="760"/>

@@ -2171,7 +2171,7 @@ code.path {
         <span class="dot dot-unknown dot-pulse" id="liveness-dot" aria-hidden="true"></span>
         <span id="liveness-text">连接中…</span>
       </span>
-      <button class="icon-btn" id="btn-theme" type="button" aria-label="切换亮色 / 暗色主题" title="切换主题">
+      <button class="icon-btn" id="btn-theme" type="button" aria-label="切换主题" title="切换主题">
         <svg class="theme-icon theme-icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4"></circle>
           <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path>
@@ -2895,6 +2895,9 @@ code.path {
   }
 
   function bindTheme() {
+    /* 首屏先同步一次：按钮的 aria-label / title 要跟「当前真实主题」一致
+       （三态之后光靠点击才更新会滞后一屏，读屏会念错） */
+    applyTheme(currentTheme(), false);
     var btn = $('btn-theme');
     if (btn) {
       btn.addEventListener('click', function () {

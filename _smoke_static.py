@@ -1614,6 +1614,62 @@ _st_ok, _pl_ok = _eula.api_get_changelog()
 check("v2.0.4.0 changelog 正常读取", _st_ok == 200 and int(_pl_ok.get("size") or 0) > 100,
       "status=%s size=%s" % (_st_ok, _pl_ok.get("size")))
 
+# ---- v2.1.2.0：BakaXL 风（星尘主题）—— 默认外观 + 三态循环 ----
+# 为什么要盯这几条：这次动的是「**默认外观**」，坏了不会报错，只会让所有人第一眼看到错的
+# 主题；而新加的整窗图层一旦漏了 pointer-events: none，整页会点不动（静默灾难）。
+import re as _re  # noqa: E402
+
+
+def _css_rule(selector):
+    """从页面 CSS 抠出某条声明的块（只认本文件里「选择器 { … }」的扁平写法，不嵌大括号）。"""
+    _m = _re.search(_re.escape(selector) + r"\s*\{([^}]*)\}", _page)
+    return _m.group(1) if _m else ""
+
+
+def _decl(block, name):
+    _m = _re.search(_re.escape(name) + r"\s*:\s*([^;]+);", block)
+    return _m.group(1).strip() if _m else ""
+
+
+check("v2.1.2.0 三套令牌并存（:root 亮色 / dark / baka），baka 是实打实的一套",
+      ":root {" in _page and '[data-theme="dark"] {' in _page
+      and '[data-theme="baka"] {' in _page
+      and _decl(_css_rule('[data-theme="baka"]'), "--material") != ""
+      and _decl(_css_rule('[data-theme="baka"]'), "--accent") != "")
+check("v2.1.2.0 整窗大图背景只挂在 baka 上（老主题的 body::before 仍是三处色晕）",
+      "radial-gradient" in _css_rule('[data-theme="baka"] body::before')
+      and "var(--glow-a)" in _css_rule("body::before"))
+_baka_mask = _css_rule('[data-theme="baka"] body::after')
+check("v2.1.2.0 整窗遮罩不吃点击（漏了 pointer-events: none 整页就点不动）",
+      _decl(_baka_mask, "pointer-events") == "none", repr(_baka_mask[:60]))
+check("v2.1.2.0 背景 / 遮罩都压在内容层之下（负 z-index < .wrap 的 1）",
+      _decl(_css_rule('[data-theme="baka"] body::before'), "z-index") == "-3"
+      and _decl(_baka_mask, "z-index") == "-2"
+      and _decl(_css_rule(".wrap"), "z-index") == "1")
+check("v2.1.2.0 首屏大标题只在 baka 出现（老主题 .hero 照旧 display:none）",
+      ".hero { display: none; }" in _page
+      and '[data-theme="baka"] .hero { display: block;' in _page
+      and 'class="hero-title"' in _page)
+check("v2.1.2.0 首屏默认主题 = baka，三种取值都认（存过的用户不被清掉）",
+      "var theme = 'baka';" in _page
+      and "saved === 'baka' || saved === 'dark' || saved === 'light'" in _page
+      and "systemTheme" not in _page and "matchMedia" not in _page)
+_theme_arr = _re.search(r"var THEMES = \[([^\]]+)\]", _page)
+_palette = [t.strip().strip("'") for t in _theme_arr.group(1).split(",")] if _theme_arr else []
+_seq = []
+if _palette:
+    _cur = _palette[0]
+    for _ in range(len(_palette)):
+        _cur = _palette[(_palette.index(_cur) + 1) % len(_palette)]
+        _seq.append(_cur)
+check("v2.1.2.0 点三下回到原点（三态循环闭合：baka → light → dark → baka）",
+      _palette == ["baka", "light", "dark"] and _seq == ["light", "dark", "baka"],
+      "%s / %s" % (_palette, _seq))
+check("v2.1.2.0 按钮静态标签不再写死两态，且首屏同步一次（读屏别念错）",
+      'aria-label="切换亮色 / 暗色主题"' not in _page
+      and "applyTheme(currentTheme(), false);" in _page)
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
