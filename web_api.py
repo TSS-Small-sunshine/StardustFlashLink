@@ -235,6 +235,49 @@ def _read_json_body(handler):
         raise ValueError("请求体不是合法 JSON")
 
 
+def _protocol():
+    """拿协议模块：优先用注入的 ✓，没有就同目录直接导入 ✓ —— **绝不抛异常** ✗。"""
+    mod = globals().get("_protocol_mod")
+    if mod is not None:
+        return mod
+    try:
+        import protocol as fallback       # 同目录，导入安全 ✓（单测 / 预览也用得上 ✓）
+        return fallback
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def api_get_wifi():
+    """GET /api/wifi — 当前 / 已保存 / 附近可见的 Wi-Fi 名（v2.1.1.0）。
+
+    给配置页用：把当前 SSID 显示出来 ✓，并把能选的名字列出来让人**点一下就填** ✓
+    （守卫白名单 / 方案匹配名，手打差一个字母就永远不命中 ✗）。
+    读不到就回空列表 —— **绝不 500** ✗。
+    """
+    empty = {"ok": True, "current": "", "known": [], "visible": []}
+    mod = _protocol()
+    if mod is None:
+        return {"ok": False, "error": "协议模块不可用", "current": "", "known": [], "visible": []}
+    try:
+        current = mod.get_current_ssid() or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("读当前 Wi-Fi 名失败: %s", exc)
+        current = ""
+    known, visible = [], []
+    for key, func in (("known", mod.known_ssids), ("visible", mod.visible_ssids)):
+        try:
+            values = func() or []
+        except Exception as exc:  # noqa: BLE001 —— 单项失败不影响其它两栏 ✓
+            logger.exception("读 %s Wi-Fi 列表失败: %s", key, exc)
+            values = []
+        if key == "known":
+            known = values
+        else:
+            visible = values
+    empty.update({"current": current, "known": known, "visible": visible})
+    return empty
+
+
 def api_get_profiles():
     """GET /api/profiles — 配置方案列表（方案 = 位置相关字段的快照）。"""
     mod = globals().get("_profiles_mod")
@@ -1142,6 +1185,10 @@ class _Handler(BaseHTTPRequestHandler):
                         _days = 7
                 _send_json(self, 200, api_get_metrics(_days))
                 return
+            # —— Wi-Fi 名清单（v2.1.1.0）：当前 SSID + 可点选的名字 ✓ ——
+            if path == "/api/wifi":
+                _send_json(self, 200, api_get_wifi())
+                return
             # —— 配置方案（v2.0.9.0 / B5）——
             if path == "/api/profiles":
                 _send_json(self, 200, api_get_profiles())
@@ -1715,6 +1762,14 @@ a:hover { color: var(--accent-hover); }
 }
 .field input.is-invalid, .field select.is-invalid { border-color: var(--err); box-shadow: 0 0 0 4px var(--err-fill); }
 .field input[type=number].cfg-lg, .field input[type=text].cfg-lg { padding: 13px 15px; font-size: 15px; }
+/* v2.1.1.0：Wi-Fi 名「点一下就填」——当前 SSID 一行 + 可点选的名字 */
+.ssid-bar { display: flex; align-items: center; gap: 10px; margin: 8px 0 2px; flex-wrap: wrap; font-size: 13px; }
+.ssid-bar b { font-weight: 600; }
+.ssid-bar button, .ssid-chips button { border: 1px solid rgba(127,127,127,.35); background: transparent;
+  color: inherit; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.ssid-bar button:hover, .ssid-chips button:hover { border-color: rgba(127,127,127,.75); }
+.ssid-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.ssid-chips .ssid-hint { font-size: 12px; opacity: .6; }
 .hint { font-size: 12.5px; color: var(--text-3); margin-top: 6px; line-height: 1.45; }
 .err { font-size: 12.5px; color: var(--err); margin-top: 6px; }
 .err:empty { display: none; }
@@ -2224,6 +2279,12 @@ code.path {
         <label for="cfg-guard-ssids">允许的 Wi-Fi 名称（SSID）</label>
         <input type="text" id="cfg-guard-ssids" class="cfg-lg" placeholder="例如 Campus-WiFi,Dorm-WiFi" autocomplete="off">
         <div class="hint">逗号分隔（中英文逗号都认）；留空 = 不按 Wi-Fi 判断</div>
+        <!-- v2.1.1.0：当前 Wi-Fi 直接显示 + 候选名字点一下就填（省得手打、差一个字母就白配） -->
+        <div class="ssid-bar">
+          <span>当前 Wi-Fi：<b id="ssid-now">读取中…</b></span>
+          <button type="button" id="ssid-refresh">重新读取</button>
+        </div>
+        <div class="ssid-chips" id="ssid-chips"></div>
       </div>
       <div class="field">
         <label for="cfg-guard-subnets">允许的网段（CIDR）</label>
@@ -2624,6 +2685,8 @@ code.path {
   var API = {
     status: getJson.bind(null, '/api/status'),
     config: getJson.bind(null, '/api/config'),
+    /* v2.1.1.0：当前 SSID + 已保存 / 可见的 Wi-Fi 名（给「点一下就填」用） */
+    wifi: getJson.bind(null, '/api/wifi'),
     about: getJson.bind(null, '/api/about'),
     logPath: getJson.bind(null, '/api/log_file_path'),
     logTail: function (offset, max, level) {
@@ -2907,12 +2970,63 @@ code.path {
       $('cfg-guard-enabled').checked = !!c.network_guard_enabled;
       $('cfg-guard-ssids').value = c.guard_allowed_ssids || '';
       $('cfg-guard-subnets').value = c.guard_allowed_subnets || '';
+      loadWifi();                                   /* v2.1.1.0：顺便把当前 SSID 与候选名字读出来 */
       setPwdBadge(c.password_status);
       clearErrors();
       text($('config-state'), '已从服务端读取，修改后点击保存');
     }).catch(function () {
       toast('读取配置失败，请稍后重试', 'error');
     });
+  }
+
+  /* v2.1.1.0：Wi-Fi 名「读出来 + 点一下就填」。
+     背景：白名单与方案匹配名以前只能手打 —— 差一个字母就永远不命中，
+     而用户完全不知道为什么守卫不生效。现在把当前 SSID 显示出来，
+     并把「保存过的 / 附近可见的」名字做成可点的药丸，点一下就追加进输入框。 */
+  function loadWifi() {
+    var now = $('ssid-now');
+    var chips = $('ssid-chips');
+    if (!now || !chips) return;
+    if (!now.dataset.bound) {                     /* 刷新按钮只绑一次 */
+      var btn = $('ssid-refresh');
+      if (btn) btn.addEventListener('click', loadWifi);
+      now.dataset.bound = '1';
+    }
+    now.textContent = '读取中…';
+    chips.textContent = '';
+    API.wifi().then(function (w) {
+      if (!w || w.ok === false) { now.textContent = '读不到'; return; }
+      now.textContent = w.current ? w.current : '读不到（有线 / 没连 Wi-Fi）';
+      var names = [];
+      (w.known || []).forEach(function (n) { if (n && names.indexOf(n) < 0) names.push(n); });
+      (w.visible || []).forEach(function (n) { if (n && names.indexOf(n) < 0) names.push(n); });
+      if (!names.length) {
+        var hint = document.createElement('span');
+        hint.className = 'ssid-hint';
+        hint.textContent = '没读到可选的 Wi-Fi 名，直接手填也行';
+        chips.appendChild(hint);
+        return;
+      }
+      names.forEach(function (name) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = name;
+        btn.addEventListener('click', function () { addSsidToGuard(name); });
+        chips.appendChild(btn);
+      });
+    }).catch(function () { now.textContent = '读不到'; });
+  }
+
+  /* 把一个 SSID 追加进「允许的 Wi-Fi 名称」输入框（去重，中英文逗号都用） */
+  function addSsidToGuard(name) {
+    var box = $('cfg-guard-ssids');
+    if (!box) return;
+    var parts = box.value.replace(/，/g, ',').split(',').map(function (s) { return s.trim(); })
+      .filter(function (s) { return s; });
+    if (parts.indexOf(name) >= 0) { toast('“' + name + '”已经在里面了', 'ok'); return; }
+    parts.push(name);
+    box.value = parts.join(',');
+    toast('已加入：' + name, 'ok');
   }
 
   function collectConfig() {

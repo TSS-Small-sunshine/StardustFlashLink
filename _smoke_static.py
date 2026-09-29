@@ -1369,6 +1369,28 @@ check("v2.1.1.0 采样节拍：便宜通道秒级、贵通道明显更慢",
 check("v2.1.1.0 状态里留了「为什么突然查了一次」",
       "last_net_change_at" in svc.STATE and "last_net_change_why" in svc.STATE)
 
+# ---- v2.1.1.0：Wi-Fi 名清单（配置页「当前 SSID + 点一下就填」）----
+check("v2.1.1.0 Wi-Fi 清单：`标签 : 名字` 取右半边（中英文 netsh 都能认）",
+      _proto._parse_label_values(
+          "配置文件信息\n-------------\n    所有用户配置文件 : Campus-WiFi\n"
+          "    All User Profile     : Dorm-WiFi\n    所有用户配置文件 : Campus-WiFi\n"
+      ) == ["Campus-WiFi", "Dorm-WiFi"])
+check("v2.1.1.0 Wi-Fi 清单：空值 / 分隔线不混进来，且有上限",
+      _proto._parse_label_values("   :   \n----\n: x\n a : b\n") == ["x", "b"]
+      and _proto.MAX_SSID_LIST >= 10)
+check("v2.1.1.0 /api/wifi 端点与前端挂钩都在位",
+      "def api_get_wifi" in src_web
+      and '"/api/wifi"' in src_web
+      and "wifi: getJson" in src_web
+      and "id=\"ssid-now\"" in src_web
+      and "id=\"ssid-chips\"" in src_web
+      and "function addSsidToGuard" in src_web)
+check("v2.1.1.0 协议层提供 known_ssids / visible_ssids（读不到回空列表，不抛异常）",
+      callable(getattr(_proto, "known_ssids", None))
+      and callable(getattr(_proto, "visible_ssids", None))
+      and isinstance(_proto.known_ssids(), list)
+      and isinstance(_proto.visible_ssids(), list))
+
 # ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
 # P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的
 # 异常（HTTPError / URLError 包装 / socket 层错误）都会顺手把密码写进日志 ✗。
