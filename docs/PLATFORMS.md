@@ -128,6 +128,9 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 4. **ARMv7 上的 GUI**：交叉编译 Slint（需要 GL/X 的 sysroot）打算放到 M3 收尾；
    ARMv7 在 M1–M2 阶段先保证 **headless 核心**可用（树莓派/服务器场景本来就不需要界面 ✓）。
    → 若你要「ARMv7 也要图形界面」，我会在 M3 里补 `armv7` 的交叉 sysroot 与 AppImage 打包。
+5. **存储形式（2026-09-29 议过，暂不实施）** ✓：配置与密码**继续用** `config.json` / `password.txt` ✗（它们是人可读、可手改、并且所有脱敏/导出能力都建立在「文本」上 ✓）；
+   历史与指标若要长期保留，**优先上 JSONL 事件日志**（零依赖、两边通用 ✓），SQLite 只在「确实要 SQL 式查询」时再考虑 ✓
+   —— 完整分析、代价清单与触发条件见 [`docs/STORAGE.md`](STORAGE.md) ✓。
 
 ---
 
