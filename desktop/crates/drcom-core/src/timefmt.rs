@@ -7,18 +7,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// `2026-09-28 04:12:33Z`（UTC ✓）
 pub fn format_utc(time: SystemTime) -> String {
+    let (year, month, day, hour, minute, second) = parts_utc(time);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z",
+        year, month, day, hour, minute, second
+    )
+}
+
+/// 拆成 `(年, 月, 日, 时, 分, 秒)`（UTC ✓）—— ZIP 的 DOS 时间字段、按天分桶都要它 ✓。
+pub fn parts_utc(time: SystemTime) -> (i64, u32, u32, u32, u32, u32) {
     let secs = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
     let (year, month, day) = civil_from_days((secs / 86_400) as i64);
     let rest = secs % 86_400;
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}Z",
-        year,
-        month,
-        day,
-        rest / 3600,
-        (rest % 3600) / 60,
-        rest % 60
-    )
+    (year, month, day, (rest / 3600) as u32, ((rest % 3600) / 60) as u32, (rest % 60) as u32)
+}
+
+/// 只要日期部分：`2026-09-28` ✓（按天统计 / 比较大小都用它，字符串字典序 = 时间序 ✓）
+pub fn date_utc(time: SystemTime) -> String {
+    let (year, month, day, ..) = parts_utc(time);
+    format!("{:04}-{:02}-{:02}", year, month, day)
 }
 
 /// 文件名安全的时间戳：`20260928-041233` ✓
@@ -119,6 +126,17 @@ mod tests {
         assert_eq!(human_duration(Duration::from_secs(3900)), "1 小时 5 分");
         assert_eq!(human_duration(Duration::from_secs(86_400)), "1 天");
         assert_eq!(human_duration(Duration::from_secs(90_000)), "1 天 1 小时");
+    }
+
+    #[test]
+    fn parts_and_date_helpers_are_consistent_with_format() {
+        let t = UNIX_EPOCH + Duration::from_secs(1_774_732_800);
+        assert_eq!(parts_utc(t), (2026, 3, 28, 21, 20, 0));
+        assert_eq!(date_utc(t), "2026-03-28");
+        assert!(format_utc(t).starts_with(&date_utc(t)), "两者必须一致 ✓");
+        let t2 = UNIX_EPOCH + Duration::from_secs(1_709_164_800); // 2024-02-29
+        assert_eq!(parts_utc(t2), (2024, 2, 29, 0, 0, 0));
+        assert_eq!(date_utc(t2), "2024-02-29");
     }
 
     #[test]

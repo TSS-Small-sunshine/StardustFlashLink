@@ -10,8 +10,10 @@ pub mod backoff;
 pub mod channel;
 pub mod cidr;
 pub mod config;
+pub mod diagnostics;
 pub mod guard;
 pub mod logfile;
+pub mod metrics;
 pub mod net;
 pub mod platform;
 pub mod probe;
@@ -21,6 +23,7 @@ pub mod scheduler;
 pub mod secret;
 pub mod session;
 pub mod timefmt;
+pub mod zipwriter;
 
 pub use backoff::{Backoff, BACKOFF_LEVELS_MIN};
 pub use channel::{Channel, Version};

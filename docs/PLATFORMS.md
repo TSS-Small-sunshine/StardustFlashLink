@@ -104,6 +104,7 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | 方案 / 退避 | `profiles`（**含 `suffix`**：校内公共场合清空尾缀、宿舍带 `@yd` ✓；先全量校验再写盘；`adapt` 按 Wi-Fi 名自动切）；`backoff`（5/10/20/40/60 封顶）✓ |
 | 方案入口 | CLI `profile list/save/activate/delete/auto` —— 不用手改 `config.json` ✓（`--no-suffix` 规避 PowerShell 吃掉空参数的坑 ✗） |
 | 调度 / 日志 | `scheduler`（退避优先、`next_check_at` 单写者、改间隔不跳倒计时）；`logfile`（业务 5 MB×3 / 升级 2 MB×2，读取最旧→最新）；`timefmt`（零依赖 UTC + 中文时长）✓ |
+| 指标 / 诊断 | `metrics`（日志行带 `[ok]/[fail]/[skip]` 等级；成功率 = ok/(ok+fail)、按天分桶、无样本显示 `—`）；`diagnostics` + `zipwriter`（**零依赖 ZIP**：store + CRC32 + 中央目录 ✓，账号打码、密码永不进包、逐行脱敏 ✓）—— 真机包用 **Python `zipfile.testzip()`** 外部校验通过 ✓ |
 | 守护循环 | CLI `run [--once]`：每轮重读配置 → 守卫 → 检查 → 写日志 → 按退避排下一次 ✓（服务化在 M3） |
 | **桌面界面（M2）** | **Slint 原生控件，零 WebView** ✓：深色星尘渐变 + 玻璃卡片 + 品牌色（`#0071e3` / `#2AA8FF→#3DDC97`）；4 个操作（立即检查 / 运行自检 / 打开数据目录 / 刷新状态）；账号在界面上脱敏显示 ✓ |
 | 界面可测性 | 界面**不做任何判断**：读配置、跑检查、自检都在 `drcom-ui::model` 里，`cargo test` 不弹窗口就能测 ✓ |

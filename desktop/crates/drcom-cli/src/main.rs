@@ -15,7 +15,7 @@ mod server;
 use drcom_core::net::{self, PlainHttp};
 use drcom_core::{
     channel::Version, config::Config, logfile::RotatingLog, platform, protocol,
-    scheduler::Scheduler, secret, session, timefmt, Status,
+    scheduler::Scheduler, secret, session, timefmt, Outcome, Status,
 };
 use std::time::{Duration, SystemTime};
 
@@ -58,6 +58,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("login") => login(&args[1..]),
         Some("run") => run_loop(&args[1..]),
         Some("profile") => profile_cmd(&args[1..]),
+        Some("diagnostics") => diagnostics_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -78,6 +79,7 @@ fn print_help() {
          login [--dry-run] [--host H] [--account A] [--suffix S] [--password P]\n  \
          run [--once]                守护循环：按配置间隔检查、失败走退避（服务化在 M3）\n  \
          profile list|save|activate|delete|auto   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）\n  \
+         diagnostics [--out F] [--days N]        生成脱敏诊断包（ZIP，密码永不进包 ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -290,7 +292,11 @@ fn login(args: &[String]) -> i32 {
     let report = session::check_once(&cfg, &password, &PlainHttp, timeout);
     let summary = report.outcome.summary_cn();
     println!("{}", summary);
-    if let Err(e) = log_line(&format!("{} {}", timefmt::format_utc(SystemTime::now()), summary)) {
+    if let Err(e) = log_line(&drcom_core::metrics::log_line(
+        SystemTime::now(),
+        kind_of(&report.outcome),
+        &summary,
+    )) {
         eprintln!("（日志写不进去：{}）", e);
     }
     if report.outcome.is_ok() {
@@ -298,6 +304,73 @@ fn login(args: &[String]) -> i32 {
     } else {
         1
     }
+}
+
+/// `diagnostics [--out FILE] [--days N]`：生成**脱敏**诊断包（ZIP ✓）。
+fn diagnostics_cmd(args: &[String]) -> i32 {
+    use drcom_core::{diagnostics, metrics, zipwriter};
+    let days = take_opt(args, "--days")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(7)
+        .clamp(1, 90);
+    let now = SystemTime::now();
+
+    let business = RotatingLog::business(platform::log_dir().join("campus_login.log"));
+    let lines = business.read_all_lines().unwrap_or_default();
+    let upgrade = RotatingLog::upgrade(platform::log_dir().join("upgrade.log"));
+    let upgrade_lines = upgrade.read_all_lines().unwrap_or_default();
+
+    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    let status = Status::collect();
+    let report = metrics::collect(&lines, days, now);
+
+    let mut extra: Vec<(&str, String)> = Vec::new();
+    if !upgrade_lines.is_empty() {
+        extra.push(("upgrade.log", upgrade_lines.join("\n")));
+    }
+    let inputs = diagnostics::Inputs {
+        status: &status,
+        config: &cfg,
+        log_lines: &lines,
+        metrics: &report,
+        extra,
+    };
+    let zip = match diagnostics::build_package(&inputs, now) {
+        Ok(zip) => zip,
+        Err(e) => {
+            eprintln!("生成诊断包失败：{}", e);
+            return 1;
+        }
+    };
+
+    // `--out` 给了路径就按路径；只给文件名就放数据目录 ✓
+    let path = match take_opt(args, "--out") {
+        Some(value) if value.contains('/') || value.contains('\\') => std::path::PathBuf::from(value),
+        Some(value) => platform::data_dir().join(value),
+        None => platform::data_dir()
+            .join(format!("stardust-flash-link-diagnostics-{}.zip", timefmt::compact_utc(now))),
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("建目录失败 {}：{}", parent.display(), e);
+            return 1;
+        }
+    }
+    if let Err(e) = std::fs::write(&path, &zip) {
+        eprintln!("写文件失败 {}：{}", path.display(), e);
+        return 1;
+    }
+
+    println!("诊断包已生成：{}（{:.1} KB）", path.display(), zip.len() as f64 / 1024.0);
+    println!("{}", report.summary_cn());
+    if let Some(names) = zipwriter::entry_names(&zip) {
+        println!("包含 {} 个文件：", names.len());
+        for name in names {
+            println!("  {}", name);
+        }
+    }
+    println!("提示：发出去之前建议先解压看一眼 —— **密码永远不进包** ✓（日志逐行脱敏、账号只留前 4 位）");
+    0
 }
 
 /// 往业务日志里追加一行（轮转策略与 2.x 一致：5 MB × 3 ✓）。
@@ -359,10 +432,10 @@ fn run_loop(args: &[String]) -> i32 {
 
         let now = SystemTime::now();
         if first || scheduler.is_due(now) {
-            let (ok, summary) = one_check(&cfg);
+            let (kind, summary) = one_check(&cfg);
             let finished = SystemTime::now();
-            scheduler.record(ok, &summary, finished);
-            let _ = log_line(&format!("{} {}", timefmt::format_utc(finished), summary));
+            scheduler.record(kind != drcom_core::metrics::Kind::Fail, &summary, finished);
+            let _ = log_line(&drcom_core::metrics::log_line(finished, kind, &summary));
             println!(
                 "{} · 连续失败 {} 次 · 下次 {} 后",
                 summary,
@@ -379,16 +452,18 @@ fn run_loop(args: &[String]) -> i32 {
     }
 }
 
-/// 跑**一次**检查：守卫 → 账号/密码校验 → `session::check_once`，返回（是否健康, 文案）。
+/// 跑**一次**检查：守卫 → 账号/密码校验 → `session::check_once`，返回（等级, 文案）。
 ///
-/// 注意「健康」的口径：**不在校园网 / 账号未设置都不算失败** ✓ —— 不该因此进退避 ✗。
-fn one_check(cfg: &Config) -> (bool, String) {
+/// 等级口径（与统计一致 ✓）：**不在校园网 / 账号未设置 = `Skip`**（不算失败 ✓，
+/// 否则用户一回家就进退避 ✗）；网关不可达 / 密码错 = `Fail` ✓。
+fn one_check(cfg: &Config) -> (drcom_core::metrics::Kind, String) {
+    use drcom_core::metrics::Kind;
     let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SEC);
     let probe = drcom_core::probe::snapshot();
     let verdict = drcom_core::guard_allows(cfg, probe.ssid.as_deref(), &probe.ips);
     if !verdict.allowed {
         return (
-            true,
+            Kind::Skip,
             format!(
                 "{}（Wi-Fi: {}）",
                 verdict.reason,
@@ -397,14 +472,24 @@ fn one_check(cfg: &Config) -> (bool, String) {
         );
     }
     if !cfg.account_configured() {
-        return (true, "账号未设置，已跳过检查".to_string());
+        return (Kind::Skip, "账号未设置，已跳过检查".to_string());
     }
     let password = read_password_file();
     if password.is_empty() {
-        return (false, "密码是空的（去密码文件里写一行）".to_string());
+        return (Kind::Fail, "密码是空的（去密码文件里写一行）".to_string());
     }
     let report = session::check_once(cfg, &password, &PlainHttp, timeout);
-    (report.outcome.is_ok(), report.outcome.summary_cn())
+    (kind_of(&report.outcome), report.outcome.summary_cn())
+}
+
+/// `Outcome` → 统计等级（口径只有这一处 ✓，免得两处不一致 ✗）。
+fn kind_of(outcome: &Outcome) -> drcom_core::metrics::Kind {
+    use drcom_core::metrics::Kind;
+    match outcome {
+        Outcome::SkippedNoAccount => Kind::Skip,
+        Outcome::AlreadyOnline | Outcome::LoggedIn { .. } => Kind::Ok,
+        _ => Kind::Fail,
+    }
 }
 
 /// `profile`：方案管理（list / save / activate / delete / auto）。

@@ -25,7 +25,22 @@ cargo run -p drcom-cli -- status       # 状态 JSON（与本地 API 同一份�
 cargo run -p drcom-cli -- serve        # 起本地控制 API（http://127.0.0.1:8848）
 cargo run -p drcom-cli -- login --dry-run   # 只打印「脱敏后的」登录 URL ✓
 cargo run -p drcom-cli -- run --once        # 跑一次守护循环（含位置自适应 + 写日志）
+cargo run -p drcom-cli -- diagnostics        # 生成「脱敏诊断包」（ZIP；密码永不进包 ✓）
 ```
+
+### 排障：一键脱敏诊断包
+
+出问题时不用截图 + 口述，直接生成一个包发给别人 ✓：
+
+```bash
+stardust-flash-link diagnostics --out diag.zip   # 忽略路径则放数据目录
+```
+
+包里是：`说明.txt`、`status.json`、`config.sanitized.json`（**账号只留前 4 位**）、
+`metrics.json`（近 N 天成功率）、`logs/campus_login.log`（最多 400 行，**逐行脱敏** ✓）。
+
+铁律：**密码永远不进包** ✓；日志里任何 URL 都会被擦成 `<url>` ✓（有单测 + 真机双向验证 ✓；
+包用 Python `zipfile.testzip()` 校验为**标准 ZIP** ✓）。
 
 ### 位置方案：校内公共场合不带运营商尾缀
 
