@@ -1538,6 +1538,72 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 }
 
 /* ============================================================
+   2.5 设计令牌 — BakaXL 风（html[data-theme="baka"]，v2.1.2 起为默认主题）
+
+   参考感（用户给的 BakaXL 截图）：整窗一张「大图」打底（见 §3），
+   上面全部是更白更厚、圆角更大的卡片，分层靠「留白 + 阴影」而不是描边；
+   标题字号/字重拉大，强调色收敛到一个。老主题（light/dark）完全不受影响。
+   ============================================================ */
+[data-theme="baka"] {
+  color-scheme: light;
+
+  /* 画布兜底色（真背景是 body::before 的整窗大图） */
+  --bg: #f3f5ff;
+  --glow-a: transparent;
+  --glow-b: transparent;
+  --glow-c: transparent;
+
+  /* 材质：更白更厚，卡片要像「浮在大图上」 */
+  --material: rgba(255, 255, 255, 0.78);
+  --material-2: rgba(255, 255, 255, 0.62);
+  --material-strong: rgba(255, 255, 255, 0.86);
+  --material-solid: #ffffff;
+  --blur: saturate(150%) blur(22px);
+  --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+
+  --fill: rgba(120, 120, 150, 0.10);
+  --fill-2: rgba(120, 120, 150, 0.16);
+  --fill-3: rgba(120, 120, 150, 0.24);
+  --hairline: rgba(60, 70, 120, 0.10);
+  --hairline-2: rgba(60, 70, 120, 0.18);
+
+  --text: #1b1d2b;
+  --text-strong: #0d0f1a;
+  --text-2: #5c6076;
+  --text-3: #7b7f96;
+
+  /* 强调色：星尘紫（呼应参考图里的紫调） */
+  --accent: #6b5cff;
+  --accent-hover: #7d70ff;
+  --accent-soft: rgba(107, 92, 255, 0.14);
+  --accent-softer: rgba(107, 92, 255, 0.07);
+  --ok: #1a7f45;
+  --ok-fill: rgba(48, 209, 88, 0.18);
+  --warn: #9a5b00;
+  --warn-fill: rgba(255, 159, 10, 0.20);
+  --err: #cc2b3d;
+  --err-fill: rgba(255, 69, 58, 0.14);
+  --track: rgba(120, 120, 150, 0.30);
+
+  --terminal: #171a2b;
+  --terminal-text: #e6e7f2;
+  --terminal-dim: #8b8fa8;
+
+  /* 形状：圆角整体再大一档 */
+  --r-xl: 30px;
+  --r-lg: 22px;
+  --r-md: 16px;
+  --r-sm: 12px;
+  --r-xs: 10px;
+
+  /* 阴影：更大更散，分层全靠它 */
+  --shadow-1: 0 2px 6px rgba(50, 60, 110, 0.10), 0 22px 48px -20px rgba(50, 60, 110, 0.42);
+  --shadow-2: 0 4px 12px rgba(50, 60, 110, 0.12), 0 30px 64px -24px rgba(50, 60, 110, 0.46);
+  --shadow-lift: 0 24px 68px -18px rgba(50, 60, 110, 0.44);
+  --shadow-pop: 0 32px 92px -18px rgba(50, 60, 110, 0.52);
+}
+
+/* ============================================================
    3. 基础层：画布 / 字体 / 背景光晕
    ============================================================ */
 *, *::before, *::after { box-sizing: border-box; }
@@ -1570,6 +1636,43 @@ body::before {
   pointer-events: none;
   z-index: 0;
 }
+
+/* BakaXL 风：整窗「大图」= 彩色极光 + 淡淡星点（纯 CSS，不依赖图片文件）。
+   想换自己的图：把最下面那层 linear-gradient 换成 url("...") center/cover no-repeat 即可
+   —— 「主题与背景」可换墙纸的底子就是它。 */
+[data-theme="baka"] body::before {
+  inset: 0;
+  filter: none;
+  z-index: -3;
+  background:
+    radial-gradient(1150px 720px at 12% 0%, #8fb2ff 0%, rgba(143, 178, 255, 0) 62%),
+    radial-gradient(940px 660px at 88% 8%, #ffb3dc 0%, rgba(255, 179, 220, 0) 60%),
+    radial-gradient(1020px 780px at 64% 102%, #93e8ff 0%, rgba(147, 232, 255, 0) 64%),
+    radial-gradient(720px 600px at 2% 86%, #c9b2ff 0%, rgba(201, 178, 255, 0) 62%),
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.9) 0 1.3px, transparent 1.6px),
+    linear-gradient(168deg, #e6ecff 0%, #f6ecff 44%, #e6f8ff 100%);
+  background-size: auto, auto, auto, auto, 190px 190px, auto;
+}
+/* 白色渐隐遮罩：顶部亮（字看得清）、越往下图越透 —— 参考图里最抓眼的层次 */
+[data-theme="baka"] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.80) 0%,
+    rgba(255, 255, 255, 0.66) 24%,
+    rgba(255, 255, 255, 0.46) 52%,
+    rgba(255, 255, 255, 0.28) 100%);
+}
+
+/* 首屏大标题（BakaXL 的「您好，XXX」位）：只在 baka 主题出现，老主题一个像素都不动 */
+.hero { display: none; }
+[data-theme="baka"] .hero { display: block; margin: 22px 2px 6px; }
+[data-theme="baka"] .hero-title { font-size: 40px; font-weight: 800; letter-spacing: -0.04em; line-height: 1.12; }
+[data-theme="baka"] .hero-sub { margin: 8px 0 0; font-size: 14.5px; color: var(--text-2); }
+
 h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.02em; color: var(--text-strong); }
 a { color: var(--accent); text-decoration: none; }
 a:hover { color: var(--accent-hover); }
@@ -1656,6 +1759,7 @@ a:hover { color: var(--accent-hover); }
 .theme-icon { display: block; }
 [data-theme="dark"] .theme-icon-sun { display: none; }
 [data-theme="light"] .theme-icon-moon { display: none; }
+[data-theme="baka"] .theme-icon-moon { display: none; }
 
 .topbar-nav { max-width: 1080px; margin: 0 auto; padding: 0 24px 12px; overflow-x: auto; }
 .tablist {
@@ -2037,17 +2141,14 @@ code.path {
 }
 </style>
 <script>
-/* 首屏主题：localStorage 优先，否则跟随系统 prefers-color-scheme（在 <style> 之后、body 之前执行，避免闪烁） */
+/* 首屏主题：默认 BakaXL 风（baka）；用户手动选过就以用户为准
+   （在 <style> 之后、body 之前执行，避免闪烁） */
 (function () {
-  var theme = 'light';
+  var theme = 'baka';
   try {
     var saved = localStorage.getItem('drcom-theme');
-    if (saved === 'dark' || saved === 'light') {
-      theme = saved;
-    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      theme = 'dark';
-    }
-  } catch (e) { /* 隐私模式下 localStorage 不可用，回落亮色 */ }
+    if (saved === 'baka' || saved === 'dark' || saved === 'light') theme = saved;
+  } catch (e) { /* 隐私模式下 localStorage 不可用，用默认主题 */ }
   document.documentElement.setAttribute('data-theme', theme);
 })();
 </script>
@@ -2098,6 +2199,12 @@ code.path {
 </div>
 
 <main class="wrap" id="main">
+
+  <!-- BakaXL 风首屏大标题（只在 baka 主题显示，见样式表 §2.5） -->
+  <div class="hero">
+    <h1 class="hero-title">星尘闪连</h1>
+    <p class="hero-sub">Dr.COM 校园网自动登录 · 全程本机运行，密码不出这台电脑</p>
+  </div>
 
   <!-- ============ 状态 ============ -->
   <section class="panel active" id="panel-status" role="tabpanel" aria-labelledby="tab-status" tabindex="-1">
@@ -2765,41 +2872,36 @@ code.path {
   /* ============================================================
      分区 3/6 · 主题
      ============================================================ */
-  function systemTheme() {
-    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
-  }
+  /* 三种主题循环：BakaXL 风 → 亮色 → 暗色（不再跟随系统：默认就是 baka，跟随会把默认盖掉） */
+  var THEMES = ['baka', 'light', 'dark'];
+  var THEME_LABEL = { baka: '星尘主题', light: '亮色主题', dark: '暗色主题' };
 
   function applyTheme(theme, persist) {
     document.documentElement.setAttribute('data-theme', theme);
     var btn = $('btn-theme');
-    if (btn) btn.setAttribute('aria-label', theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题');
+    if (btn) {
+      var next = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+      btn.setAttribute('aria-label', '切换到' + THEME_LABEL[next]);
+      btn.setAttribute('title', '当前：' + THEME_LABEL[theme] + '（点击切换）');
+    }
     if (persist) {
       try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* 忽略隐私模式限制 */ }
     }
   }
 
   function currentTheme() {
-    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    var t = document.documentElement.getAttribute('data-theme');
+    return THEMES.indexOf(t) >= 0 ? t : 'baka';
   }
 
   function bindTheme() {
     var btn = $('btn-theme');
     if (btn) {
       btn.addEventListener('click', function () {
-        var next = currentTheme() === 'dark' ? 'light' : 'dark';
+        var next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
         applyTheme(next, true);
-        toast(next === 'dark' ? '已切换到暗色主题' : '已切换到亮色主题', 'info', 2000);
+        toast('已切换到' + THEME_LABEL[next], 'info', 2000);
       });
-    }
-    if (window.matchMedia) {
-      var mq = window.matchMedia('(prefers-color-scheme: dark)');
-      var onChange = function () {
-        var saved = null;
-        try { saved = localStorage.getItem(THEME_KEY); } catch (e) { saved = null; }
-        if (saved !== 'dark' && saved !== 'light') applyTheme(systemTheme(), false);
-      };
-      if (mq.addEventListener) mq.addEventListener('change', onChange);
-      else if (mq.addListener) mq.addListener(onChange);
     }
   }
 
