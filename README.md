@@ -175,6 +175,7 @@ cargo build --release -p drcom-ui       # 桌面界面
 | [`desktop/README.md`](desktop/README.md) | 怎么跑、每个命令的用法与排障（诊断包 / 方案 / 门户检测 / 自启 / 服务 ✓） |
 | [`docs/PLATFORMS.md`](docs/PLATFORMS.md) | 路线图 / 平台矩阵 / 里程碑 / **校园网实测情报**（门户 `a79.htm` 那条 ✓） |
 | [`docs/VERSIONING.md`](docs/VERSIONING.md) | 版本号与代号规则 ✓ |
+| [`AGENTS.md`](AGENTS.md) §9 | **改这个仓库前必读**：3.0 的硬约束（R1–R8）/ 验证纪律 / 隐私红线 ✓（§1–§8 是 2.x 的规范 ✓） |
 | 2.x（Python 版）的完整文档 | 在 [`main` 分支](https://github.com/TSS-Small-sunshine/StardustFlashLink/tree/main) ✓（本分支保留同名 `.py` 仅供对照 ✓） |
 
 

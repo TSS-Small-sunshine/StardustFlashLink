@@ -1,9 +1,16 @@
 # AGENTS.md — AI 助手 / 协作者编辑规范
 
-> 任何「会改这个仓库的智能体」在动手前都请先读这份文件；人类协作者同样适用。
-> 它记录的是**这个仓库独有的约束**（不变量、隐私红线、验证方式），不是通用编码建议。
+> ## ⚠️ 这个仓库有**两条线**，规范不一样，别拿错 ✓
+>
+> | 线 | 在哪 | 语言 / 界面 | 规范看哪 |
+> | --- | --- | --- | --- |
+> | **2.x「Vega」稳定线** | `main` 分支的仓库根（`*.py` / `packaging/` / `tray.py` …） | Python 3 + 内嵌运行时 + 托盘 + Web UI | **本文件 §1–§8** ✓ |
+> | **3.0「Altair」跨平台线** | **本分支**（`dev/3.0-altair`）的 `desktop/` | **Rust + Slint 原生界面**（零第三方依赖 ✓） | **本文件 §9** ＋ [`desktop/README.md`](desktop/README.md) ＋ [`docs/PLATFORMS.md`](docs/PLATFORMS.md) ✓ |
+>
+> 在 3.0 分支上动 `desktop/` 时 **§9 优先** ✓；§1–§8 只在「对照 2.x 行为、翻根目录那些 `.py`」时才适用 ✓。
+> 任何「会改这个仓库的智能体」动手前都请先读这份文件；人类协作者同样适用。
 
-## 0. 30 秒速览
+## 0. 30 秒速览（**2.x 线**，`main` 分支）
 
 | 事项 | 结论 |
 | --- | --- |
@@ -113,3 +120,78 @@ gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLin
 | PowerShell 看 UTF-8 文件乱码 | 是控制台编码问题，文件本身正常；用 `read_files` / 编辑器看 |
 | `git add .` | 会带上 `tools\`、`python\`、`logs\`、`packaging\output\`、`__pycache__\` |
 | 前端加 emoji | `_smoke_static.py` 有「页面内无 emoji」断言；图标统一用 1.7 描边线性 SVG |
+
+---
+
+## 9. 3.0「Altair」线的规范（`desktop/`，Rust + Slint）
+
+> **只要你在动 `desktop/` 里的东西，§9 优先于 §1–§8** ✓
+> （§1–§8 是 2.x 的规范；只有在「对照 2.x 行为、翻根目录那些 `.py`」时才适用 ✓）
+
+### 9.1 硬约束（不变量）
+
+| # | 不变量 |
+| --- | --- |
+| **R1** | **零功能型第三方依赖** ✓：`drcom-core` 只用 `std` ＋ 框架必需的那几个（`serde` / `serde_json`）；界面层只有 `slint`。想引入新的 crate 先讨论 ✗ —— 「就顺手用一下」也不行 ✗ |
+| **R2** | **跨平台同源** ✓：平台差异一律收在 `core::platform`（`Os` 枚举）或各模块的纯函数里，**不许把 `cfg!(...)` 散落在业务逻辑中** ✗ |
+| **R3** | **配置 / 密码格式与 2.x 完全一致** ✓：`config.json` 键名不变、`password.txt` 一行一密码 + `#` 注释 —— 「老用户零迁移」是产品承诺 ✓ |
+| **R4** | **Windows 服务名固定 `DrcomAutoLogin`** ✓（`service::WINDOWS_SERVICE_NAME`，**有单测锁死** ✗ 别改 ✓）；它与 2.x 是**故意共用**的 ✓，所以「查到服务在跑」可能是 2.x 那个 ✓，遇到同名要**给接管路径**而不是硬装 ✗ |
+| **R5** | **协议不变** ✓：登录仍是 `:801/eportal/portal/login`、在线探测 `/drcom/chkstatus`、在线判定用 JSONP `result` ✓ |
+| **R6** | **3.0 只发预览版** ✓（`Channel::Preview`）：正式用户的自动升级**收不到它** ✓；**不许往 `main` 合** ✗；不许动 `version.py`（那是 2.x 的版本源 ✗） |
+| **R7** | **界面只做展示与调用** ✓：所有判断 / 校验 / 拼装 / 写盘都在 `drcom-core` 的纯函数里（这样单测才覆盖得到 ✓，界面层尽量薄 ✓） |
+| **R8** | **NSSM 口径沿用 2.x** ✓：`AppExit` 写 `Default Ignore` ＋ `0 Ignore`，**绝不写 `Restart`** ✗（重试归程序自己的退避管 ✓，有单测断言 ✓） |
+
+### 9.2 动手前后必做
+
+```bash
+# 改完任何东西（哪怕只改注释）
+cd desktop
+cargo test --workspace          # 必须全绿 ✓（现在是 186 项）
+
+# 改动过 .slint 或界面 Rust 代码 → 还必须重建 GUI 二进制 ✗
+cargo build -p drcom-ui         # 只跑 cargo test **不会**刷新 GUI 二进制 ✗（真踩过 ✓）
+
+# 提交前（沿用 §5 的谨慎 ✓）
+cd ..
+git status --short && git diff --cached
+```
+
+### 9.3 写单测的规矩（3.0 最值钱的就是测试 ✓）
+
+- **纯函数才配有单测** ✓：命令拼装 / 解析 / 校验 / 生成物 → 一律写成纯函数，逐字断言 ✓
+- **真机样本优先** ✓：解析类测试要用**真实抓到的样子**（例如校园门户那条完整的
+  `a79.htm?mac=…&wlanacip=172%2e16%2e80%2e2&wlanacname=SR8806%2dX%2dS&wlanuserip=…` ✓）
+- **外部互验** ✓：自己实现的东西必须拿第三方结果对一遍 ——
+  SHA-256 对 NIST 官方向量 **＋** Windows `Get-FileHash` ✓；自研 ZIP 用 .NET `ZipFile` 打开 ✓
+- **写盘类逻辑要给两个出口** ✓：`--dry-run` 只打印不动系统 ✓；查状态一律只读
+  （Windows 用 `sc query`，**不需要管理员** ✓）
+- **不做摆设** ✓：平台不支持的先查清（例如 Slint 1.18 的 winit 后端没实现托盘 ✗）——
+  **宁可推迟并写清原因，也不给用户一个点不动的按钮** ✗
+
+### 9.4 隐私红线（与 §5 同等严格 ✓）
+
+1. 真机 `config.json` / `password.txt` 内容**永不**进源码、注释、测试夹具、CHANGELOG、
+   commit message、release notes、截图 ✓
+2. 测试夹具用一眼假的合成值（如 `2023001234` / `#Demo-Pwd-0000#` ✓）
+3. **登录 URL 里带密码** ✗ → 任何日志 / 界面回显 / 诊断包都必须过 `secret::scrub_url` ✓
+4. 诊断包里 `password.txt` **永不入包** ✓、账号只留前 4 位 ✓
+5. 设置窗口的密码框：**永不回显** ✓（打开时是空的，空 = 不修改 ✓）
+
+### 9.5 CI 与发布
+
+- 这条线只由 [`.github/workflows/preview-3.0.yml`](.github/workflows/preview-3.0.yml) 管 ✓：
+  三平台跑测试 → 六目标构建 → **打包**（自带 ZIP ＋ `SHA256SUMS` ✓，零外部工具 ✓）
+- **不许动 `build-installer.yml` 的触发面** ✗（那是 `main` 的 2.x 发版链路 ✓）
+- 打包命令：`package-files --out pkg --target <标签> --exe <名字>` →
+  `archive --out dist/<基名>.zip pkg` → `checksum` ✓（交叉编译**必须显式 `--target`** ✗，
+  宿主自报的目标是错的 ✓）
+- 发预览版时按 [`docs/VERSIONING.md`](docs/VERSIONING.md) 递增 `APP_CHANNEL_SEQ` ✓
+  （别碰 `main` 的 `version.py` ✗）
+
+### 9.6 提交风格（两条线一致 ✓）
+
+- 提交信息前缀用 `feat(3.0-mX)` / `fix(3.0)` / `docs(3.0)` / `ci(3.0-mX)` ✓
+- **逐文件 `git add`**，`git add -A` 只在确认工作区干净时用 ✓
+- 每完成一块就推 `dev/3.0-altair`，并确认 CI **六行全绿** ✓
+
+
