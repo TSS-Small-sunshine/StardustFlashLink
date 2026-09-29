@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod net;
 pub mod password;
 pub mod platform;
+pub mod portal;
 pub mod probe;
 pub mod profiles;
 pub mod protocol;

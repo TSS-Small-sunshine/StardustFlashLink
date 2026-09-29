@@ -14,7 +14,7 @@ mod server;
 
 use drcom_core::net::{self, PlainHttp};
 use drcom_core::{
-    channel::Version, config::Config, logfile::RotatingLog, platform, protocol,
+    channel::Version, config::Config, logfile::RotatingLog, platform, portal, protocol,
     scheduler::Scheduler, secret, session, timefmt, Outcome, Status,
 };
 use std::time::{Duration, SystemTime};
@@ -59,6 +59,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("run") => run_loop(&args[1..]),
         Some("profile") => profile_cmd(&args[1..]),
         Some("diagnostics") => diagnostics_cmd(&args[1..]),
+        Some("portal") => portal_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -80,6 +81,7 @@ fn print_help() {
          run [--once]                守护循环：按配置间隔检查、失败走退避（服务化在 M3）\n  \
          profile list|save|activate|delete|auto   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）\n  \
          diagnostics [--out F] [--days N]        生成脱敏诊断包（ZIP，密码永不进包 ✓）\n  \
+         portal [--url U] [--timeout N]         门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -307,6 +309,55 @@ fn login(args: &[String]) -> i32 {
 }
 
 /// `diagnostics [--out FILE] [--days N]`：生成**脱敏**诊断包（ZIP ✓）。
+/// `portal`：看看是不是被校园网门户拦住了。
+///
+/// 实测：未认证时校园 AC 会 302 到登录页（`a79.htm`），重定向里还带着
+/// AC 名字、本机地址、本机 MAC —— 排障时这些信息比「连不上」有用得多 ✓。
+fn portal_cmd(args: &[String]) -> i32 {
+    let url = take_opt(args, "--url").unwrap_or_else(|| portal::DEFAULT_PROBE_URL.to_string());
+    let seconds = take_opt(args, "--timeout")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_TIMEOUT_SEC)
+        .max(1);
+    println!("探测目标: {}", url);
+    let verdict = portal::probe(&PlainHttp, &url, Duration::from_secs(seconds));
+    println!("结论: {}", verdict.summary_cn());
+    if let portal::PortalVerdict::Blocked(hint) = &verdict {
+        println!();
+        println!("门户页面: http://{}{}", hint.portal_host, hint.page);
+        if let Some(ip) = hint.user_ip.as_deref() {
+            println!("门户看到的本机地址: {}", ip);
+            let local = net::local_ip_towards(&hint.portal_host, 80);
+            if portal::ip_matches(hint, local.as_deref()) == Some(false) {
+                println!(
+                    "⚠ 与本机出口地址({})不一致 —— 多网卡 / 代理下登录会失败 ✗",
+                    local.as_deref().unwrap_or("读不到")
+                );
+            }
+        }
+        if let Some(name) = hint.ac_name.as_deref() {
+            println!(
+                "接入控制器(AC): {} {}",
+                name,
+                hint.ac_ip.as_deref().unwrap_or("-")
+            );
+        }
+        if let Some(mac) = hint.mac.as_deref() {
+            println!("门户看到的本机 MAC: {}", mac);
+        }
+        if let Some(redirect) = hint.redirect.as_deref() {
+            println!("被拦下之前想去的地址: {}", redirect);
+        }
+        println!();
+        println!("登录接口仍是 :801/eportal/portal/login —— 直接跑 `login` 就能过 ✓");
+    }
+    if verdict.is_online() {
+        0
+    } else {
+        1
+    }
+}
+
 fn diagnostics_cmd(args: &[String]) -> i32 {
     use drcom_core::{diagnostics, metrics, zipwriter};
     let days = take_opt(args, "--days")
@@ -691,6 +742,16 @@ fn suffix_flag_without_value(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_cmd_reports_failure_without_panicking() {
+        // 指到本机一个必然没人听的端口 → 立刻 connection refused ✓（不依赖外网 ✓）
+        let args: Vec<String> = ["--url", "http://127.0.0.1:9/", "--timeout", "1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(portal_cmd(&args), 1, "连不上时退出码非 0 ✓");
+    }
 
     #[test]
     fn take_opt_finds_value_and_handles_missing() {

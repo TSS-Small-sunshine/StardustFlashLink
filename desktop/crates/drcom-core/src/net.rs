@@ -14,6 +14,11 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpReply {
     pub status: u16,
+    /// `Location:` 响应头。
+    ///
+    /// 2.x 不需要它（只看 JSONP 正文），3.0 的**门户检测**要靠它：
+    /// 未认证时校园 AC 会 302 到登录页，目标地址就在这个头里 ✓。
+    pub location: Option<String>,
     pub body: String,
 }
 
@@ -73,17 +78,31 @@ pub fn get(url: &str, timeout: Duration) -> Result<HttpReply, String> {
         .nth(1)
         .and_then(|code| code.parse::<u16>().ok())
         .ok_or_else(|| format!("响应头不合法: {:?}", status_line.trim()))?;
-    // 跳过响应头（不解析 chunked：校园网关与本地服务都是 Identity ✓）
+    // 跳过响应头（不解析 chunked：校园网关与本地服务都是 Identity ✓），
+    // 顺手留下 `Location`（门户检测要用 ✓）。
+    let mut location: Option<String> = None;
     loop {
         let mut line = String::new();
         let read = reader.read_line(&mut line).map_err(|e| e.to_string())?;
         if read == 0 || line == "\r\n" || line == "\n" {
             break;
         }
+        if let Some((name, value)) = line.split_once(':') {
+            if location.is_none() && name.trim().eq_ignore_ascii_case("location") {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    location = Some(trimmed.to_string());
+                }
+            }
+        }
     }
     let mut raw = Vec::new();
     reader.read_to_end(&mut raw).map_err(|e| format!("读响应体失败: {}", e))?;
-    Ok(HttpReply { status, body: String::from_utf8_lossy(&raw).into_owned() })
+    Ok(HttpReply {
+        status,
+        location,
+        body: String::from_utf8_lossy(&raw).into_owned(),
+    })
 }
 
 /// 本机在「通往 `host`」这条路上使用的源 IP（Dr.COM 表单要填 ✓）。

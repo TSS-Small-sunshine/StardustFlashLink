@@ -174,7 +174,7 @@ mod tests {
             } else {
                 self.login.clone().unwrap_or_else(|| "dr1({\"result\":1,\"msg\":\"ok\"})".to_string())
             };
-            Ok(HttpReply { status: 200, body })
+            Ok(HttpReply { status: 200, location: None, body })
         }
     }
 
