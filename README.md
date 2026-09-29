@@ -20,12 +20,18 @@
   Windows 校园网认证网关自动登录工具：开机自启 + 周期自检 + 智能离线识别 + Web UI 图形化配置。
 </p>
 
+<p align="center">
+  🛠 <b>3.0 跨平台版（DEV 线）正在开发中</b>：Rust + Slint，Windows / Linux / macOS 同源 →
+  <a href="#开发中30-跨平台版dev-线">看进展</a>
+</p>
+
 ## 📑 目录
 
 - [⚠️ 适用范围声明](#适用范围声明请先读这里)
 - [✨ 功能特性](#功能特性)
 - [📸 截图](#截图)
 - [🏷 项目状态](#项目状态)
+- [🛠 开发中：3.0 跨平台版（DEV 线）](#开发中30-跨平台版dev-线)
 - [🛠 技术栈](#技术栈)
 - [🧩 架构说明](#架构说明)
 - [🔐 认证协议](#认证协议)
@@ -108,6 +114,27 @@
 [最新 Release](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/latest) ·
 [更新日志](CHANGELOG.md) ·
 [问题反馈](https://github.com/TSS-Small-sunshine/StardustFlashLink/issues)
+
+---
+
+## 🛠 开发中：3.0 跨平台版（DEV 线）
+
+除了你现在用的 2.1.x（Windows 稳定线），仓库里还有一条**正在开发中的 3.0 跨平台线**：
+
+| 项目 | 说明 |
+| --- | --- |
+| 分支 | [`dev/3.0-altair`](https://github.com/TSS-Small-sunshine/StardustFlashLink/tree/dev/3.0-altair)（默认分支仍是 `main`，**想用就用 main** ✓） |
+| 代号 | Altair（牛郎星）—— 与 2.x 的「织女星」相对 |
+| 目标平台 | Windows 10/11 · Linux（x86_64 / aarch64 / **armv7**，含树莓派）· macOS（Intel / Apple Silicon） |
+| 技术选型 | **Rust 核心 + Slint 原生界面**：零 WebView、零运行时解释器、单文件可执行 |
+| 兼容性 | `config.json` / `password.txt` 格式与 API 路径**与 2.x 保持一致** ✓（老用户零迁移 ✓） |
+| 已经能干什么 | 命令行 `version` / `status` / `selfcheck` / `login` / `run` / `profile` / `diagnostics` / `serve` / `portal` / `autostart`；桌面界面：主窗口 + **设置窗口** + **配置方案页**（按 Wi-Fi 自动切）+ 单实例 |
+| 状态 | 🚧 **开发中，只发预览版** —— 通道是 `prerelease`，**正式用户的自动升级收不到它** ✓；暂时别当日常主力 ✗ |
+| 看进展 | 分支上的 [`docs/PLATFORMS.md`](https://github.com/TSS-Small-sunshine/StardustFlashLink/blob/dev/3.0-altair/docs/PLATFORMS.md)（路线图 / 平台矩阵 / 实测情报）、[`desktop/README.md`](https://github.com/TSS-Small-sunshine/StardustFlashLink/blob/dev/3.0-altair/desktop/README.md)（怎么跑起来） |
+
+> **两条线互不干扰** ✓：`main` 上的 2.1.x 继续正常维护（bugfix / 安全 / 自动升级通道不变 ✓），
+> 3.0 的改动不会合进 `main`，**也不会改动你机器上的配置与密码文件** ✓。
+> 3.0 准备就绪前，Release 页面只会出现 2.1.x 的正式版 ✓。
 
 ---
 
