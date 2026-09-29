@@ -1651,11 +1651,40 @@ check("v2.1.2.0 背景 / 遮罩都压在内容层之下（负 z-index < .wrap �
       _decl(_css_rule('[data-theme="baka"] body::before'), "z-index") == "-3"
       and _decl(_baka_mask, "z-index") == "-2"
       and _decl(_css_rule(".wrap"), "z-index") == "1")
-check("v2.1.2.0 首屏按使用逻辑排：「状态 + 立即登录」都在诊断区之前（不用滚到底才能登录）",
-      _pos('class="lead"') >= 0
+check("v2.1.2.0 首屏按使用逻辑排：「状态 + 立即登录」在同一张卡里，且都在诊断区之前",
+      _pos('class="card status-hero"') >= 0
       and _pos('id="card-online"') >= 0 and _pos('id="btn-login"') >= 0
-      and _pos('id="card-online"') < _pos('id="card-quality"')
-      and _pos('id="btn-login"') < _pos('id="card-quality"'))
+      and _pos('id="card-online"') < _pos('id="btn-login"') < _pos('id="card-quality"'))
+
+# —— 第三轮（用户反馈：「状态 / 配置 / 日志 改了个寂寞」——只改表面不算，得动信息架构）——
+check("v2.1.2.0 状态页：状态与动作合并成一张卡（不再两张卡各空一半），旧的 .lead 结构清掉",
+      'class="card status-hero"' in _page and 'class="status-word" id="kpi-online"' in _page
+      and 'class="status-hero-act"' in _page and 'class="lead"' not in _page
+      and '.action-card {' not in _page)
+check("v2.1.2.0 状态页：5 项日常从「卡墙」改成一条统计条（格间竖线，出错那格浅橙底）",
+      'class="card stat-strip"' in _page and _page.count('class="stat-cell"') >= 5
+      and 'lead-facts' not in _page and '.stat-cell.stat-alert' in _page
+      and "--warn-fill" in _page)
+check("v2.1.2.0 状态页：统计条换了类名，JS 也同步（不然轮询一跑样式就被覆盖）",
+      "'stat-value tone-ok'" in _page and "'status-word tone-ok'" in _page
+      and "'stat-value mono'" in _page and "cardErr.className = 'stat-cell'" in _page
+      and "'stat-value mono tone-muted'" in _page)
+check("v2.1.2.0 配置页：两栏（左 方案 + 网络端口 / 右 自动化 + 守卫），保存条在两栏之外",
+      _pos('class="cfg-page"') >= 0 and _page.count('<div class="cfg-col">') == 2
+      and _pos('class="section-title">配置方案') < _pos('class="section-title">网络与服务端口')
+      < _pos('class="section-title">自动化')
+      and '</div><!-- /cfg-col -->' in _page and '</div><!-- /cfg-page -->' in _page
+      and ".cfg-col > .card.section, .cfg-col > details { margin-bottom: 0; }" in _page)
+check("v2.1.2.0 日志页：改成终端窗口 —— 标题栏 + 实时状态在终端之上（原来压在下面，等于标题栏装脚上）",
+      'class="card log-window"' in _page and 'class="log-window-bar"' in _page
+      and 'class="log-dots"' in _page
+      and _pos('class="log-window-bar"') < _pos('id="log-box"')
+      and _pos('class="log-meta"') < _pos('id="log-box"')
+      and _decl(_css_rule(".log-meta"), "margin-left") == "auto")
+check("v2.1.2.0 日志页：占用与诊断包改两栏（原来一长段说明把整行撑满）",
+      'class="log-diag-cols"' in _page and "日志占用与诊断包" in _page
+      and _pos('id="log-list"') < _pos('id="btn-logs-refresh"')
+      and _decl(_css_rule(".log-diag-cols"), "display") == "grid")
 check("v2.1.2.0 诊断指标默认收起（原生 details，零 JS）+ 品牌大标题已撤（不再与顶栏重复）",
       '<details class="diag">' in _page and '<details class="diag" open' not in _page
       and 'class="diag-summary"' in _page and 'class="hero-title"' not in _page)

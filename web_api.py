@@ -1995,31 +1995,52 @@ a:hover { color: var(--accent-hover); }
 .tone-err { color: var(--err); }
 .tone-warn { color: var(--warn); }
 .tone-muted { color: var(--text-3); }
-.action-card {
-  display: flex; flex-direction: column; align-items: center; gap: 12px;
-  text-align: center; padding: 36px 24px; margin-top: 14px;
-  background: var(--material-2);
-}
-.action-card .muted { max-width: 46ch; }
 
 /* ============================================================
-   6.5 首屏「先办事」区 —— v2.1.2.0 按使用逻辑重排
+   6.5 首屏「先办事」区 —— v2.1.2.0 按使用逻辑重排（第三轮再改）
 
    以前：「立即登录」在页面最底部，要滚过 10 张 KPI（冷启动时 6 张是「未知 / -」）+ 一个
    大空卡才按得到；首屏最显眼的位置却给了与顶栏重复的品牌大标题。
-   现在：首屏左边「现在通不通」（大字 + 状态色），右边「立即登录」；日常关心的几项跟在同一
-   屏内；9 项诊断指标与连接质量收进默认收起的「诊断详情」（原生 details，零 JS）。
+   二轮：首屏左边「现在通不通」（大字 + 状态色），右边「立即登录」——但分两张卡，各自空一半。
+   三轮：状态与动作合成一张卡（.status-hero）；日常 5 项从卡墙改成一条统计条
+   （.stat-strip，格间一条竖线）；9 项诊断指标与连接质量仍收在「诊断详情」里。
    ============================================================ */
-.lead { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
-.lead-state { justify-content: center; padding: 26px 24px; box-shadow: var(--shadow-2), var(--highlight); }
-.lead-state .kpi-value { font-size: 34px; }
-.lead .action-card { margin-top: 0; padding: 26px 24px; justify-content: center; background: var(--material-strong); }
+/* v2.1.2.0 二轮：状态 + 动作合并成一张卡（原来左边一张空卡、右边飘着一个巨大按钮） */
+.status-hero {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px 28px; flex-wrap: wrap;
+  padding: 20px 24px; margin-top: 14px; box-shadow: var(--shadow-2), var(--highlight);
+}
+.status-hero-main { min-width: 0; }
+.status-kicker { font-size: 11.5px; font-weight: 600; letter-spacing: 0.07em; color: var(--text-3); }
+.status-word {
+  display: flex; align-items: center; gap: 11px; margin-top: 2px;
+  font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; color: var(--text-strong);
+}
+.status-word .dot { width: 12px; height: 12px; }
+.status-line { margin: 4px 0 0; font-size: 13px; color: var(--text-2); }
+.status-hero-act { display: flex; flex-direction: column; align-items: flex-end; gap: 9px; }
+.status-hero-act .hint { margin: 0; text-align: right; max-width: 34ch; }
 /* 主卡按状态上色（不支持 :has() 的浏览器只是少了这条色边，功能不受影响） */
-.lead-state:has(.dot-ok) { border-color: rgba(48, 209, 88, 0.40); }
-.lead-state:has(.dot-err) { border-color: rgba(255, 69, 58, 0.40); }
-/* 日常区：恰好 5 项 —— 用 180px 的列宽（1080 内容宽正好排成 5 列一行），避免第 5 格
-   被挤到第二行孤零零占一格 */
-.lead-facts { margin-top: 14px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.status-hero:has(.dot-ok) { border-color: rgba(48, 209, 88, 0.40); }
+.status-hero:has(.dot-err) { border-color: rgba(255, 69, 58, 0.40); }
+
+/* 日常统计条：5 格挤在一张卡里，格间一条竖线（原来 5 张卡排成一面卡墙） */
+.stat-strip {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: 14px; padding: 0; overflow: hidden;
+}
+.stat-cell { padding: 15px 18px; border-left: 1px solid var(--hairline); min-width: 0; }
+.stat-cell:first-child { border-left: none; }
+.stat-label { font-size: 12px; color: var(--text-2); }
+.stat-value {
+  display: flex; align-items: center; gap: 7px; margin-top: 5px;
+  font-size: 19px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-strong);
+  word-break: break-word;
+}
+.stat-value.mono { font-size: 14.5px; }
+.stat-sub { margin-top: 3px; font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
+/* 「上次错误」有值 → 整格浅橙底 + 左侧色条（原来靠一张卡变边框，现在卡没了） */
+.stat-cell.stat-alert { background: var(--warn-fill); box-shadow: inset 3px 0 0 var(--warn); }
 
 /* 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏 */
 .diag { margin-top: 14px; }
@@ -2178,11 +2199,11 @@ a:hover { color: var(--accent-hover); }
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 .log-box.is-empty { color: var(--terminal-dim); font-style: italic; }
+/* v2.1.2.0 二轮：这行状态挪到了终端窗口的顶栏里，所以不再是「一块底 + 内边距」，
+   而是一排靠右的等宽小字（数字对齐用 tabular-nums，跳动时不晃） */
 .log-meta {
-  display: flex; gap: 16px; flex-wrap: wrap;
-  font-size: 12.5px; color: var(--text-2); margin-top: 12px;
-  padding: 10px 14px; background: var(--fill); border-radius: var(--r-sm);
-  border: 1px solid var(--hairline);
+  display: flex; gap: 14px; flex-wrap: wrap; margin-left: auto;
+  font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums;
 }
 .log-level-filter { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .chip {
@@ -2399,6 +2420,23 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 .about-hero-main { min-width: 0; }
 .about-hero-side { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(112px, auto)); }
 
+/* —— 配置页两栏（二轮）：左「方案 + 网络端口」/ 右「自动化 + 守卫」 —— */
+.cfg-page { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); align-items: start; }
+.cfg-col { display: grid; gap: 14px; align-content: start; min-width: 0; }
+/* 列内用 gap 排版，卡片自己的 margin-bottom 会变成双倍间距 */
+.cfg-col > .card.section, .cfg-col > details { margin-bottom: 0; }
+
+/* —— 日志页：终端窗口（顶栏一行放标题与实时状态） —— */
+.log-window { padding: 14px 16px 16px; }
+.log-window-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.log-dots { display: inline-flex; gap: 5px; flex: none; }
+.log-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--track); }
+.log-dots i:nth-child(1) { background: #ff5f57; }
+.log-dots i:nth-child(2) { background: #febc2e; }
+.log-dots i:nth-child(3) { background: #28c840; }
+.log-window-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.log-diag-cols { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
 /* ============================================================
    12. 响应式（≤720px 平板；≤480px 手机）
    ============================================================ */
@@ -2418,10 +2456,16 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   .save-bar { justify-content: stretch; bottom: 12px; }
   .save-bar .btn { flex: 1 1 auto; }
   /* v2.1.2.0：窄屏把「状态 + 登录」竖起来，按钮仍留在第一屏 */
-  .lead { grid-template-columns: 1fr; gap: 12px; }
-  .lead-state { padding: 20px 18px; }
-  .lead-state .kpi-value { font-size: 27px; }
-  .lead .action-card { padding: 20px 18px; }
+  .status-hero { padding: 18px; gap: 14px; }
+  .status-word { font-size: 27px; }
+  .status-hero-act { align-items: stretch; width: 100%; }
+  .status-hero-act .hint { text-align: left; max-width: none; }
+  /* 统计条：两列 + 每格上边线（第 1 行不加），别把 5 格挤成一条看不清 */
+  .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-cell { padding: 13px 14px; border-top: 1px solid var(--hairline); }
+  .stat-cell:nth-child(-n+2) { border-top: none; }
+  .stat-cell:nth-child(odd) { border-left: none; }
+  .cfg-page { grid-template-columns: minmax(0, 1fr); }
   .card { padding: 18px; }
 }
 @media (max-width: 480px) {
@@ -2435,13 +2479,15 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   .kpi-value { font-size: 21px; }
   .kpi-value.small { font-size: 14.5px; }
   .card { padding: 16px; border-radius: var(--r-md); }
-  .action-card { padding: 24px 16px; }
+  .stat-strip { grid-template-columns: 1fr; padding: 0; }
+  .stat-cell { border-left: none; }
+  .stat-cell:not(:first-child) { border-top: 1px solid var(--hairline); }
+  .log-meta { gap: 10px; font-size: 11.5px; }
   .tab { padding: 7px 13px; font-size: 13px; }
   .liveness { padding: 5px 11px; font-size: 12.5px; }
   .save-bar { padding: 12px; flex-direction: column; align-items: stretch; }
   .save-bar .muted { margin-right: 0; margin-bottom: 4px; text-align: center; }
   .save-bar .btn { width: 100%; }
-  .log-meta { font-size: 12px; padding: 8px 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
@@ -2526,26 +2572,25 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       <button class="update-banner-dismiss" id="update-banner-dismiss" type="button" aria-label="关闭横幅"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.4 17.6 17.6M17.6 6.4 6.4 17.6"/></svg></button>
     </div>
 
-    <!-- v2.1.2.0 首屏：先回答「现在通不通」（大字 + 状态色），再给「立即登录」。
-         以前登录按钮在页面最底部，要滚过 10 张 KPI 才按得到。 -->
-    <div class="lead">
-      <article class="card kpi lead-state" id="card-online">
-        <div class="kpi-label">当前状态</div>
-        <div class="kpi-value" id="kpi-online">
+    <!-- v2.1.2.0 二轮：状态与动作挤进同一张卡 —— 原来左边一张空卡、右边一张卡里飘着一个
+         巨大按钮，两处都空得慌；现在一左一右，中间没有浪费的空间。 -->
+    <article class="card status-hero" id="card-online">
+      <div class="status-hero-main">
+        <div class="status-kicker">当前状态</div>
+        <div class="status-word" id="kpi-online">
           <span class="dot dot-unknown" id="kpi-online-dot" aria-hidden="true"></span>
           <span id="kpi-online-text">未知</span>
         </div>
-        <div class="kpi-sub" id="kpi-online-sub">登录结果：-</div>
-      </article>
-
-      <div class="card action-card">
+        <p class="status-line" id="kpi-online-sub">登录结果：-</p>
+      </div>
+      <div class="status-hero-act">
         <button class="btn btn-lg" id="btn-login" type="button">
           <span class="btn-spinner" aria-hidden="true"></span>
           <span id="btn-login-label">立即登录</span>
         </button>
-        <p class="muted" id="login-hint" style="margin:0;font-size:12.5px;">点击按钮立即触发一次完整的网络检查与登录流程。</p>
+        <p class="hint" id="login-hint">点一下立即触发完整的检查与登录</p>
       </div>
-    </div>
+    </article>
 
     <!-- v2.1.2.0：账户与登录密码搬到主页 —— 最常改的东西不该藏在配置页第二块，
          就放在「立即登录」下面，登录不顺时顺手就能改账号 / 密码。 -->
@@ -2588,40 +2633,38 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       </div>
     </div>
 
-    <!-- 日常关心的几项：跟首屏同一屏内，不用滚 -->
-    <div class="grid lead-facts">
-      <article class="card kpi" id="card-net">
-        <div class="kpi-label">网络可达性</div>
-        <div class="kpi-value" id="kpi-net">
-          <span class="dot dot-unknown" id="kpi-net-dot" aria-hidden="true"></span>
-          <span id="kpi-net-text">未知</span>
-        </div>
-        <div class="kpi-sub" id="kpi-net-sub">等待首次检查</div>
-      </article>
+    <!-- 日常关心的几项：v2.1.2.0 二轮把它们从「5 张卡排成卡墙」改成一条统计条
+         （每格一条竖分隔线），同样的信息量，视觉噪音少一半、还能一眼扫完。 -->
+    <div class="card stat-strip">
+      <div class="stat-cell" id="card-net">
+        <div class="stat-label">网络可达性</div>
+        <div class="stat-value" id="kpi-net"><span class="dot dot-unknown" id="kpi-net-dot" aria-hidden="true"></span><span id="kpi-net-text">未知</span></div>
+        <div class="stat-sub" id="kpi-net-sub">等待首次检查</div>
+      </div>
 
-      <article class="card kpi">
-        <div class="kpi-label">当前账号</div>
-        <div class="kpi-value small mono" id="kpi-account">-</div>
-        <div class="kpi-sub" id="kpi-account-sub">来自配置文件</div>
-      </article>
+      <div class="stat-cell" id="card-account">
+        <div class="stat-label">当前账号</div>
+        <div class="stat-value mono" id="kpi-account">-</div>
+        <div class="stat-sub" id="kpi-account-sub">来自配置文件</div>
+      </div>
 
-      <article class="card kpi">
-        <div class="kpi-label">上次登录时间</div>
-        <div class="kpi-value small" id="kpi-lastlogin">从未</div>
-        <div class="kpi-sub" id="kpi-lastlogin-sub">尚无登录记录</div>
-      </article>
+      <div class="stat-cell" id="card-lastlogin">
+        <div class="stat-label">上次登录</div>
+        <div class="stat-value" id="kpi-lastlogin">从未</div>
+        <div class="stat-sub" id="kpi-lastlogin-sub">尚无登录记录</div>
+      </div>
 
-      <article class="card kpi" id="card-error">
-        <div class="kpi-label">上次错误</div>
-        <div class="kpi-value small" id="kpi-error">无</div>
-        <div class="kpi-sub" id="kpi-error-sub">最近一次检查未报错</div>
-      </article>
+      <div class="stat-cell" id="card-error">
+        <div class="stat-label">上次错误</div>
+        <div class="stat-value" id="kpi-error">无</div>
+        <div class="stat-sub" id="kpi-error-sub">最近一次检查未报错</div>
+      </div>
 
-      <article class="card kpi">
-        <div class="kpi-label">下次检查</div>
-        <div class="kpi-value mono" id="kpi-next">未计划</div>
-        <div class="kpi-sub" id="kpi-next-sub">-</div>
-      </article>
+      <div class="stat-cell" id="card-next">
+        <div class="stat-label">下次检查</div>
+        <div class="stat-value mono" id="kpi-next">未计划</div>
+        <div class="stat-sub" id="kpi-next-sub">-</div>
+      </div>
     </div>
 
     <!-- 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏；
@@ -2676,6 +2719,11 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 
   <!-- ============ 配置 ============ -->
   <section class="panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config" tabindex="-1">
+    <!-- v2.1.2.0 二轮：配置页改两栏（左：方案 + 网络端口；右：自动化 + 守卫），
+         纵向长度砍掉近一半，不用再「一路滚到底」。 -->
+    <div class="cfg-page">
+    <div class="cfg-col">
+
     <!-- v2.0.9.0 / B5：配置方案（教室 / 宿舍 / 家里） -->
     <div class="card section" id="card-profiles">
       <div class="section-head">
@@ -2750,6 +2798,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         </div>
       </div>
     </div>
+
+    </div><!-- /cfg-col -->
+    <div class="cfg-col">
 
     <div class="card section">
       <div class="section-head">
@@ -2863,6 +2914,10 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     <!-- v2.1.2.0：「Web UI 监听端口」并进了上面的「网络与服务端口」——
          为一个字段占一整张卡，是配置页变长的最大原因之一。 -->
 
+    </div><!-- /cfg-col -->
+    </div><!-- /cfg-page -->
+
+    <!-- 导出 / 导入与保存条放在两栏之外，横跨整宽 -->
     <div class="config-io-row">
       <button class="btn btn-secondary" id="btn-config-export" type="button">导出配置</button>
       <button class="btn btn-secondary" id="btn-config-import" type="button">导入配置</button>
@@ -2877,7 +2932,20 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 
   <!-- ============ 日志 ============ -->
   <section class="panel" id="panel-log" role="tabpanel" aria-labelledby="tab-log" tabindex="-1">
-    <div class="card">
+    <!-- v2.1.2.0 二轮：日志区改成「一个终端窗口」——
+         顶栏放窗口标题与「行数 / 偏移 / 大小 / 更新时间」的实时状态（原来这行状态压在
+         终端下面，等于把窗口的标题栏装到了脚上），中间是过滤与等级，下面是终端本体。 -->
+    <div class="card log-window">
+      <div class="log-window-bar">
+        <span class="log-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="log-window-title">drcom.log</span>
+        <span class="log-meta">
+          <span id="log-count">0 行</span>
+          <span id="log-offset">offset 0</span>
+          <span id="log-size">0 字节</span>
+          <span id="log-updated">未更新</span>
+        </span>
+      </div>
       <div class="log-toolbar">
         <input type="text" class="grow" id="log-filter" placeholder="过滤关键字（留空显示全部）" aria-label="日志关键字过滤" autocomplete="off" spellcheck="false">
         <div class="log-level-filter" id="log-level-filter" role="group" aria-label="日志等级筛选">
@@ -2895,31 +2963,34 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         </label>
       </div>
       <div class="log-box is-empty" id="log-box" role="log" aria-live="off" tabindex="0">暂无日志</div>
-      <div class="log-meta">
-        <span id="log-count">0 行</span>
-        <span id="log-offset">offset 0</span>
-        <span id="log-size">0 字节</span>
-        <span id="log-updated">未更新</span>
-      </div>
     </div>
 
     <!-- v2.1.2.0：从「关于」页搬来 —— 日志占用与诊断包本来就是日志 / 排障的事，
-         挤在「关于」里既臃肿又难找 -->
+         挤在「关于」里既臃肿又难找。二轮把它改成两栏（原来一长段说明把整行撑满）。 -->
     <div class="card section">
       <div class="section-head">
-        <h2 class="section-title">日志与诊断</h2>
-        <p class="section-desc" style="margin:0;">业务日志超过 5 MB、升级日志超过 2 MB 会自动轮转（各留几份），不必再手动清理。</p>
+        <h2 class="section-title">日志占用与诊断包</h2>
+        <p class="section-desc" style="margin:0;">业务日志超过 5 MB、升级日志超过 2 MB 会自动轮转（各留几份），不必手动清理。</p>
       </div>
-      <div id="log-list" class="hint" style="margin:0 0 12px 0;">正在读取日志占用...</div>
-      <div class="btn-row">
-        <button class="btn btn-secondary" id="btn-logs-refresh" type="button">刷新占用</button>
-        <a class="btn btn-secondary" href="/api/diagnostics">下载诊断包（已脱敏）</a>
+      <div class="log-diag-cols">
+        <div>
+          <div class="stat-label">当前日志文件</div>
+          <div id="log-list" class="hint" style="margin:6px 0 0;">正在读取日志占用...</div>
+          <div class="btn-row" style="margin-top:12px;">
+            <button class="btn btn-secondary" id="btn-logs-refresh" type="button">刷新占用</button>
+          </div>
+        </div>
+        <div>
+          <div class="stat-label">诊断包（反馈问题时发这个）</div>
+          <p class="hint" style="margin:6px 0 0;">
+            版本 / 运行环境 / 服务状态 + 脱敏配置 + 各日志尾部（每个 ≤ 512 KB）。
+            账号与 MAC 已打码、<strong>不含密码</strong>；校园网内网 IP 与 Wi-Fi 名保留（排障需要）。
+          </p>
+          <div class="btn-row" style="margin-top:12px;">
+            <a class="btn btn-secondary" href="/api/diagnostics">下载诊断包（已脱敏）</a>
+          </div>
+        </div>
       </div>
-      <p class="hint" style="margin-top:10px;">
-        诊断包 = 版本 / 运行环境 / 服务状态 + 脱敏后的配置 + 各日志尾部（每个 ≤ 512 KB）。
-        账号已打码、MAC 已打码、<strong>不含密码</strong>；校园网内网 IP 与 Wi-Fi 名会保留（排障需要）。
-        反馈问题时把它发给维护者即可。
-      </p>
     </div>
   </section>
 
@@ -3314,15 +3385,15 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     if (s.network_reachable === true) {
       setDot('kpi-net-dot', 'ok', false);
       text($('kpi-net-text'), '可达');
-      $('kpi-net').className = 'kpi-value tone-ok';
+      $('kpi-net').className = 'stat-value tone-ok';
     } else if (s.network_reachable === false) {
       setDot('kpi-net-dot', 'err', false);
       text($('kpi-net-text'), '不可达');
-      $('kpi-net').className = 'kpi-value tone-err';
+      $('kpi-net').className = 'stat-value tone-err';
     } else {
       setDot('kpi-net-dot', 'unknown', true);
       text($('kpi-net-text'), '未知');
-      $('kpi-net').className = 'kpi-value tone-muted';
+      $('kpi-net').className = 'stat-value tone-muted';
     }
     var _netSub = '上次检查 ' + fmtTimeOnly(s.last_check_at);
     if (s.current_ssid) _netSub += ' · Wi-Fi: ' + s.current_ssid;
@@ -3333,39 +3404,39 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     if (s.online === true) {
       setDot('kpi-online-dot', 'ok', false);
       text($('kpi-online-text'), '已登录');
-      $('kpi-online').className = 'kpi-value tone-ok';
+      $('kpi-online').className = 'status-word tone-ok';
     } else if (s.online === false) {
       setDot('kpi-online-dot', 'err', false);
       text($('kpi-online-text'), '未登录');
-      $('kpi-online').className = 'kpi-value tone-err';
+      $('kpi-online').className = 'status-word tone-err';
     } else {
       setDot('kpi-online-dot', 'unknown', true);
       text($('kpi-online-text'), '未知');
-      $('kpi-online').className = 'kpi-value tone-muted';
+      $('kpi-online').className = 'status-word tone-muted';
     }
     text($('kpi-online-sub'), '登录结果：' + (s.last_login_success === true ? '成功' : (s.last_login_success === false ? '失败' : '-')));
 
     /* —— 当前账号 —— */
     text($('kpi-account'), s.current_account ? s.current_account : '未配置');
-    $('kpi-account').className = 'kpi-value small mono' + (s.current_account ? '' : ' tone-muted');
+    $('kpi-account').className = 'stat-value mono' + (s.current_account ? '' : ' tone-muted');
     text($('kpi-account-sub'), s.current_account ? '账号 + 运营商后缀' : '请到「配置」页填写账号');
 
     /* —— 上次登录时间 —— */
     text($('kpi-lastlogin'), s.last_login_at ? fmtIso(s.last_login_at) : '从未');
-    $('kpi-lastlogin').className = 'kpi-value small' + (s.last_login_at ? '' : ' tone-muted');
+    $('kpi-lastlogin').className = 'stat-value' + (s.last_login_at ? '' : ' tone-muted');
     text($('kpi-lastlogin-sub'), s.last_login_at ? '最近一次登录尝试' : '尚无登录记录');
 
     /* —— 上次错误（有值 → 警示色边框） —— */
     var cardErr = $('card-error');
     if (s.last_error) {
       text($('kpi-error'), s.last_error);
-      $('kpi-error').className = 'kpi-value small tone-warn';
-      cardErr.className = 'card kpi kpi-alert';
+      $('kpi-error').className = 'stat-value tone-warn';
+      cardErr.className = 'stat-cell stat-alert';
       text($('kpi-error-sub'), '发生于 ' + fmtTimeOnly(s.last_check_at));
     } else {
       text($('kpi-error'), '无');
-      $('kpi-error').className = 'kpi-value small tone-muted';
-      cardErr.className = 'card kpi';
+      $('kpi-error').className = 'stat-value tone-muted';
+      cardErr.className = 'stat-cell';
       text($('kpi-error-sub'), '最近一次检查未报错');
     }
 
@@ -3397,13 +3468,13 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     if (!el) return;
     if (countdownDeadline === null) {
       el.textContent = '未计划';
-      el.className = 'kpi-value mono tone-muted';
+      el.className = 'stat-value mono tone-muted';
       text($('kpi-next-sub'), '周期自检未启用或尚未排期');
       return;
     }
     var left = Math.max(0, Math.round((countdownDeadline - Date.now()) / 1000));
     el.textContent = fmtCountdown(left);
-    el.className = 'kpi-value mono' + (left <= 10 ? ' tone-warn' : '');
+    el.className = 'stat-value mono' + (left <= 10 ? ' tone-warn' : '');
     text($('kpi-next-sub'), '剩余 ' + left + ' 秒 · 预计 ' + fmtTimeOnly(countdownAt) + ' 执行');
   }
 
@@ -3418,7 +3489,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       if (!el) return;
       var v = el.textContent;
       if (_lastSeen[id] !== undefined && _lastSeen[id] !== v) {
-        var box = el.closest ? (el.closest('.kpi-value') || el) : el;
+        var box = el.closest ? (el.closest('.kpi-value, .status-word, .stat-value') || el) : el;
         box.classList.remove('flash');
         void box.offsetWidth;            /* 强制重排，动画才能重播 */
         box.classList.add('flash');
@@ -3444,7 +3515,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var btn = $('btn-login');
     if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
     text($('btn-login-label'), '立即登录');
-    text($('login-hint'), msg || '点击按钮立即触发一次完整的网络检查与登录流程。');
+    text($('login-hint'), msg || '点一下立即触发完整的检查与登录');
     if (type) toast(msg, type);
   }
 
