@@ -84,7 +84,135 @@ pub fn local_ips() -> Vec<String> {
     out
 }
 
-/// 跑一个命令并拿 stdout（失败/空输出 → None ✓）。
+// ---------------- Wi-Fi 名清单（设置界面「从列表里选」用 ✓） ----------------
+
+/// 本机**保存过**的 Wi-Fi 名 ✓（跨多条网络用过的那几个 ✓）。
+///
+/// 用途：设置界面里点一下就能填进「允许的 Wi-Fi」或方案的匹配名 ✓ —— 不用手打 ✗
+/// （手打最容易错一个字母，然后守卫就一直不生效 ✗）。
+pub fn known_ssids() -> Vec<String> {
+    let attempts: &[(&str, &[&str], fn(&str) -> Vec<String>)] = if cfg!(target_os = "windows") {
+        &[(
+            "netsh",
+            &["wlan", "show", "profiles"],
+            parse_netsh_profiles as fn(&str) -> Vec<String>,
+        )]
+    } else if cfg!(target_os = "macos") {
+        &[(
+            "networksetup",
+            &["-listpreferredwirelessnetworks", "en0"],
+            parse_networksetup_preferred as fn(&str) -> Vec<String>,
+        )]
+    } else {
+        &[(
+            "nmcli",
+            &["-t", "-f", "NAME,TYPE", "connection", "show"],
+            parse_nmcli_connections as fn(&str) -> Vec<String>,
+        )]
+    };
+    collect_ssids(attempts)
+}
+
+/// 附近**当前可见**的 Wi-Fi 名 ✓。
+///
+/// macOS 从 14 起拿掉了 `airport` ✗，命令行没有官方入口 → 那边返回空 ✓（设置界面照常能用「当前 Wi-Fi」✓）。
+pub fn visible_ssids() -> Vec<String> {
+    let attempts: &[(&str, &[&str], fn(&str) -> Vec<String>)] = if cfg!(target_os = "windows") {
+        &[(
+            "netsh",
+            &["wlan", "show", "networks"],
+            parse_netsh_networks as fn(&str) -> Vec<String>,
+        )]
+    } else if cfg!(target_os = "macos") {
+        &[]
+    } else {
+        &[(
+            "nmcli",
+            &["-t", "-f", "SSID", "dev", "wifi", "list"],
+            parse_plain_ssid_lines as fn(&str) -> Vec<String>,
+        )]
+    };
+    collect_ssids(attempts)
+}
+
+fn collect_ssids(attempts: &[(&str, &[&str], fn(&str) -> Vec<String>)]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (program, args, parser) in attempts {
+        if let Some(text) = run(program, args) {
+            for ssid in parser(&text) {
+                if !ssid.is_empty() && !out.contains(&ssid) {
+                    out.push(ssid);
+                }
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// `netsh wlan show profiles` → 配置名 ✓。
+///
+/// **语言无关**：中英文都是 `标签 : 名字` ✓ —— 只取冒号右半边就够了 ✓。
+pub fn parse_netsh_profiles(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(_, value)| value.trim().to_string())
+        .filter(|value| !value.is_empty() && !value.starts_with('-'))
+        .collect()
+}
+
+/// `netsh wlan show networks` → 可见 SSID ✓。
+///
+/// 只认 `SSID n :` 开头的行 ✓ —— `BSSID n :` 那些（MAC 地址）会被排除掉 ✓。
+pub fn parse_netsh_networks(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if !trimmed.to_ascii_uppercase().starts_with("SSID ") {
+                return None;
+            }
+            trimmed
+                .split_once(':')
+                .map(|(_, value)| value.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+/// `networksetup -listpreferredwirelessnetworks en0` → 首行是标题（以 `:` 结尾 ✓）→ 跳过 ✓。
+pub fn parse_networksetup_preferred(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.trim())
+        .filter(|line| {
+            !line.is_empty()
+                && !line.ends_with(':')
+                && !line.to_ascii_lowercase().starts_with("preferred")
+        })
+        .map(|line| line.to_string())
+        .collect()
+}
+
+/// `nmcli -t -f NAME,TYPE connection show` → 只留无线连接 ✓
+/// （名字里可能含 `\:`，所以**从右**切一个冒号 ✓）。
+pub fn parse_nmcli_connections(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.rsplit_once(':'))
+        .filter(|(_, kind)| kind.contains("wireless"))
+        .map(|(name, _)| name.replace("\\:", ":").trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// `nmcli -t -f SSID dev wifi list` → 一行一个名字 ✓（空行与分隔符要去掉 ✓）。
+pub fn parse_plain_ssid_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty() && line != "--")
+        .collect()
+}
+
 fn run(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program).args(args).output().ok()?;
     if !output.status.success() {

@@ -18,6 +18,7 @@ pub mod instance;
 pub mod logfile;
 pub mod metrics;
 pub mod net;
+pub mod netwatch;
 pub mod package;
 pub mod password;
 pub mod platform;
