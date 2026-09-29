@@ -132,6 +132,7 @@ fn open_settings(holder: &Rc<RefCell<Option<SettingsWindow>>>, parent: Weak<AppW
         Ok(win) => {
             wire_settings(&win, holder.clone(), parent);
             apply_settings(&win, &model::settings_view());
+            apply_profiles(&win, &model::profiles_view());
             if let Err(e) = win.show() {
                 eprintln!("打不开设置窗口：{}", e);
                 return;
@@ -215,6 +216,7 @@ fn wire_settings(
 ) {
     let weak = win.as_weak();
     let parent_for_save = parent.clone();
+    let parent_for_profile = parent.clone();
     win.on_save(move || {
         let Some(win) = weak.upgrade() else { return };
         let (kind, text) = model::settings_save(&input_from(&win));
@@ -242,6 +244,7 @@ fn wire_settings(
     win.on_refresh_view(move || {
         if let Some(win) = weak.upgrade() {
             apply_settings(&win, &model::settings_view());
+            apply_profiles(&win, &model::profiles_view());
         }
     });
 
@@ -261,10 +264,80 @@ fn wire_settings(
         }
     });
 
+    // —— 方案页：存 / 应用 / 删 / 自动切换开关 ✓ ——
+    let weak = win.as_weak();
+    win.on_profile_save(move || {
+        let Some(win) = weak.upgrade() else { return };
+        let input = input_from(&win);
+        let (kind, text) = model::profile_save(
+            &input,
+            &win.get_profile_new_name(),
+            &win.get_profile_new_ssids(),
+        );
+        apply_profiles(&win, &model::profiles_view()); // 先刷新，再写提示（否则提示会被覆盖 ✗）
+        win.set_message(SharedString::from(text.as_str()));
+        win.set_message_kind(SharedString::from(kind.as_str()));
+        if kind == "ok" {
+            win.set_profile_new_name(SharedString::from(""));
+            win.set_profile_new_ssids(SharedString::from(""));
+        }
+    });
+
+    let weak = win.as_weak();
+    win.on_profile_activate(move |name| {
+        let Some(win) = weak.upgrade() else { return };
+        let (kind, text) = model::profile_activate(name.as_str());
+        // 切方案会改配置值 → 表单与列表都要跟着变 ✓
+        apply_settings(&win, &model::settings_view());
+        apply_profiles(&win, &model::profiles_view());
+        win.set_message(SharedString::from(text.as_str()));
+        win.set_message_kind(SharedString::from(kind.as_str()));
+        if kind == "ok" {
+            if let Some(parent) = parent_for_profile.upgrade() {
+                apply(&parent, &model::collect());
+            }
+        }
+    });
+
+    let weak = win.as_weak();
+    win.on_profile_delete(move |name| {
+        let Some(win) = weak.upgrade() else { return };
+        let (kind, text) = model::profile_delete(name.as_str());
+        apply_profiles(&win, &model::profiles_view());
+        win.set_message(SharedString::from(text.as_str()));
+        win.set_message_kind(SharedString::from(kind.as_str()));
+    });
+
+    let weak = win.as_weak();
+    win.on_profile_toggle_auto(move || {
+        let Some(win) = weak.upgrade() else { return };
+        let next = !win.get_profile_auto();
+        let (kind, text) = model::profile_set_auto(next);
+        apply_profiles(&win, &model::profiles_view());
+        win.set_message(SharedString::from(text.as_str()));
+        win.set_message_kind(SharedString::from(kind.as_str()));
+    });
+
     win.on_dismiss(move || {
         // 丢掉句柄 = 关掉并释放 ✓（下次点「设置…」重建 ✓）
         let _ = holder.borrow_mut().take();
     });
+}
+
+/// 把方案页数据写进设置窗口 ✓
+fn apply_profiles(win: &SettingsWindow, view: &model::ProfilesView) {
+    let rows: Vec<ProfileRow> = view
+        .rows
+        .iter()
+        .map(|row| ProfileRow {
+            name: SharedString::from(row.name.as_str()),
+            detail: SharedString::from(row.detail.as_str()),
+            active: row.active,
+        })
+        .collect();
+    win.set_profile_rows(ModelRc::new(VecModel::from(rows)));
+    win.set_profiles_summary(SharedString::from(view.summary.as_str()));
+    win.set_profile_auto(view.auto_switch);
 }
 
 /// 数据目录（路径太长就省略中间 ✓）

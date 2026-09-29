@@ -357,6 +357,168 @@ pub fn settings_save(input: &FormInput) -> (String, String) {
         Err(e) => ("danger".to_string(), format!("保存失败：{}", e)),
     }
 }
+/// 方案列表里的一行（给界面用 ✓）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileRow {
+    pub name: String,
+    /// 一行说明（后缀 + 匹配几个 Wi-Fi ✓）
+    pub detail: String,
+    /// 是不是当前正在用的方案 ✓
+    pub active: bool,
+}
+
+/// 方案页要显示的一屏数据 ✓。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfilesView {
+    pub auto_switch: bool,
+    pub active: String,
+    pub rows: Vec<ProfileRow>,
+    /// 一句话说清现在是什么状态 / 该干什么 ✓
+    pub summary: String,
+}
+
+/// 读配置 → 方案页数据 ✓（只读 ✓）
+pub fn profiles_view() -> ProfilesView {
+    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    profiles_view_of(&cfg)
+}
+
+/// 从给定配置生成方案页数据（**纯函数** → 单测能覆盖 ✓）。
+pub fn profiles_view_of(cfg: &Config) -> ProfilesView {
+    let active = drcom_core::profiles::active(cfg).unwrap_or("").to_string();
+    let rows: Vec<ProfileRow> = drcom_core::profiles::list(cfg)
+        .into_iter()
+        .map(|name| ProfileRow {
+            detail: drcom_core::profiles::describe(cfg, &name),
+            active: name == active,
+            name,
+        })
+        .collect();
+    let summary = if rows.is_empty() {
+        "还没有方案 —— 把上面改成某个位置的设置（校内公共场合留空后缀、宿舍填 @yd），\
+         再起个名字存下来 ✓"
+            .to_string()
+    } else if cfg.profiles_auto_switch {
+        format!("共 {} 个方案 · 自动切换已开：走到命中 Wi-Fi 就自动切 ✓", rows.len())
+    } else {
+        format!("共 {} 个方案 · 自动切换关着（只能手动点「应用」✓）", rows.len())
+    };
+    ProfilesView {
+        auto_switch: cfg.profiles_auto_switch,
+        active,
+        rows,
+        summary,
+    }
+}
+
+/// 方案名校验（纯函数 ✓）→ `Err` 是给用户看的一句中文 ✓
+fn profile_name_ready(name: &str) -> Result<String, String> {
+    let normalized = drcom_core::profiles::normalize_name(name);
+    if normalized.is_empty() {
+        return Err(format!(
+            "方案名不合法 ✗（不能为空、不超过 {} 字，且不能含路径字符）",
+            drcom_core::profiles::MAX_NAME_LEN
+        ));
+    }
+    Ok(normalized)
+}
+
+/// 把**当前表单里的值**存成一个新方案（名字 + 匹配 Wi-Fi 名来自界面 ✓）。
+pub fn profile_save(input: &FormInput, name: &str, match_ssids: &str) -> (String, String) {
+    let config_path = platform::config_path();
+    let base = Config::load(&config_path).unwrap_or_default();
+    let normalized = match profile_name_ready(name) {
+        Ok(value) => value,
+        Err(e) => return ("danger".to_string(), e),
+    };
+    // 表单必须先过关：半套配置绝不落盘 ✗
+    let form = input.to_form(&base);
+    let errors = form.validate(&base);
+    if !errors.is_empty() {
+        return (
+            "danger".to_string(),
+            format!("先把上面的配置改对再存方案：\n  - {}", errors.join("\n  - ")),
+        );
+    }
+    let mut cfg = form.to_config(&base);
+    let ssids: Vec<String> = match_ssids
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+    match drcom_core::profiles::save_profile(&mut cfg, &normalized, &ssids) {
+        Ok(msg) => match cfg.save(&config_path) {
+            Ok(()) => (
+                "ok".to_string(),
+                format!("{}（值取的就是当前表单里的设置 ✓）", msg),
+            ),
+            Err(e) => ("danger".to_string(), format!("写入配置失败：{}", e)),
+        },
+        Err(e) => ("danger".to_string(), e),
+    }
+}
+
+/// 应用（切到）某个方案 ✓
+pub fn profile_activate(name: &str) -> (String, String) {
+    let config_path = platform::config_path();
+    let mut cfg = match Config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return ("danger".to_string(), e),
+    };
+    match drcom_core::profiles::activate(&mut cfg, name) {
+        Ok(()) => match cfg.save(&config_path) {
+            Ok(()) => (
+                "ok".to_string(),
+                format!(
+                    "已切到方案「{}」：后缀 {} ✓（表单已同步刷新 ✓）",
+                    name,
+                    drcom_core::profiles::suffix_label(&cfg.suffix)
+                ),
+            ),
+            Err(e) => ("danger".to_string(), format!("写入配置失败：{}", e)),
+        },
+        Err(e) => ("danger".to_string(), e),
+    }
+}
+
+/// 删除某个方案 ✓（删「当前方案」只清标记，**配置值不动** ✓）
+pub fn profile_delete(name: &str) -> (String, String) {
+    let config_path = platform::config_path();
+    let mut cfg = match Config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return ("danger".to_string(), e),
+    };
+    match drcom_core::profiles::delete(&mut cfg, name) {
+        Ok(()) => match cfg.save(&config_path) {
+            Ok(()) => ("ok".to_string(), format!("已删除方案「{}」✓", name)),
+            Err(e) => ("danger".to_string(), format!("写入配置失败：{}", e)),
+        },
+        Err(e) => ("danger".to_string(), e),
+    }
+}
+
+/// 打开 / 关闭「按 Wi-Fi 自动切换」✓
+pub fn profile_set_auto(enabled: bool) -> (String, String) {
+    let config_path = platform::config_path();
+    let mut cfg = match Config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => return ("danger".to_string(), e),
+    };
+    cfg.profiles_auto_switch = enabled;
+    match cfg.save(&config_path) {
+        Ok(()) => (
+            "ok".to_string(),
+            if enabled {
+                "自动切换已开启 ✓：走进命中方案的 Wi-Fi 就自动切（读不到 Wi-Fi 名时保持不动 ✓）"
+                    .to_string()
+            } else {
+                "自动切换已关闭 ✓：方案只在点「应用」时生效".to_string()
+            },
+        ),
+        Err(e) => ("danger".to_string(), format!("写入配置失败：{}", e)),
+    }
+}
+
 pub fn run_selfcheck() -> (String, String) {
     let version = drcom_core::app_version_string();
     let version_ok = drcom_core::channel::Version::parse(&version).is_some();
@@ -514,6 +676,59 @@ mod tests {
         let (kind, text) = settings_test(&input);
         assert_eq!(kind, "danger");
         assert!(text.contains("配置有问题"), "{}", text);
+    }
+
+    #[test]
+    fn profiles_view_is_pure_and_readable() {
+        let mut cfg = Config::default();
+        let view = profiles_view_of(&cfg);
+        assert!(view.rows.is_empty());
+        assert!(view.summary.contains("还没有方案"), "{}", view.summary);
+
+        cfg.suffix = "@yd".to_string();
+        drcom_core::profiles::save_profile(&mut cfg, "宿舍", &["Dorm-WiFi".to_string()]).unwrap();
+        let view = profiles_view_of(&cfg);
+        assert_eq!(view.rows.len(), 1);
+        assert_eq!(view.rows[0].name, "宿舍");
+        assert!(view.rows[0].detail.contains("@yd"), "{}", view.rows[0].detail);
+        assert!(!view.rows[0].active, "刚存下的方案不会自动成为「使用中」✓");
+        assert!(view.summary.contains("自动切换关着"), "{}", view.summary);
+
+        drcom_core::profiles::activate(&mut cfg, "宿舍").unwrap();
+        let view = profiles_view_of(&cfg);
+        assert_eq!(view.active, "宿舍");
+        assert!(view.rows[0].active, "切过去之后要标「使用中」✓");
+        assert!(view.summary.contains("共 1 个方案"), "{}", view.summary);
+    }
+
+    #[test]
+    fn profile_name_validation_rejects_junk() {
+        assert_eq!(profile_name_ready("  宿舍  ").unwrap(), "宿舍", "首尾空白要压掉 ✓");
+        assert!(profile_name_ready("").is_err(), "空名字不行 ✗");
+        assert!(profile_name_ready("   ").is_err());
+        assert!(profile_name_ready("a/b").is_err(), "路径字符会搞坏配置 ✗");
+        assert!(profile_name_ready("长".repeat(25).as_str()).is_err(), "超长要拦 ✗");
+        assert!(profile_name_ready("长".repeat(24).as_str()).is_ok());
+    }
+
+    #[test]
+    fn profile_save_refuses_junk_without_touching_disk() {
+        // 后缀非法 → 直接拒绝（**不会走到写盘** ✓）
+        let mut input = FormInput::default();
+        input.host = "172.16.80.3".to_string();
+        input.port_text = "80".to_string();
+        input.interval_text = "30".to_string();
+        input.wait_text = "60".to_string();
+        input.suffix = "@xx".to_string();
+        let (kind, text) = profile_save(&input, "坏方案", "");
+        assert_eq!(kind, "danger");
+        assert!(text.contains("先把上面的配置改对"), "{}", text);
+
+        // 名字不合法 → 更早拒绝 ✓
+        input.suffix = "@yd".to_string();
+        let (kind, text) = profile_save(&input, "  ", "");
+        assert_eq!(kind, "danger");
+        assert!(text.contains("方案名"), "{}", text);
     }
 }
 
