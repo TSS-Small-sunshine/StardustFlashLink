@@ -207,6 +207,77 @@ pub fn run_check() -> (String, String) {
     )
 }
 
+/// 「无人登录也自动登录」这一项要显示的数据 ✓
+/// （语义 = **注册成系统服务** ✓：用户级自启要等有人登录才跑 ✗，只有服务是开机即起 ✓）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceView {
+    /// 是否已安装（驱动开关 ✓）
+    pub installed: bool,
+    /// 一行状态 ✓
+    pub line: String,
+    /// 代价与前提（要管理员 / 要 nssm / 与 2.x 同名 ✓）
+    pub hint: String,
+}
+
+/// 纯函数：服务状态 → 一行中文 ✓（好测 ✓，不碰系统 ✓）。
+pub fn service_line(state: &drcom_core::service::ServiceState) -> String {
+    match state {
+        drcom_core::service::ServiceState::Running => "已注册，正在运行 ✓".to_string(),
+        drcom_core::service::ServiceState::Stopped => "已注册，但没在跑".to_string(),
+        drcom_core::service::ServiceState::NotInstalled => "未注册（只在有人登录后运行）".to_string(),
+        drcom_core::service::ServiceState::Unknown(reason) => {
+            format!("查不出来：{}", reason)
+        }
+    }
+}
+
+/// 读一次（只读 ✓；点「重新读取」也走它 ✓）。
+pub fn service_view() -> ServiceView {
+    let state = drcom_core::service::status();
+    let installed = !matches!(state, drcom_core::service::ServiceState::NotInstalled);
+    let mut hint = format!(
+        "开启后：由 {} 托管，**开机即起、无人登录也在检查** ✓；\
+         代价是注册时需要管理员权限，Windows 上还需要程序目录里有 nssm.exe ✓",
+        drcom_core::service::flavor_name()
+    );
+    if !drcom_core::service::manager_available() {
+        hint.push_str(&format!(
+            "\n⚠ 现在找不到 {} ✗ —— 注册会失败，可以先用 `autostart on`（登录后自动跑 ✓）",
+            drcom_core::service::manager_program()
+        ));
+    }
+    if installed && cfg!(target_os = "windows") {
+        hint.push_str("\n⚠ 服务名与 2.x 共用（DrcomAutoLogin）✓ —— 已存在时命令会给「接管」步骤，不会硬装 ✗");
+    }
+    ServiceView {
+        installed,
+        line: service_line(&state),
+        hint,
+    }
+}
+
+/// 开关动作 ✓：装 = 注册并启动 ✓；关 = 停止并注销 ✓。
+pub fn service_set(enabled: bool) -> (String, String) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("stardust-flash-link"));
+    let result = if enabled {
+        drcom_core::service::install(&exe, &["run"])
+    } else {
+        drcom_core::service::uninstall()
+    };
+    match result {
+        Ok(message) => (
+            "ok".to_string(),
+            format!(
+                "{}\n（{} 现在会 {} 自己检查 ✓）",
+                message,
+                drcom_core::APP_NAME,
+                if enabled { "交给服务" } else { "由界面自己" }
+            ),
+        ),
+        Err(e) => ("danger".to_string(), e),
+    }
+}
+
 /// 设置窗口收集到的原始输入（全是界面上的字符串/开关 ✓，解析与校验在下面 ✓）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FormInput {
@@ -651,6 +722,20 @@ mod tests {
         let mut with_password = input.clone();
         with_password.password = "pw".to_string();
         assert_eq!(with_password.to_form(&cfg).new_password(), Some("pw"));
+    }
+
+    #[test]
+    fn service_lines_are_readable_and_never_lie() {
+        use drcom_core::service::ServiceState;
+        assert!(service_line(&ServiceState::Running).contains("正在运行"));
+        assert!(service_line(&ServiceState::Stopped).contains("没在跑"));
+        assert!(service_line(&ServiceState::NotInstalled).contains("未注册"));
+        assert!(service_line(&ServiceState::Unknown("探测失败".into())).contains("探测失败"));
+        // 真机只读取一次：字段非空，且**代价必须说清**（要管理员 ✓）
+        let view = service_view();
+        assert!(!view.line.is_empty() && !view.hint.is_empty());
+        assert!(view.hint.contains("管理员"), "代价要讲明白 ✓: {}", view.hint);
+        assert!(view.hint.contains("无人登录") || view.hint.contains("开机即起"), "{}", view.hint);
     }
 
     #[test]

@@ -154,6 +154,7 @@ fn open_settings(holder: &Rc<RefCell<Option<SettingsWindow>>>, parent: Weak<AppW
             wire_settings(&win, holder.clone(), parent);
             apply_settings(&win, &model::settings_view());
             apply_profiles(&win, &model::profiles_view());
+            apply_service(&win, &model::service_view());
             if let Err(e) = win.show() {
                 eprintln!("打不开设置窗口：{}", e);
                 return;
@@ -266,6 +267,7 @@ fn wire_settings(
         if let Some(win) = weak.upgrade() {
             apply_settings(&win, &model::settings_view());
             apply_profiles(&win, &model::profiles_view());
+            apply_service(&win, &model::service_view());
         }
     });
 
@@ -339,6 +341,16 @@ fn wire_settings(
         win.set_message_kind(SharedString::from(kind.as_str()));
     });
 
+    let weak = win.as_weak();
+    win.on_service_toggle(move || {
+        let Some(win) = weak.upgrade() else { return };
+        let enable = !win.get_service_installed();
+        let (kind, text) = model::service_set(enable);
+        apply_service(&win, &model::service_view()); // 先刷新真实状态（装没装上以系统为准 ✓）
+        win.set_message(SharedString::from(text.as_str()));
+        win.set_message_kind(SharedString::from(kind.as_str()));
+    });
+
     win.on_dismiss(move || {
         // 丢掉句柄 = 关掉并释放 ✓（下次点「设置…」重建 ✓）
         let _ = holder.borrow_mut().take();
@@ -359,6 +371,13 @@ fn apply_profiles(win: &SettingsWindow, view: &model::ProfilesView) {
     win.set_profile_rows(ModelRc::new(VecModel::from(rows)));
     win.set_profiles_summary(SharedString::from(view.summary.as_str()));
     win.set_profile_auto(view.auto_switch);
+}
+
+/// 把「运行方式」一屏写进设置窗口 ✓
+fn apply_service(win: &SettingsWindow, view: &model::ServiceView) {
+    win.set_service_line(SharedString::from(view.line.as_str()));
+    win.set_service_hint(SharedString::from(view.hint.as_str()));
+    win.set_service_installed(view.installed);
 }
 
 /// 数据目录（路径太长就省略中间 ✓）

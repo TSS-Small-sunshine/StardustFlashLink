@@ -41,6 +41,11 @@ export component SettingsWindow inherits Window {
     in-out property <string> profile-new-name: "";
     in-out property <string> profile-new-ssids: "";
 
+    // —— 运行方式（「无人登录也自动登录」= 注册成系统服务 ✓）——
+    in property <string> service-line: "";
+    in property <string> service-hint: "";
+    in property <bool> service-installed: false;
+
     callback save();
     callback test-connection();
     callback open-data-dir();
@@ -50,6 +55,7 @@ export component SettingsWindow inherits Window {
     callback profile-activate(string);
     callback profile-delete(string);
     callback profile-toggle-auto();
+    callback service-toggle();
 
     VerticalLayout {
         padding: 24px;
@@ -261,6 +267,41 @@ export component SettingsWindow inherits Window {
                 clicked => { root.profile-save(); }
             }
             Rectangle { horizontal-stretch: 1; }
+        }
+
+        // —— 运行方式：无人登录也自动登录（= 注册成系统服务 ✓）——
+        Rectangle {
+            height: 2px;
+            background: Theme.card-stroke;
+        }
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Text {
+                text: "无人登录也自动登录";
+                font-size: 14px;
+                font-weight: 600;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.service-line;
+                font-size: 12px;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                wrap: word-wrap;
+            }
+            PillButton {
+                text: root.service-installed ? "关掉服务" : "注册成服务";
+                primary: root.service-installed;
+                clicked => { root.service-toggle(); }
+            }
+        }
+        Text {
+            text: root.service-hint;
+            font-size: 11px;
+            color: Theme.text-dim;
+            wrap: word-wrap;
         }
 
         // —— 提示 / 校验结果 ——
