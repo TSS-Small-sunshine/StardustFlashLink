@@ -15,6 +15,7 @@ pub mod guard;
 pub mod logfile;
 pub mod metrics;
 pub mod net;
+pub mod password;
 pub mod platform;
 pub mod probe;
 pub mod profiles;
@@ -22,6 +23,7 @@ pub mod protocol;
 pub mod scheduler;
 pub mod secret;
 pub mod session;
+pub mod settings;
 pub mod timefmt;
 pub mod zipwriter;
 
