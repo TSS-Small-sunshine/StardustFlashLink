@@ -506,8 +506,145 @@ def api_get_log_download():
     return "campus_login_{}.log".format(datetime.now().strftime("%Y%m%d_%H%M%S")), data
 
 
+# ============================================================
+# 安装方式识别（v2.1.2.0）—— 「卸载服务」得说对话
+#
+# 以前点「卸载服务」永远只弹一句写死的话：「请以管理员身份运行程序目录下的
+# uninstall.bat」。可安装包装的用户**没有**那个 bat（Inno 生成的卸载器是
+# unins000.exe，正路是「设置 → 应用」）；源码跑的用户又没有安装器卸载项。
+# 一句话两边都不对，用户只能自己猜。这里按证据判三种情形，提示分别给。
+#
+# 判据只用「不会误判」的事实（命中即定）：
+#   1) 程序目录里有 Inno 卸载器 unins*.exe        → installer（安装包）
+#   2) 注册表有本产品卸载项（AppId 是不变量 I1）  → installer
+#   3) 目录里带 .git / packaging/setup.iss        → source（源码或绿色部署）
+#   4) 都不是                                     → unknown（两种提示都给）
+# ============================================================
+INNO_UNINSTALL_APPID = "{A8F2E3D1-7C4B-4F89-9D5E-1A2B3C4D5E6F}"  # 与 packaging/setup.iss 一致（不变量 I1）
+_UNINSTALL_REG_KEYS = (
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + INNO_UNINSTALL_APPID + "_is1",
+    "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + INNO_UNINSTALL_APPID + "_is1",
+)
+_SERVICE_REG_KEY = "SYSTEM\\CurrentControlSet\\Services\\DrcomAutoLogin"
+
+
+class _OsProbe:
+    """真机探测实现（测试注入替身，见 `_detect_install_mode` 的 `probe` 参数）。"""
+
+    @staticmethod
+    def isfile(path):
+        return os.path.isfile(path)
+
+    @staticmethod
+    def isdir(path):
+        return os.path.isdir(path)
+
+    @staticmethod
+    def find_uninstaller(app_dir):
+        """程序目录里的 Inno 卸载器（unins000.exe / unins001.exe …）→ 文件名或 None。"""
+        try:
+            names = os.listdir(app_dir)
+        except OSError:
+            return None
+        for name in sorted(names):
+            low = name.lower()
+            if low.startswith("unins") and low.endswith(".exe"):
+                return name
+        return None
+
+    @staticmethod
+    def reg_exists(subkey):
+        """HKLM 下某子键是否存在；非 Windows / 无权限 / 被拒一律 False（绝不抛）。"""
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey):
+                return True
+        except Exception:  # noqa: BLE001  OSError / ImportError / PermissionError
+            return False
+
+
+def _detect_install_mode(app_dir, probe=None):
+    """判断**当前这份代码**是怎么装的，并给出对应的卸载指引。
+
+    优先级（越靠前证据越硬，且都是「这份目录」自己的证据）：
+      1) 程序目录里有 Inno 卸载器 unins*.exe        → installer（这份目录就是安装目录本体）
+      2) 目录里带 .git / packaging/setup.iss        → source（源码 / 绿色部署跑起来的）
+      3) 注册表有本产品的卸载项（AppId 是不变量 I1）→ installer（目录被改名 / 卸载器被删）
+      4) 都不是                                     → unknown（两种途径都提示）
+
+    第 2 条**必须优先于**第 3 条 —— 真机实测（v2.1.2.0 开发机上）就撞到这个组合：
+    本机装过安装包（注册表有卸载项），但当前跑的是源码工作区。若按注册表判成
+    「安装包安装」，用户会被引到「设置 → 应用」去卸载**根本没在跑的那一份** ✗。
+    现在这种情况判 source，并附一句「本机另有安装包安装的副本」，两条路都说清楚。
+
+    返回 dict：mode（installer / source / unknown）、evidence（判据，给人看）、
+    uninstall_hint（前端直接显示，不再写死）。
+    """
+    probe = probe or _OsProbe()
+    evidence = []
+
+    uninstaller = probe.find_uninstaller(app_dir)
+    if uninstaller:
+        evidence.append("程序目录里有安装器卸载器 {}".format(uninstaller))
+
+    git_dir = os.path.join(app_dir, ".git")
+    source_like = bool(
+        probe.isdir(git_dir) or probe.isfile(git_dir)
+        or probe.isfile(os.path.join(app_dir, "packaging", "setup.iss")))
+    if source_like:
+        evidence.append("程序目录里带着 .git / packaging/setup.iss（源码树特征）")
+
+    reg_hit = next((k for k in _UNINSTALL_REG_KEYS if probe.reg_exists(k)), None)
+    if reg_hit:
+        evidence.append("注册表里有本产品的卸载项（{}）—— 本机装过安装包".format(
+            "WOW6432Node" if "WOW6432Node" in reg_hit else "64 位视图"))
+
+    if uninstaller:
+        mode = "installer"
+    elif source_like:
+        mode = "source"
+    elif reg_hit:
+        mode = "installer"
+    else:
+        mode = "unknown"
+
+    if mode == "installer":
+        target = os.path.join(app_dir, uninstaller) if uninstaller else "安装目录里的卸载程序"
+        hint = ("本机是安装包安装的（{}）。请到「设置 → 应用 → 已安装的应用」里卸载「星尘闪连」，"
+                "或直接双击 {}。".format(uninstaller or "注册表里有卸载项", target))
+    elif mode == "source":
+        hint = ("当前跑的是源码 / 绿色部署（这份目录里没找到安装器卸载器）。请以管理员身份运行 {}"
+                "—— 它会停止并移除 Windows 服务；只是试跑的话，停掉进程、删掉程序目录即可。".format(
+                    os.path.join(app_dir, "uninstall.bat")))
+        if reg_hit:
+            hint += " 另外：本机还检测到安装包安装的副本（注册表里有卸载项），要卸载那一份请到「设置 → 应用」。"
+    else:
+        hint = ("没认出安装方式：若是用安装包装的，请到「设置 → 应用」里卸载；"
+                "若是源码 / 解压部署，请以管理员身份运行程序目录下的 uninstall.bat。")
+
+    service_installed = probe.reg_exists(_SERVICE_REG_KEY)
+    if not service_installed:
+        hint += " 另外：当前没检测到 Windows 服务（可能不是以服务方式运行）。"
+
+    return {
+        "mode": mode,
+        "app_dir": app_dir,
+        "uninstaller": uninstaller,
+        "service_installed": service_installed,
+        "evidence": evidence,
+        "uninstall_hint": hint,
+    }
+
+
 def api_get_about():
     s = _snapshot_state()
+    try:
+        install = _detect_install_mode(BASE_DIR)
+    except Exception as exc:  # noqa: BLE001  识别失败不该把「关于」页打成 500
+        logger.warning("安装方式识别失败: %s", exc)
+        install = {"mode": "unknown", "app_dir": BASE_DIR, "uninstaller": None,
+                   "service_installed": False, "evidence": [],
+                   "uninstall_hint": "安装方式识别失败，请按程序目录下的 uninstall.bat 卸载。"}
     return {
         "version": VERSION,
         "version_full": VERSION_FULL,
@@ -520,6 +657,7 @@ def api_get_about():
         "config_file": CONFIG_FILE,
         "password_file": PASSWORD_FILE,
         "log_dir": str(LOG_DIR),
+        "install": install,
     }
 
 
@@ -1427,6 +1565,23 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 :root {
   color-scheme: light;
 
+  /* —— 间距（四轮：统一节奏，别再各处 14/16/18/20 随手写）—— */
+  --pad-card: 20px;    /* 卡片内边距：所有卡片一致，左右文字边界才对得齐 */
+  --gap-card: 14px;    /* 卡片之间、卡片内大块之间 */
+  --gap-field: 16px;   /* 表单字段之间 */
+
+  /* —— 字体（三轮：统一到 MiSans）——
+     小米 MiSans 已装就直接用（Windows 上双击 MiSans-Regular.otf 安装即可，本机已装）；
+     没装就退回系统字体栈 —— 绝不出现缺字方框，也不挑系统 / 语言。
+     为什么不做「内嵌字体文件」：仓库约定「前端全部内联、无 CDN、无新增静态文件」
+     （AGENTS.md §3），而 MiSans-Regular.otf 单文件 6.5 MB，塞进仓库不划算。 */
+  --font-ui: "MiSans", "MiSans VF", "MiSans Regular", "MiSans Normal",
+             -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+             "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  /* 日志 / 代码 / 倒计时也统一走 MiSans（用户要求「所有字体统一成 MiSans」）；
+     数字对齐改靠 tabular-nums，不再依赖等宽字体族 */
+  --font-mono: var(--font-ui);
+
   /* —— 画布与背景光晕 —— */
   --bg: #f5f5f7;
   --glow-a: rgba(0, 122, 255, 0.16);
@@ -1538,6 +1693,75 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 }
 
 /* ============================================================
+   2.5 设计令牌 — BakaXL 风（html[data-theme="baka"]，v2.1.2 起为默认主题）
+
+   参考感（用户给的 BakaXL 截图）：整窗一张「大图」打底（见 §3），
+   上面全部是更白更厚、圆角更大的卡片，分层靠「留白 + 阴影」而不是描边；
+   标题字号/字重拉大，强调色收敛到一个。老主题（light/dark）完全不受影响。
+   ============================================================ */
+[data-theme="baka"] {
+  color-scheme: light;
+
+  /* 画布兜底色（真背景是 body::before 的整窗大图） */
+  --bg: #f3f5ff;
+  --glow-a: transparent;
+  --glow-b: transparent;
+  --glow-c: transparent;
+
+  /* 材质：更白更厚，卡片要像「浮在大图上」。
+     0.78 → 0.86：浅紫底上白字卡太透会让正文发灰、读数吃力（配色首要的是看得清）。 */
+  --material: rgba(255, 255, 255, 0.86);
+  --material-2: rgba(255, 255, 255, 0.62);
+  --material-strong: rgba(255, 255, 255, 0.86);
+  --material-solid: #ffffff;
+  --blur: saturate(150%) blur(22px);
+  --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+
+  --fill: rgba(120, 120, 150, 0.10);
+  --fill-2: rgba(120, 120, 150, 0.16);
+  --fill-3: rgba(120, 120, 150, 0.24);
+  --hairline: rgba(60, 70, 120, 0.10);
+  --hairline-2: rgba(60, 70, 120, 0.18);
+
+  /* 次要文字整体加深一档：原来的 #5c6076 / #7b7f96 落在浅紫极光上偏虚，副标题与卡片
+     说明看起来「糊」；加深后同样克制，但一眼读得清。 */
+  --text: #1b1d2b;
+  --text-strong: #0d0f1a;
+  --text-2: #4d5168;
+  --text-3: #686c83;
+
+  /* 强调色：星尘紫（呼应参考图里的紫调） */
+  --accent: #6b5cff;
+  --accent-hover: #7d70ff;
+  --accent-soft: rgba(107, 92, 255, 0.14);
+  --accent-softer: rgba(107, 92, 255, 0.07);
+  --ok: #1a7f45;
+  --ok-fill: rgba(48, 209, 88, 0.18);
+  --warn: #9a5b00;
+  --warn-fill: rgba(255, 159, 10, 0.20);
+  --err: #cc2b3d;
+  --err-fill: rgba(255, 69, 58, 0.14);
+  --track: rgba(120, 120, 150, 0.30);
+
+  --terminal: #171a2b;
+  --terminal-text: #e6e7f2;
+  --terminal-dim: #8b8fa8;
+
+  /* 形状：圆角整体再大一档 */
+  --r-xl: 30px;
+  --r-lg: 22px;
+  --r-md: 16px;
+  --r-sm: 12px;
+  --r-xs: 10px;
+
+  /* 阴影：更大更散，分层全靠它 */
+  --shadow-1: 0 2px 6px rgba(50, 60, 110, 0.10), 0 22px 48px -20px rgba(50, 60, 110, 0.42);
+  --shadow-2: 0 4px 12px rgba(50, 60, 110, 0.12), 0 30px 64px -24px rgba(50, 60, 110, 0.46);
+  --shadow-lift: 0 24px 68px -18px rgba(50, 60, 110, 0.44);
+  --shadow-pop: 0 32px 92px -18px rgba(50, 60, 110, 0.52);
+}
+
+/* ============================================================
    3. 基础层：画布 / 字体 / 背景光晕
    ============================================================ */
 *, *::before, *::after { box-sizing: border-box; }
@@ -1547,8 +1771,7 @@ body {
   min-height: 100vh;
   background-color: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
-               "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
   font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -1570,11 +1793,45 @@ body::before {
   pointer-events: none;
   z-index: 0;
 }
+
+/* BakaXL 风：整窗「大图」= 彩色极光 + 淡淡星点（纯 CSS，不依赖图片文件）。
+   想换自己的图：把最下面那层 linear-gradient 换成 url("...") center/cover no-repeat 即可
+   —— 「主题与背景」可换墙纸的底子就是它。 */
+[data-theme="baka"] body::before {
+  inset: 0;
+  filter: none;
+  z-index: -3;
+  background:
+    radial-gradient(1150px 720px at 12% 0%, #8fb2ff 0%, rgba(143, 178, 255, 0) 62%),
+    radial-gradient(940px 660px at 88% 8%, #ffb3dc 0%, rgba(255, 179, 220, 0) 60%),
+    radial-gradient(1020px 780px at 64% 102%, #93e8ff 0%, rgba(147, 232, 255, 0) 64%),
+    radial-gradient(720px 600px at 2% 86%, #c9b2ff 0%, rgba(201, 178, 255, 0) 62%),
+    radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.9) 0 1.3px, transparent 1.6px),
+    linear-gradient(168deg, #e6ecff 0%, #f6ecff 44%, #e6f8ff 100%);
+  background-size: auto, auto, auto, auto, 190px 190px, auto;
+}
+/* 白色渐隐遮罩：顶部亮（字看得清）、越往下图越透 —— 参考图里最抓眼的层次 */
+[data-theme="baka"] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background: linear-gradient(180deg,
+    rgba(255, 255, 255, 0.86) 0%,
+    rgba(255, 255, 255, 0.72) 24%,
+    rgba(255, 255, 255, 0.52) 52%,
+    rgba(255, 255, 255, 0.34) 100%);
+}
+
+/* v2.1.2.0：原来这里有个「品牌大标题」（只有 baka 主题显示）—— 与顶栏品牌名重复，又霸占
+   首屏最显眼的位置，已按使用逻辑撤掉；首屏改由状态面板的 .lead（当前状态 + 立即登录）承担。 */
+
 h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.02em; color: var(--text-strong); }
 a { color: var(--accent); text-decoration: none; }
 a:hover { color: var(--accent-hover); }
 .mono, code, pre, .log-box, .update-modal-log, .changelog-body {
-  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 .muted { color: var(--text-2); }
@@ -1656,6 +1913,7 @@ a:hover { color: var(--accent-hover); }
 .theme-icon { display: block; }
 [data-theme="dark"] .theme-icon-sun { display: none; }
 [data-theme="light"] .theme-icon-moon { display: none; }
+[data-theme="baka"] .theme-icon-moon { display: none; }
 
 .topbar-nav { max-width: 1080px; margin: 0 auto; padding: 0 24px 12px; overflow-x: auto; }
 .tablist {
@@ -1682,30 +1940,9 @@ a:hover { color: var(--accent-hover); }
 .tab:focus-visible, .icon-btn:focus-visible, .btn:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
 
 /* ============================================================
-   5. 顶部说明条（玻璃 notes bar）
+   5. （原「顶部说明条」已删：那是给开发者 / 维护者看的信息，不该占用户首屏一行 ——
+      其中的隐私事实仍写在 README 与「关于」页的「数据与文件位置」里）
    ============================================================ */
-.hint-strip {
-  display: flex; align-items: center; gap: 10px;
-  margin: 20px auto 18px; padding: 11px 16px; max-width: 1080px;
-  background: var(--material-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-md); color: var(--text-2);
-  font-size: 13px;
-  box-shadow: var(--highlight), var(--shadow-1);
-  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
-  position: relative; z-index: 1;
-  animation: riseIn 0.32s cubic-bezier(0.32, 0.72, 0, 1);
-}
-.hint-strip-icon { display: inline-flex; color: var(--text-3); flex: none; }
-.hint-strip-text { color: var(--text-2); flex: 1 1 auto; min-width: 0; }
-.hint-strip-link {
-  display: inline-flex; align-items: center; gap: 3px; flex: none;
-  color: var(--accent); font-weight: 500; white-space: nowrap;
-  padding: 4px 10px; border-radius: var(--r-pill);
-  background: var(--accent-softer);
-  transition: background-color 0.18s;
-}
-.hint-strip-link:hover { background: var(--accent-soft); }
-@keyframes riseIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
 
 /* ============================================================
    6. 面板 / 卡片 / KPI
@@ -1717,14 +1954,14 @@ a:hover { color: var(--accent-hover); }
 }
 @keyframes panelFadeIn { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
 
-.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); }
+.grid { display: grid; gap: var(--gap-card); grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); }
 .card {
   background: var(--material);
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-1), var(--highlight);
   backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
-  padding: 20px;
+  padding: var(--pad-card);
   transition: box-shadow 0.22s ease, transform 0.22s ease, border-color 0.22s ease;
 }
 .card:hover { box-shadow: var(--shadow-2), var(--highlight); transform: translateY(-1px); }
@@ -1741,24 +1978,108 @@ a:hover { color: var(--accent-hover); }
 .kpi-sub { font-size: 12.5px; color: var(--text-3); }
 .kpi-alert { border-color: rgba(255, 159, 10, 0.45); }
 .kpi-alert-err { border-color: rgba(255, 69, 58, 0.45); }
-/* v2.0.8.0：连接质量小柱图（纯 CSS，不引入图表库） */
-.qbars { display: flex; align-items: flex-end; gap: 10px; height: 68px; margin: 6px 0 4px; }
-.qbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 3px; min-width: 0; }
-.qbar-fill { border-radius: 4px 4px 2px 2px; min-height: 2px;
-  background: linear-gradient(180deg, rgba(10, 132, 255, 0.85), rgba(10, 132, 255, 0.40));
-  transition: height 0.32s cubic-bezier(0.32, 0.72, 0, 1); }
-.qbar-fill.qfail { background: linear-gradient(180deg, rgba(255, 159, 10, 0.9), rgba(255, 159, 10, 0.4)); }
-.qbar-day { font-size: 10.5px; color: var(--text-3); text-align: center; white-space: nowrap; }
+/* v2.1.2.0 三轮：连接质量柱图那套 CSS 已随板块删除（用户：「没啥用」），不留死代码 */
 .tone-ok { color: var(--ok); }
 .tone-err { color: var(--err); }
 .tone-warn { color: var(--warn); }
 .tone-muted { color: var(--text-3); }
-.action-card {
-  display: flex; flex-direction: column; align-items: center; gap: 12px;
-  text-align: center; padding: 36px 24px; margin-top: 14px;
-  background: var(--material-2);
+
+/* ============================================================
+   6.5 首屏「先办事」区 —— v2.1.2.0 按使用逻辑重排（第三轮再改）
+
+   以前：「立即登录」在页面最底部，要滚过 10 张 KPI（冷启动时 6 张是「未知 / -」）+ 一个
+   大空卡才按得到；首屏最显眼的位置却给了与顶栏重复的品牌大标题。
+   二轮：首屏左边「现在通不通」（大字 + 状态色），右边「立即登录」——但分两张卡，各自空一半。
+   三轮：状态与动作合成一张卡（.status-hero）；日常 5 项从卡墙改成一条统计条
+   （.stat-strip，格间一条竖线）；9 项诊断指标与连接质量仍收在「诊断详情」里。
+   ============================================================ */
+/* v2.1.2.0 二轮：状态 + 动作合并成一张卡（原来左边一张空卡、右边飘着一个巨大按钮） */
+.status-hero {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px 28px; flex-wrap: wrap;
+  padding: var(--pad-card); margin-top: var(--gap-card); box-shadow: var(--shadow-2), var(--highlight);
 }
-.action-card .muted { max-width: 46ch; }
+.status-hero-main { min-width: 0; }
+.status-kicker { font-size: 11.5px; font-weight: 600; letter-spacing: 0.07em; color: var(--text-3); }
+.status-word {
+  display: flex; align-items: center; gap: 11px; margin-top: 2px;
+  font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; color: var(--text-strong);
+}
+.status-word .dot { width: 12px; height: 12px; }
+.status-line { margin: 4px 0 0; font-size: 13px; color: var(--text-2); }
+.status-hero-act { display: flex; flex-direction: column; align-items: flex-end; gap: 9px; }
+.status-hero-act .hint { margin: 0; text-align: right; max-width: 34ch; }
+/* 主卡按状态上色（不支持 :has() 的浏览器只是少了这条色边，功能不受影响） */
+.status-hero:has(.dot-ok) { border-color: rgba(48, 209, 88, 0.40); }
+.status-hero:has(.dot-err) { border-color: rgba(255, 69, 58, 0.40); }
+
+/* 日常统计条：5 格挤在一张卡里，格间一条竖线（原来 5 张卡排成一面卡墙） */
+.stat-strip {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin-top: var(--gap-card); padding: 0; overflow: hidden;
+}
+/* 诊断指标条（三轮）：4 格 —— 诊断详情不折叠了，直接跟上面那条并排显示 */
+.stat-strip-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.stat-cell { padding: 15px var(--pad-card); border-left: 1px solid var(--hairline); min-width: 0; }
+.stat-cell:first-child { border-left: none; }
+.stat-label { font-size: 12px; color: var(--text-2); }
+.stat-value {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 5px;
+  font-size: 19px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-strong);
+  word-break: break-word;
+}
+.stat-value.mono { font-size: 14.5px; }
+/* 窄格里的日期不再折成三行（四轮）：ISO 串的 `-` 也是断行点，5 格统计条一格只有约 60px
+   内容宽，浏览器会把「2026-09-27 19:48:12」折成 2026- / 09-27 / 19:48:12。
+   值里的「日期」「时间」两段各自包成 .nb（nowrap），配合上面的 flex-wrap 最多折两行。 */
+.nb { white-space: nowrap; }
+.stat-sub { margin-top: 3px; font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
+/* 「上次错误」有值 → 整格浅橙底 + 左侧色条（原来靠一张卡变边框，现在卡没了） */
+.stat-cell.stat-alert { background: var(--warn-fill); box-shadow: inset 3px 0 0 var(--warn); }
+
+/* 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏 */
+.diag { margin-top: 14px; }
+.diag-summary {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 13px 20px; list-style: none; cursor: pointer;
+  background: var(--material-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-lg); box-shadow: var(--highlight);
+  font-size: 13.5px; font-weight: 500; color: var(--text);
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+.diag-summary::-webkit-details-marker { display: none; }
+.diag-summary:hover { background: var(--fill); border-color: var(--hairline-2); }
+.diag-hint { font-size: 12px; font-weight: 400; color: var(--text-3); }
+.diag-caret { margin-left: auto; display: inline-flex; color: var(--text-3); transition: transform 0.22s ease; }
+.diag[open] .diag-caret { transform: rotate(180deg); }
+/* v2.1.2.0 三轮：诊断指标不再折叠，原先那两条「诊断区网格」规则随之删除
+   （.diag / .diag-summary / .diag-caret / .fold-body 仍被配置页与关于页的折叠用着，保留） */
+
+/* --- v2.1.2.0：表单类折叠（配置页「新建 / 覆盖方案」等）与两列表单 --- */
+.fold-body { margin-top: 12px; }
+/* --- v2.1.2.0：横向表单行 —— 宽屏把若干字段排成一行，别再纵向堆成一条长表 ---
+   （三轮收敛：只剩一行三列 —— 配置页「网络与服务端口」、关于页「升级设置」。
+     账号密码那些字段在状态页右栏（约 430px 宽）里竖排，所以不需要四列版。）
+     为什么不用 auto-fit：它在宽屏会挤出第 5、6 条空轨，用显式列数 + 媒体查询递减更可控。 */
+.pw-row { display: grid; gap: 0 var(--gap-field); }
+.pw-row > .field { margin-bottom: var(--gap-field); min-width: 0; }
+.pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* 行内每格只有 200-350px，不再需要「输入框最长 560px」那条限宽 */
+.pw-row .field > input, .pw-row .field > select { max-width: none; }
+@media (max-width: 1000px) { .pw-row-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .pw-row-3 { grid-template-columns: minmax(0, 1fr); } }
+
+/* --- v2.1.2.0：关于页顶部（真正的「关于」：这是什么 + 哪个版本 + 怎么装的） --- */
+.about-hero { display: flex; gap: 16px; align-items: center; }
+.about-mark {
+  width: 48px; height: 48px; flex: none; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.about-name { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.about-ver { font-size: 13px; font-weight: 500; color: var(--text-2); }
+.about-tagline { margin: 6px 0 0; font-size: 13px; color: var(--text-2); }
+.about-meta { margin: 10px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-3); }
+.log-box.mini { height: auto; max-height: 220px; margin-top: 12px; font-size: 12px; }
 
 /* ============================================================
    7. 按钮 / 表单 / 开关 / 徽章
@@ -1783,6 +2104,9 @@ a:hover { color: var(--accent-hover); }
 .btn-danger { background: var(--fill); color: var(--err); border-color: var(--hairline); box-shadow: var(--highlight); }
 .btn-danger:hover:not(:disabled) { background: var(--err-fill); color: var(--err); border-color: rgba(255, 69, 58, 0.35); }
 .btn-lg { padding: 13px 32px; font-size: 15px; font-weight: 500; min-width: 190px; border-radius: var(--r-pill); }
+/* 小尺寸按钮（四轮加）：给「服务与维护」这种角落里的次要操作——窄栏里四个默认尺寸按钮
+   会占掉两行、看着比标题还重，缩一档就只占一行多，主次也更清楚 */
+.btn-sm { padding: 7px 14px; font-size: 13px; gap: 5px; }
 .btn-spinner {
   display: none; width: 14px; height: 14px; border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.45); border-top-color: #fff;
@@ -1791,11 +2115,11 @@ a:hover { color: var(--accent-hover); }
 .btn.loading .btn-spinner { display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.section { margin-bottom: 14px; }
-.section-head { margin-bottom: 16px; }
+.section { margin-bottom: var(--gap-card); }
+.section-head { margin-bottom: var(--gap-field); }
 .section-title { font-size: 17px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .section-desc { font-size: 13px; color: var(--text-2); margin-top: 5px; line-height: 1.5; }
-.field { position: relative; margin-bottom: 18px; }
+.field { position: relative; margin-bottom: var(--gap-field); }
 .field:last-child { margin-bottom: 0; }
 .field > label:not(.switch) { display: block; font-size: 13px; font-weight: 500; margin-bottom: 7px; color: var(--text-2); }
 .field input[type=text], .field input[type=number], .field input[type=password],
@@ -1876,11 +2200,11 @@ a:hover { color: var(--accent-hover); }
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
 }
 .log-box.is-empty { color: var(--terminal-dim); font-style: italic; }
+/* v2.1.2.0 二轮：这行状态挪到了终端窗口的顶栏里，所以不再是「一块底 + 内边距」，
+   而是一排靠右的等宽小字（数字对齐用 tabular-nums，跳动时不晃） */
 .log-meta {
-  display: flex; gap: 16px; flex-wrap: wrap;
-  font-size: 12.5px; color: var(--text-2); margin-top: 12px;
-  padding: 10px 14px; background: var(--fill); border-radius: var(--r-sm);
-  border: 1px solid var(--hairline);
+  display: flex; gap: 14px; flex-wrap: wrap; margin-left: auto;
+  font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums;
 }
 .log-level-filter { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .chip {
@@ -1903,13 +2227,24 @@ a:hover { color: var(--accent-hover); }
 /* ============================================================
    9. 关于面板
    ============================================================ */
-.info { display: grid; grid-template-columns: 132px 1fr; gap: 12px 20px; font-size: 14px; margin: 0; }
+.info { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px var(--gap-field); font-size: 14px; margin: 0; }
 .info dt { color: var(--text-2); }
 .info dd { margin: 0; word-break: break-all; color: var(--text); }
+/* 路径块（四轮修）：以前是 inline 的小药丸，长路径会在中间断成两截「半个圆角框」；
+   改成块级容器，长路径在同一个圆角块里换行。
+   换行点也只给在目录分隔符之后（见 code.path .seg）——不会再断出「config.js / on」
+   这种半截文件名。 */
 code.path {
+  display: block;
   background: var(--fill); border: 1px solid var(--hairline); border-radius: var(--r-xs);
-  padding: 3px 9px; font-size: 12.5px; color: var(--text-2);
+  padding: 5px 10px; font-size: 12.5px; color: var(--text-2);
+  line-height: 1.5;
 }
+/* 每一段（含末尾的 \ 或 /）是一个 inline-block：段内不折行，只允许在段边界换行；
+   万一某一段本身比容器还长，才退化成段内断字（不会溢出卡片）。
+   注意：这里不能用 overflow-wrap: anywhere / break-word 写在 code.path 上 ——
+   实测它会让浏览器抢在段边界之前把路径从中间劈开。 */
+code.path .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; vertical-align: top; }
 .link-row { display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* ============================================================
@@ -1994,13 +2329,136 @@ code.path {
 .update-banner-link { font-size: 13px; font-weight: 500; }
 
 /* ============================================================
+   13. 动效与细节（v2.1.2.0 重做）—— 统一节奏，不再到处各写各的
+   ============================================================ */
+:root {
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-1: 0.16s;   /* 悬停 / 按压 */
+  --dur-2: 0.28s;   /* 折叠 / 弹层 */
+  --dur-3: 0.42s;   /* 进场 */
+}
+
+/* —— 进场：切换标签页时，卡片依次浮起（错峰收得很紧，总时长 ≈0.35s，不拖沓） —— */
+@keyframes cardIn { from { opacity: 0; transform: translateY(12px) scale(0.996); } to { opacity: 1; transform: none; } }
+.panel.active .card { animation: cardIn var(--dur-2) var(--ease) backwards; }
+.panel.active .grid > .card:nth-child(1), .panel.active > .card:nth-child(1) { animation-delay: 0s; }
+.panel.active .grid > .card:nth-child(2), .panel.active > .card:nth-child(2) { animation-delay: 0.03s; }
+.panel.active .grid > .card:nth-child(3), .panel.active > .card:nth-child(3) { animation-delay: 0.06s; }
+.panel.active .grid > .card:nth-child(4), .panel.active > .card:nth-child(4) { animation-delay: 0.09s; }
+.panel.active .grid > .card:nth-child(5), .panel.active > .card:nth-child(5) { animation-delay: 0.12s; }
+.panel.active .grid > .card:nth-child(n+6) { animation-delay: 0.15s; }
+
+/* —— 状态变化：主状态卡脉冲一圈，让人看见「通了 / 断了」 —— */
+@keyframes statePulse {
+  0% { box-shadow: 0 0 0 0 rgba(107, 92, 255, 0.30), var(--shadow-2); }
+  70% { box-shadow: 0 0 0 16px rgba(107, 92, 255, 0), var(--shadow-2); }
+  100% { box-shadow: 0 0 0 0 rgba(107, 92, 255, 0), var(--shadow-2); }
+}
+/* 用 id 而不是纯类选择器：`.panel.active .card`（3 个类）会盖掉 `.lead-state.flash`，
+   那脉冲就永远播不出来（层叠优先级坑，实测过） */
+#card-online.flash, .lead-state.flash { animation: statePulse 0.95s var(--ease); }
+
+/* —— 数值变了就眨一下（不然盯着看不出它动过） —— */
+@keyframes valueFlash { 0% { color: var(--accent); transform: translateY(-1px); } 100% { color: inherit; transform: none; } }
+.kpi-value.flash { animation: valueFlash 0.7s ease; }
+
+/* —— 折叠：展开时内容淡入上浮（箭头旋转已有） —— */
+@keyframes foldIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+details[open] > .fold-body { animation: foldIn var(--dur-2) var(--ease); }
+details.diag > summary:active .diag-caret { transform: scale(0.9); }
+
+/* —— 按钮：悬停抬起 + 按下回弹 + 键盘焦点环 —— */
+.btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 20px -8px rgba(40, 40, 80, 0.45); }
+.btn:active:not(:disabled) { transform: translateY(0) scale(0.975); }
+.btn:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+.btn-lg { padding: 12px 26px; font-size: 15px; }
+
+/* —— 卡片：悬停抬高一档（分层更明确） —— */
+.card:hover { transform: translateY(-2px); }
+
+/* —— 标签页：底色平滑 + 选中的图标弹一下 —— */
+.tab { transition: background-color var(--dur-1) ease, color var(--dur-1) ease, box-shadow var(--dur-1) ease; }
+@keyframes tabPop { 0% { transform: scale(0.85); } 60% { transform: scale(1.08); } 100% { transform: none; } }
+.tab[aria-selected="true"] svg { animation: tabPop 0.34s var(--ease); }
+
+/* —— 表单：聚焦环随主题色；配置页不再把输入框拉成 1000px 长条 —— */
+.card.section .field > input:not([type="checkbox"]):not([type="file"]),
+.card.section .field > select { max-width: 560px; }
+.card.section .field > input[type="number"] { max-width: 200px; }
+/* 行内（.pw-row）与两列网格里的输入框不再限宽 —— 见前面的 .pw-row 规则 */
+.field input:focus-visible, .field select:focus-visible {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3.5px var(--accent-soft);
+}
+
+/* —— 表单尾部行：说明在左、按钮在右（不再是孤零零一个按钮） —— */
+.field-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.field-foot > .hint { margin: 0; }
+
+/* —— 关于页：真 Logo + 两栏 + 结论条 —— */
+.about-mark {
+  width: 64px; height: 64px; flex: none; border-radius: var(--r-lg);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #ffffff, #eef0ff);
+  border: 1px solid var(--hairline); box-shadow: var(--shadow-1), var(--highlight);
+  overflow: hidden;
+}
+.about-mark img { width: 40px; height: 40px; object-fit: contain; display: block; }
+.about-mark svg { color: var(--accent); }
+.about-hero { align-items: flex-start; }
+.about-cols { display: grid; gap: var(--gap-card); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
+.about-stats { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px; }
+.about-stat { padding: 12px 14px; border-radius: var(--r-md); background: var(--fill); border: 1px solid var(--hairline); }
+.about-stat-label { font-size: 12px; color: var(--text-2); }
+.about-stat-value { margin-top: 4px; font-size: 15px; font-weight: 600; color: var(--text-strong); word-break: break-word; }
+.about-callout {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 12px 14px; border-radius: var(--r-md);
+  background: var(--accent-softer); border: 1px solid var(--accent-soft);
+  font-size: 13.5px; color: var(--text);
+}
+.about-callout.is-ok { background: var(--ok-fill); border-color: rgba(48, 209, 88, 0.35); }
+.about-callout.is-warn { background: var(--warn-fill); border-color: rgba(255, 159, 10, 0.40); }
+.about-callout.is-err { background: var(--err-fill); border-color: rgba(255, 69, 58, 0.40); }
+.about-callout svg { flex: none; margin-top: 1px; }
+.about-log-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.about-log-head .diag-hint { margin-left: auto; }
+
+/* 终端小窗：像个真终端 */
+.log-box.mini { height: auto; max-height: 260px; margin-top: 10px; font-size: 12px; position: relative; }
+
+/* 关于页头部：Logo | 名称 + 一句话 | 两张小牌（启动 / 运行时长），窄屏自动折行 */
+.about-hero { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 18px; align-items: center; }
+.about-hero-main { min-width: 0; }
+.about-hero-side { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(112px, auto)); }
+
+/* —— 页面两栏布局（配置页与状态页共用）：左主右辅，窄屏塌成一栏 ——
+   用户要的「左右放」= 像配置页那样把**卡片**分两栏，而不是把表单字段排成一行。 */
+.page-cols { display: grid; gap: var(--gap-card); grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: start; }
+.page-col { display: grid; gap: var(--gap-card); align-content: start; min-width: 0; }
+/* 列内用 gap 排版，卡片自己的 margin-bottom / margin-top 会变成双倍间距 */
+.page-col > .card.section, .page-col > details, .page-col > .card { margin-bottom: 0; }
+.page-col > .status-hero, .page-col > .stat-strip { margin-top: 0; }
+@media (max-width: 980px) { .page-cols { grid-template-columns: minmax(0, 1fr); } }
+
+/* —— 日志页：终端窗口（顶栏一行放标题与实时状态） —— */
+.log-window { padding: var(--pad-card); }
+.log-window-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.log-dots { display: inline-flex; gap: 5px; flex: none; }
+.log-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--track); }
+.log-dots i:nth-child(1) { background: #ff5f57; }
+.log-dots i:nth-child(2) { background: #febc2e; }
+.log-dots i:nth-child(3) { background: #28c840; }
+.log-window-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.log-diag-cols { display: grid; gap: var(--gap-card); grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+/* ============================================================
    12. 响应式（≤720px 平板；≤480px 手机）
    ============================================================ */
 @media (max-width: 720px) {
   .wrap { padding: 16px 18px 56px; }
   .topbar-inner { padding: 12px 18px 8px; }
   .topbar-nav { padding: 0 18px 10px; }
-  .hint-strip { margin: 16px 18px 14px; padding: 10px 14px; font-size: 12.5px; flex-wrap: wrap; }
   .grid { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; }
   .brand-name { font-size: 15px; }
   .kpi { min-height: 104px; }
@@ -2011,6 +2469,17 @@ code.path {
   .btn-lg { width: 100%; }
   .save-bar { justify-content: stretch; bottom: 12px; }
   .save-bar .btn { flex: 1 1 auto; }
+  /* v2.1.2.0：窄屏把「状态 + 登录」竖起来，按钮仍留在第一屏 */
+  .status-hero { padding: 18px; gap: 14px; }
+  .status-word { font-size: 27px; }
+  .status-hero-act { align-items: stretch; width: 100%; }
+  .status-hero-act .hint { text-align: left; max-width: none; }
+  /* 统计条：两列 + 每格上边线（第 1 行不加），别把 5 格挤成一条看不清 */
+  .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-cell { padding: 13px 14px; border-top: 1px solid var(--hairline); }
+  .stat-cell:nth-child(-n+2) { border-top: none; }
+  .stat-cell:nth-child(odd) { border-left: none; }
+  .page-cols { grid-template-columns: minmax(0, 1fr); }
   .card { padding: 18px; }
 }
 @media (max-width: 480px) {
@@ -2018,36 +2487,34 @@ code.path {
   .wrap { padding: 14px 14px 48px; }
   .topbar-inner { padding: 10px 14px 8px; }
   .topbar-nav { padding: 0 14px 10px; }
-  .hint-strip { margin: 14px 14px 12px; font-size: 12px; padding: 9px 12px; }
   .grid { grid-template-columns: 1fr; gap: 12px; }
   .kpi { min-height: 92px; padding: 16px; }
   .kpi-value { font-size: 21px; }
   .kpi-value.small { font-size: 14.5px; }
   .card { padding: 16px; border-radius: var(--r-md); }
-  .action-card { padding: 24px 16px; }
+  .stat-strip { grid-template-columns: 1fr; padding: 0; }
+  .stat-cell { border-left: none; }
+  .stat-cell:not(:first-child) { border-top: 1px solid var(--hairline); }
+  .log-meta { gap: 10px; font-size: 11.5px; }
   .tab { padding: 7px 13px; font-size: 13px; }
   .liveness { padding: 5px 11px; font-size: 12.5px; }
   .save-bar { padding: 12px; flex-direction: column; align-items: stretch; }
   .save-bar .muted { margin-right: 0; margin-bottom: 4px; text-align: center; }
   .save-bar .btn { width: 100%; }
-  .log-meta { font-size: 12px; padding: 8px 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
 }
 </style>
 <script>
-/* 首屏主题：localStorage 优先，否则跟随系统 prefers-color-scheme（在 <style> 之后、body 之前执行，避免闪烁） */
+/* 首屏主题：默认 BakaXL 风（baka）；用户手动选过就以用户为准
+   （在 <style> 之后、body 之前执行，避免闪烁） */
 (function () {
-  var theme = 'light';
+  var theme = 'baka';
   try {
     var saved = localStorage.getItem('drcom-theme');
-    if (saved === 'dark' || saved === 'light') {
-      theme = saved;
-    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      theme = 'dark';
-    }
-  } catch (e) { /* 隐私模式下 localStorage 不可用，回落亮色 */ }
+    if (saved === 'baka' || saved === 'dark' || saved === 'light') theme = saved;
+  } catch (e) { /* 隐私模式下 localStorage 不可用，用默认主题 */ }
   document.documentElement.setAttribute('data-theme', theme);
 })();
 </script>
@@ -2070,7 +2537,7 @@ code.path {
         <span class="dot dot-unknown dot-pulse" id="liveness-dot" aria-hidden="true"></span>
         <span id="liveness-text">连接中…</span>
       </span>
-      <button class="icon-btn" id="btn-theme" type="button" aria-label="切换亮色 / 暗色主题" title="切换主题">
+      <button class="icon-btn" id="btn-theme" type="button" aria-label="切换主题" title="切换主题">
         <svg class="theme-icon theme-icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
           <circle cx="12" cy="12" r="4"></circle>
           <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"></path>
@@ -2091,13 +2558,11 @@ code.path {
   </div>
 </header>
 
-<div class="hint-strip" role="note">
-  <span class="hint-strip-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.6" y="10.2" width="14.8" height="10.2" rx="3.2"/><path d="M8.6 10.2V7.9a3.4 3.4 0 0 1 6.8 0v2.3"/></svg></span>
-  <span class="hint-strip-text">本服务仅监听 127.0.0.1，所有数据保存在本机；密码仅保存到 password.txt。</span>
-  <a class="hint-strip-link" href="https://github.com/TSS-Small-sunshine/StardustFlashLink" target="_blank" rel="noopener noreferrer">查看源码 →</a>
-</div>
-
+<!-- v2.1.2.0 四轮：顶部那条说明条已删（那是给开发者 / 维护者看的，不该占用户首屏一行） -->
 <main class="wrap" id="main">
+
+  <!-- v2.1.2.0：首屏不再放「品牌大标题」（与顶栏重复、白占位置），
+       第一眼就是「现在通不通」+「立即登录」—— 见下面的 .lead。 -->
 
   <!-- ============ 状态 ============ -->
   <section class="panel active" id="panel-status" role="tabpanel" aria-labelledby="tab-status" tabindex="-1">
@@ -2115,97 +2580,149 @@ code.path {
       <button class="update-banner-dismiss" id="update-banner-dismiss" type="button" aria-label="关闭横幅"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.4 17.6 17.6M17.6 6.4 6.4 17.6"/></svg></button>
     </div>
 
-    <div class="grid">
-      <article class="card kpi" id="card-net">
-        <div class="kpi-label">网络可达性</div>
-        <div class="kpi-value" id="kpi-net">
-          <span class="dot dot-unknown" id="kpi-net-dot" aria-hidden="true"></span>
-          <span id="kpi-net-text">未知</span>
-        </div>
-        <div class="kpi-sub" id="kpi-net-sub">等待首次检查</div>
-      </article>
+    <!-- v2.1.2.0 三轮：状态页改用与配置页同一套两栏布局（用户：「像配置的那么放」）——
+         左栏「现在通不通（大字状态）+ 日常统计 + 诊断详情」，右栏「账户与登录密码」。
+         以前三块竖着堆成一列，大屏上白掉半屏宽。 -->
+    <div class="page-cols">
+    <div class="page-col">
 
-      <article class="card kpi" id="card-online">
-        <div class="kpi-label">在线状态</div>
-        <div class="kpi-value" id="kpi-online">
+    <!-- v2.1.2.0 二轮：状态与动作挤进同一张卡 —— 原来左边一张空卡、右边一张卡里飘着一个
+         巨大按钮，两处都空得慌；现在一左一右，中间没有浪费的空间。 -->
+    <article class="card status-hero" id="card-online">
+      <div class="status-hero-main">
+        <div class="status-kicker">当前状态</div>
+        <div class="status-word" id="kpi-online">
           <span class="dot dot-unknown" id="kpi-online-dot" aria-hidden="true"></span>
           <span id="kpi-online-text">未知</span>
         </div>
-        <div class="kpi-sub" id="kpi-online-sub">登录结果：-</div>
-      </article>
-
-      <article class="card kpi">
-        <div class="kpi-label">当前账号</div>
-        <div class="kpi-value small mono" id="kpi-account">-</div>
-        <div class="kpi-sub" id="kpi-account-sub">来自配置文件</div>
-      </article>
-
-      <article class="card kpi">
-        <div class="kpi-label">上次登录时间</div>
-        <div class="kpi-value small" id="kpi-lastlogin">从未</div>
-        <div class="kpi-sub" id="kpi-lastlogin-sub">尚无登录记录</div>
-      </article>
-
-      <article class="card kpi" id="card-error">
-        <div class="kpi-label">上次错误</div>
-        <div class="kpi-value small" id="kpi-error">无</div>
-        <div class="kpi-sub" id="kpi-error-sub">最近一次检查未报错</div>
-      </article>
-
-      <article class="card kpi">
-        <div class="kpi-label">下次检查</div>
-        <div class="kpi-value mono" id="kpi-next">未计划</div>
-        <div class="kpi-sub" id="kpi-next-sub">-</div>
-      </article>
-
-      <!-- v2.0.8.0 / B4：连接质量（近 7 天，从日志现算） -->
-      <article class="card kpi" id="card-uptime">
-        <div class="kpi-label">在线率（近 7 天）</div>
-        <div class="kpi-value" id="kpi-uptime">-</div>
-        <div class="kpi-sub" id="kpi-uptime-sub">等待统计</div>
-      </article>
-
-      <article class="card kpi" id="card-relogin">
-        <div class="kpi-label">掉线重登</div>
-        <div class="kpi-value" id="kpi-relogin">-</div>
-        <div class="kpi-sub" id="kpi-relogin-sub">近 7 天</div>
-      </article>
-
-      <article class="card kpi" id="card-recover">
-        <div class="kpi-label">平均恢复耗时</div>
-        <div class="kpi-value small" id="kpi-recover">-</div>
-        <div class="kpi-sub" id="kpi-recover-sub">从开始检查到登录成功</div>
-      </article>
-
-      <article class="card kpi" id="card-latency">
-        <div class="kpi-label">当前延迟</div>
-        <div class="kpi-value" id="kpi-latency">-</div>
-        <div class="kpi-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
-      </article>
-    </div>
-
-    <!-- v2.0.8.0 / B4：近 7 天柱状图（纯 CSS，无图表库） -->
-    <div class="card" id="card-quality">
-      <div class="section-head">
-        <h2 class="section-title">连接质量（近 7 天）</h2>
-        <p class="section-desc" style="margin:0;">数字取自 <span class="mono">logs/campus_login.log</span>：每个检查周期都留下了走向，不再另外存状态文件（重启不清零、升级不丢）。</p>
-        <button class="btn" id="btn-metrics-refresh" type="button">刷新</button>
+        <p class="status-line" id="kpi-online-sub">登录结果：-</p>
       </div>
-      <div class="qbars" id="qbars" aria-label="近 7 天掉线与失败次数柱状图"></div>
-      <div class="kpi-sub" id="quality-note">加载中…</div>
+      <div class="status-hero-act">
+        <button class="btn btn-lg" id="btn-login" type="button">
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span id="btn-login-label">立即登录</span>
+        </button>
+        <p class="hint" id="login-hint">点一下立即触发完整的检查与登录</p>
+      </div>
+    </article>
+
+    <!-- 日常关心的几项：v2.1.2.0 二轮把它们从「5 张卡排成卡墙」改成一条统计条
+         （每格一条竖分隔线），同样的信息量，视觉噪音少一半、还能一眼扫完。 -->
+    <div class="card stat-strip">
+      <div class="stat-cell" id="card-net">
+        <div class="stat-label">网络可达性</div>
+        <div class="stat-value" id="kpi-net"><span class="dot dot-unknown" id="kpi-net-dot" aria-hidden="true"></span><span id="kpi-net-text">未知</span></div>
+        <div class="stat-sub" id="kpi-net-sub">等待首次检查</div>
+      </div>
+
+      <div class="stat-cell" id="card-account">
+        <div class="stat-label">当前账号</div>
+        <div class="stat-value mono" id="kpi-account">-</div>
+        <div class="stat-sub" id="kpi-account-sub">来自配置文件</div>
+      </div>
+
+      <div class="stat-cell" id="card-lastlogin">
+        <div class="stat-label">上次登录</div>
+        <div class="stat-value" id="kpi-lastlogin">从未</div>
+        <div class="stat-sub" id="kpi-lastlogin-sub">尚无登录记录</div>
+      </div>
+
+      <div class="stat-cell" id="card-error">
+        <div class="stat-label">上次错误</div>
+        <div class="stat-value" id="kpi-error">无</div>
+        <div class="stat-sub" id="kpi-error-sub">最近一次检查未报错</div>
+      </div>
+
+      <div class="stat-cell" id="card-next">
+        <div class="stat-label">下次检查</div>
+        <div class="stat-value mono" id="kpi-next">未计划</div>
+        <div class="stat-sub" id="kpi-next-sub">-</div>
+      </div>
     </div>
 
-    <div class="card action-card">
-      <button class="btn btn-lg" id="btn-login" type="button">
-        <span class="btn-spinner" aria-hidden="true"></span>
-        <span id="btn-login-label">立即登录</span>
-      </button>
-      <p class="muted" id="login-hint" style="margin:0;font-size:12.5px;">点击按钮立即触发一次完整的网络检查与登录流程。</p>
+    <!-- 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏；
+         原生 details，零 JS，没有 JS 也能展开。 -->
+    <!-- v2.1.2.0 三轮：诊断指标不再折叠（用户：「直接显示出来」）；
+         同时删掉「连接质量」柱图板块（用户：「没啥用」）——4 项指标改成与「日常」同款统计条，
+         数据来源用一行脚注交代，不再为它单占一张大卡。 -->
+    <div class="card stat-strip stat-strip-4">
+      <div class="stat-cell" id="card-uptime">
+        <div class="stat-label">在线率（近 7 天）</div>
+        <div class="stat-value" id="kpi-uptime">-</div>
+        <div class="stat-sub" id="kpi-uptime-sub">等待统计</div>
+      </div>
+
+      <div class="stat-cell" id="card-relogin">
+        <div class="stat-label">掉线重登</div>
+        <div class="stat-value" id="kpi-relogin">-</div>
+        <div class="stat-sub" id="kpi-relogin-sub">近 7 天</div>
+      </div>
+
+      <div class="stat-cell" id="card-recover">
+        <div class="stat-label">平均恢复耗时</div>
+        <div class="stat-value" id="kpi-recover">-</div>
+        <div class="stat-sub" id="kpi-recover-sub">从开始检查到登录成功</div>
+      </div>
+
+      <div class="stat-cell" id="card-latency">
+        <div class="stat-label">当前延迟</div>
+        <div class="stat-value" id="kpi-latency">-</div>
+        <div class="stat-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
+      </div>
     </div>
+    </div><!-- /page-col -->
+
+    <!-- 右栏：账户与登录密码。三轮从「立即登录」下面挪进右栏（字段竖排 —— 这里约 430px 宽，
+         排成一行四列会变成窄条）。 -->
+    <div class="page-col">
+      <div class="card section" id="card-password">
+        <div class="section-head">
+          <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
+        </div>
+        <div class="field">
+          <label for="cfg-account">账号</label>
+          <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
+          <div class="hint">仅数字（学号 / 工号），不含运营商后缀</div>
+          <div class="err" id="err-account" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-suffix">运营商</label>
+          <select id="cfg-suffix">
+            <option value="">校园用户（无后缀）</option>
+            <option value="@yd">中国移动 @yd</option>
+            <option value="@dx">中国电信 @dx</option>
+            <option value="@lt">中国联通 @lt</option>
+          </select>
+          <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
+        </div>
+        <div class="field">
+          <label for="pwd-new">账户登录密码</label>
+          <input type="password" id="pwd-new" autocomplete="new-password">
+          <div class="hint">至少 1 个字符</div>
+        </div>
+        <div class="field">
+          <label for="pwd-confirm">再次输入密码</label>
+          <input type="password" id="pwd-confirm" autocomplete="new-password">
+          <div class="hint">两次需一致才保存</div>
+          <div class="err" id="err-pwd" role="alert"></div>
+        </div>
+        <div class="field-foot">
+          <span class="hint">保存后立即生效，无需重启服务。</span>
+          <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
+        </div>
+      </div>
+    </div><!-- /page-col -->
+    </div><!-- /page-cols -->
   </section>
 
   <!-- ============ 配置 ============ -->
   <section class="panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config" tabindex="-1">
+    <!-- v2.1.2.0 二/三轮：配置页两栏（左：方案 + 网络端口；右：自动化 + 守卫），
+         纵向长度砍掉近一半，不用再「一路滚到底」。布局类 .page-cols / .page-col
+         与状态页共用（同一套左右分栏，两个页面观感一致）。 -->
+    <div class="page-cols">
+    <div class="page-col">
+
     <!-- v2.0.9.0 / B5：配置方案（教室 / 宿舍 / 家里） -->
     <div class="card section" id="card-profiles">
       <div class="section-head">
@@ -2217,8 +2734,16 @@ code.path {
         <select id="profile-select" class="cfg-lg"></select>
         <div class="hint" id="profile-hint">还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。</div>
       </div>
-      <div class="field">
-        <label for="profile-new-name">新建 / 覆盖方案</label>
+      <!-- v2.1.2.0：主流程是「选方案 → 应用 / 删除」，新建表单不该夹在中间；
+           折起来默认收起，要用再展开（跟外观无关，纯属别把主流程切碎）。 -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>新建 / 覆盖方案</span>
+          <span class="diag-hint">方案名 + 自动匹配的 Wi-Fi 名</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body field">
+          <label for="profile-new-name">新建 / 覆盖方案</label>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <input type="text" id="profile-new-name" class="cfg-lg" style="flex:1 1 150px;" placeholder="方案名（例如 家里）" autocomplete="off" spellcheck="false" maxlength="24">
           <input type="text" id="profile-match-ssids" class="cfg-lg" style="flex:2 1 220px;" placeholder="自动匹配的 Wi-Fi 名（可选，逗号分隔）" autocomplete="off" spellcheck="false">
@@ -2229,7 +2754,8 @@ code.path {
           <button class="btn" id="btn-profile-save" type="button">用当前配置保存</button>
         </div>
         <div class="hint">填了「自动匹配的 Wi-Fi 名」= <b>自动方案</b>：打开下面的自动切换后，一连上这个 Wi-Fi 就自动切过去。</div>
-      </div>
+        </div>
+      </details>
       <div class="field">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <button class="btn" id="btn-profile-apply" type="button">应用选中方案</button>
@@ -2242,58 +2768,38 @@ code.path {
       </div>
     </div>
 
-    <div class="card section" id="card-password">
+    <!-- v2.1.2.0：「账户与登录密码」已搬到「状态」页（主页）—— 日常改得最多的东西
+         不该排在配置页第二块、还要先滚过「配置方案」。 -->
+
+    <div class="card section">      
       <div class="section-head">
-        <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
-        <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
+        <h2 class="section-title">网络与服务端口</h2>
+        <p class="section-desc" style="margin:0;">校园网认证网关，以及本管理页面监听的端口（改端口后需重启服务生效）。</p>
       </div>
-      <div class="field">
-        <label for="cfg-account">账号</label>
-        <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
-        <div class="hint">仅支持数字（学号 / 工号），不含运营商后缀</div>
-        <div class="err" id="err-account" role="alert"></div>
+      <div class="pw-row pw-row-3">
+        <div class="field">
+          <label for="cfg-host">认证服务器地址</label>
+          <input type="text" id="cfg-host" class="cfg-lg" placeholder="例如 172.16.80.3" autocomplete="off" spellcheck="false">
+          <div class="hint">认证网关的 IP 或域名</div>
+          <div class="err" id="err-host" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-port">认证端口</label>
+          <input type="number" id="cfg-port" class="cfg-lg" min="1" max="65535" step="1" inputmode="numeric">
+          <div class="hint">取值 1-65535，通常为 80</div>
+          <div class="err" id="err-port" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-ui-port">管理页面监听端口</label>
+          <input type="number" id="cfg-ui-port" class="cfg-lg" min="1024" max="65535" step="1" inputmode="numeric">
+          <div class="hint">1024-65535，仅监听 127.0.0.1，默认 8848</div>
+          <div class="err" id="err-ui-port" role="alert"></div>
+        </div>
       </div>
-      <div class="field">
-        <label for="cfg-suffix">运营商</label>
-        <select id="cfg-suffix">
-          <option value="">校园用户（无后缀）</option>
-          <option value="@yd">中国移动 @yd</option>
-          <option value="@dx">中国电信 @dx</option>
-          <option value="@lt">中国联通 @lt</option>
-        </select>
-        <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
-      </div>
-      <div class="field">
-        <label for="pwd-new">账户登录密码</label>
-        <input type="password" id="pwd-new" autocomplete="new-password">
-        <div class="hint">至少 1 个字符</div>
-      </div>
-      <div class="field">
-        <label for="pwd-confirm">再次输入账户登录密码</label>
-        <input type="password" id="pwd-confirm" autocomplete="new-password">
-        <div class="err" id="err-pwd" role="alert"></div>
-      </div>
-      <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
     </div>
 
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">认证服务器</h2>
-        <p class="section-desc" style="margin:0;">校园网认证网关地址与端口。</p>
-      </div>
-      <div class="field">
-        <label for="cfg-host">认证服务器地址</label>
-        <input type="text" id="cfg-host" class="cfg-lg" placeholder="例如 172.16.80.3" autocomplete="off" spellcheck="false">
-        <div class="hint">认证网关的 IP 或域名</div>
-        <div class="err" id="err-host" role="alert"></div>
-      </div>
-      <div class="field">
-        <label for="cfg-port">认证端口</label>
-        <input type="number" id="cfg-port" class="cfg-lg" min="1" max="65535" step="1" inputmode="numeric">
-        <div class="hint">取值 1-65535，通常为 80</div>
-        <div class="err" id="err-port" role="alert"></div>
-      </div>
-    </div>
+    </div><!-- /page-col -->
+    <div class="page-col">
 
     <div class="card section">
       <div class="section-head">
@@ -2325,7 +2831,14 @@ code.path {
         <div class="hint">每次检查等待校园网可达的最长时间，10-300 秒</div>
         <div class="err" id="err-timeout" role="alert"></div>
       </div>
-      <!-- v2.0.5.0 新增：网络位置守卫 -->
+      <!-- v2.0.5.0：网络位置守卫（v2.1.2.0 起折起来：它是进阶设置，展开会顶掉半屏） -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>网络位置守卫（进阶）</span>
+          <span class="diag-hint" id="guard-summary-hint">只在校园网内登录 · Wi-Fi 名 / 网段白名单</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body">
       <div class="field">
         <label class="switch" for="cfg-guard-enabled">
           <input type="checkbox" id="cfg-guard-enabled">
@@ -2351,62 +2864,21 @@ code.path {
         <div class="hint">逗号分隔；宿舍有线也适用。留空 = 不按网段判断</div>
         <div class="err" id="err-guard" role="alert"></div>
       </div>
-      <!-- v1.3 新增：自动升级字段 -->
-      <div class="field">
-        <label class="switch" for="cfg-auto-update-enabled">
-          <input type="checkbox" id="cfg-auto-update-enabled">
-          <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">启用自动升级（GitHub 检测）</span>
-        </label>
-        <div class="hint">关闭后仅在启动时与手动点击时检查 GitHub 新版</div>
-      </div>
-      <div class="field">
-        <label for="cfg-update-interval">自动升级检查间隔</label>
-        <select id="cfg-update-interval">
-          <option value="6">6 小时</option>
-          <option value="12">12 小时</option>
-          <option value="24">24 小时</option>
-        </select>
-        <div class="hint">服务会定期访问 GitHub API 检查新版（未认证 60 req/h）</div>
-      </div>
-      <div class="field">
-        <label for="cfg-update-disk">下载前最小剩余磁盘（MB）</label>
-        <input type="number" id="cfg-update-disk" class="cfg-lg" min="50" max="10240" step="1" inputmode="numeric">
-        <div class="hint">下载安装包前要求磁盘剩余 ≥ 此值（50-10240 MB，默认 200）</div>
-      </div>
-      <div class="field">
-        <div class="hint" style="margin-bottom:8px;">手动触发</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="btn btn-secondary" id="btn-update-check-now" type="button">立即检查更新</button>
-          <button class="btn btn-secondary" id="btn-update-install-now" type="button">立即升级</button>
         </div>
-        <div class="hint" style="margin-top:6px;">点「立即检查更新」拉 GitHub；发现新版再点「立即升级」（升级前自动停服务，约 30-60 秒）</div>
-      </div>
+      </details>
 
-      <div class="field">
-        <div class="hint" style="margin-bottom:8px;">版本回滚（升级把服务弄挂时的退路）</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-          <select id="rollback-version" style="min-width:210px;"></select>
-          <button class="btn btn-secondary" id="btn-rollback-now" type="button">回滚到该版本</button>
-          <button class="btn btn-secondary" id="btn-rollback-refresh" type="button">刷新列表</button>
-        </div>
-        <div class="hint" id="rollback-hint" style="margin-top:6px;">正在读取备份列表...</div>
-      </div>
+      <!-- v2.1.2.0 三轮：升级相关设置（自动升级 / 检查间隔 / 磁盘余量 / 手动触发 / 版本回滚）
+           全部搬到「关于 → 更新」——「我点了检查更新，结果呢」和「什么时候自动检查」本来就
+           是一件事，拆在配置页里等于让用户跨页找。配置页这里只留周期自检与网络位置守卫。 -->
     </div>
 
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">Web UI</h2>
-        <p class="section-desc" style="margin:0;">管理页面本身的服务端口，修改后需重启服务生效。</p>
-      </div>
-      <div class="field">
-        <label for="cfg-ui-port">监听端口</label>
-        <input type="number" id="cfg-ui-port" class="cfg-lg" min="1024" max="65535" step="1" inputmode="numeric">
-        <div class="hint">取值 1024-65535，仅监听 127.0.0.1，默认 8848</div>
-        <div class="err" id="err-ui-port" role="alert"></div>
-      </div>
-    </div>
+    <!-- v2.1.2.0：「Web UI 监听端口」并进了上面的「网络与服务端口」——
+         为一个字段占一整张卡，是配置页变长的最大原因之一。 -->
 
+    </div><!-- /page-col -->
+    </div><!-- /page-cols -->
+
+    <!-- 导出 / 导入与保存条放在两栏之外，横跨整宽 -->
     <div class="config-io-row">
       <button class="btn btn-secondary" id="btn-config-export" type="button">导出配置</button>
       <button class="btn btn-secondary" id="btn-config-import" type="button">导入配置</button>
@@ -2421,7 +2893,20 @@ code.path {
 
   <!-- ============ 日志 ============ -->
   <section class="panel" id="panel-log" role="tabpanel" aria-labelledby="tab-log" tabindex="-1">
-    <div class="card">
+    <!-- v2.1.2.0 二轮：日志区改成「一个终端窗口」——
+         顶栏放窗口标题与「行数 / 偏移 / 大小 / 更新时间」的实时状态（原来这行状态压在
+         终端下面，等于把窗口的标题栏装到了脚上），中间是过滤与等级，下面是终端本体。 -->
+    <div class="card log-window">
+      <div class="log-window-bar">
+        <span class="log-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="log-window-title">drcom.log</span>
+        <span class="log-meta">
+          <span id="log-count">0 行</span>
+          <span id="log-offset">offset 0</span>
+          <span id="log-size">0 字节</span>
+          <span id="log-updated">未更新</span>
+        </span>
+      </div>
       <div class="log-toolbar">
         <input type="text" class="grow" id="log-filter" placeholder="过滤关键字（留空显示全部）" aria-label="日志关键字过滤" autocomplete="off" spellcheck="false">
         <div class="log-level-filter" id="log-level-filter" role="group" aria-label="日志等级筛选">
@@ -2439,82 +2924,161 @@ code.path {
         </label>
       </div>
       <div class="log-box is-empty" id="log-box" role="log" aria-live="off" tabindex="0">暂无日志</div>
-      <div class="log-meta">
-        <span id="log-count">0 行</span>
-        <span id="log-offset">offset 0</span>
-        <span id="log-size">0 字节</span>
-        <span id="log-updated">未更新</span>
+    </div>
+
+    <!-- v2.1.2.0：从「关于」页搬来 —— 日志占用与诊断包本来就是日志 / 排障的事，
+         挤在「关于」里既臃肿又难找。二轮把它改成两栏（原来一长段说明把整行撑满）。 -->
+    <div class="card section">
+      <div class="section-head">
+        <h2 class="section-title">日志占用与诊断包</h2>
+        <p class="section-desc" style="margin:0;">业务日志超过 5 MB、升级日志超过 2 MB 会自动轮转（各留几份），不必手动清理。</p>
+      </div>
+      <div class="log-diag-cols">
+        <div>
+          <div class="stat-label">当前日志文件</div>
+          <div id="log-list" class="hint" style="margin:6px 0 0;">正在读取日志占用...</div>
+          <div class="btn-row" style="margin-top:12px;">
+            <button class="btn btn-secondary" id="btn-logs-refresh" type="button">刷新占用</button>
+          </div>
+        </div>
+        <div>
+          <div class="stat-label">诊断包（反馈问题时发这个）</div>
+          <p class="hint" style="margin:6px 0 0;">
+            版本 / 运行环境 / 服务状态 + 脱敏配置 + 各日志尾部（每个 ≤ 512 KB）。
+            账号与 MAC 已打码、<strong>不含密码</strong>；校园网内网 IP 与 Wi-Fi 名保留（排障需要）。
+          </p>
+          <div class="btn-row" style="margin-top:12px;">
+            <a class="btn btn-secondary" href="/api/diagnostics">下载诊断包（已脱敏）</a>
+          </div>
+        </div>
       </div>
     </div>
   </section>
 
   <!-- ============ 关于 ============ -->
   <section class="panel" id="panel-about" role="tabpanel" aria-labelledby="tab-about" tabindex="-1">
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">版本信息</h2>
+    <!-- v2.1.2.0：真正的「关于」—— 这是什么 / 哪个版本 / 怎么装的（安装方式后端自动识别） -->
+    <div class="card section about-hero">
+      <span class="about-mark" aria-hidden="true"><img id="about-logo" src="/branding/web-logo-64.png" alt=""></span>
+      <div class="about-hero-main">
+        <div class="about-name">星尘闪连 <span class="about-ver" id="about-version">-</span></div>
+        <p class="about-tagline">Dr.COM 校园网自动登录 · 全程本机运行，密码不出这台电脑</p>
+        <p class="about-meta">
+          <span class="badge badge-muted" id="about-mode-badge" title="">识别安装方式…</span>
+        </p>
       </div>
-      <dl class="info">
-        <dt>版本号</dt><dd id="about-version">-</dd>
-        <dt>服务启动时间</dt><dd id="about-started">-</dd>
-        <dt>已运行时长</dt><dd id="about-uptime" class="mono">-</dd>
-      </dl>
+      <div class="about-hero-side">
+        <div class="about-stat"><div class="about-stat-label">启动于</div><div class="about-stat-value" id="about-started">-</div></div>
+        <div class="about-stat"><div class="about-stat-label">已运行</div><div class="about-stat-value mono" id="about-uptime">-</div></div>
+      </div>
     </div>
 
+    <!-- v2.1.2.0：更新 —— 「我点了检查更新，结果呢？」的答案就放这儿，
+         不用再去日志里翻（以前每个用户都得自己触发一次、再去翻 upgrade.log）。 -->
     <div class="card section">
       <div class="section-head">
-        <h2 class="section-title">文件位置</h2>
+        <h2 class="section-title">更新</h2>
+        <p class="section-desc" style="margin:0;">「我点了检查更新，结果呢？」—— 结论、触发按钮、升级流水与升级设置都在这儿；配置页只留「周期自检」和「网络位置守卫」。</p>
       </div>
-      <dl class="info">
-        <dt>配置文件</dt><dd id="about-config"><code class="path">-</code></dd>
-        <dt>日志文件</dt><dd id="about-log"><code class="path">-</code></dd>
-        <dt>数据目录</dt><dd id="about-data"><code class="path">-</code></dd>
-      </dl>
+      <div class="about-stats">
+        <div class="about-stat"><div class="about-stat-label">当前版本</div><div class="about-stat-value mono" id="about-upd-local">-</div></div>
+        <div class="about-stat"><div class="about-stat-label">最近一次检查</div><div class="about-stat-value" id="about-upd-checked">尚未检查</div></div>
+        <div class="about-stat"><div class="about-stat-label">远端最新</div><div class="about-stat-value mono" id="about-upd-latest">-</div></div>
+      </div>
+      <div class="about-callout" id="about-upd-callout">
+        <span id="about-upd-icon" aria-hidden="true"></span>
+        <span id="about-upd-result">还没检查过 —— 点下面的「立即检查更新」。</span>
+      </div>
+      <div class="btn-row" style="margin-top:14px;">
+        <button class="btn btn-secondary" id="btn-update-check-now" type="button">立即检查更新</button>
+        <button class="btn btn-secondary" id="btn-update-install-now" type="button">立即升级</button>
+        <button class="btn btn-secondary" id="btn-about-history" type="button">查看升级历史</button>
+      </div>
+      <p class="hint" style="margin-top:10px;">「立即检查更新」拉 GitHub 最新版；发现新版再点「立即升级」（升级前自动停服务，约 30-60 秒后页面自动刷新）。</p>
+
+      <!-- v2.1.2.0 三轮：升级设置从「配置 → 自动化」搬来 —— 结论、按钮、流水、设置本来就该
+           在一块；「什么时候自动检查」「磁盘留多少」跟「刚才检查成没成」是同一个话题。
+           配置页只留「周期自检」与「网络位置守卫」。 -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>升级设置（进阶）</span>
+          <span class="diag-hint">自动检查新版 · 检查间隔 · 磁盘余量 · 版本回滚</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body">
+          <div class="field">
+            <label class="switch" for="cfg-auto-update-enabled">
+              <input type="checkbox" id="cfg-auto-update-enabled">
+              <span class="track" aria-hidden="true"></span>
+              <span class="switch-label">启用自动升级（GitHub 检测）</span>
+            </label>
+            <div class="hint">关闭后仅在启动时与手动点击时检查 GitHub 新版</div>
+          </div>
+          <div class="pw-row pw-row-3">
+            <div class="field">
+              <label for="cfg-update-interval">自动检查间隔</label>
+              <select id="cfg-update-interval">
+                <option value="6">6 小时</option>
+                <option value="12">12 小时</option>
+                <option value="24">24 小时</option>
+              </select>
+              <div class="hint">未认证的 GitHub API 限 60 次/小时</div>
+            </div>
+            <div class="field">
+              <label for="cfg-update-disk">下载前最小剩余磁盘（MB）</label>
+              <input type="number" id="cfg-update-disk" class="cfg-lg" min="50" max="10240" step="1" inputmode="numeric">
+              <div class="hint">50-10240 MB，默认 200</div>
+            </div>
+            <div class="field">
+              <label for="rollback-version">版本回滚</label>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <select id="rollback-version" style="flex:1 1 140px; min-width:0;"></select>
+                <button class="btn btn-secondary" id="btn-rollback-now" type="button">回滚</button>
+                <button class="btn btn-secondary" id="btn-rollback-refresh" type="button">刷新</button>
+              </div>
+              <div class="hint" id="rollback-hint">正在读取备份列表...</div>
+            </div>
+          </div>
+          <div class="field-foot" style="margin-top:4px;">
+            <span class="hint">升级把服务弄挂时的退路：回滚只还原代码文件，配置与密码一律不动。</span>
+            <button class="btn btn-secondary" id="btn-save-update-settings" type="button">保存升级设置</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="about-log-head">
+        <span class="diag-hint" style="margin-left:0;">升级流水 · logs/upgrade.log 尾部</span>
+        <button class="btn btn-secondary" id="btn-about-log-refresh" type="button">刷新</button>
+      </div>
+      <pre class="log-box mini" id="about-update-log">正在读取…</pre>
     </div>
 
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">访问入口</h2>
+    <div class="about-cols">
+      <div class="card section">
+        <div class="section-head">
+          <h2 class="section-title">数据与文件位置</h2>
+        </div>
+        <dl class="info">
+          <dt>配置文件</dt><dd id="about-config"><code class="path">-</code></dd>
+          <dt>日志文件</dt><dd id="about-log"><code class="path">-</code></dd>
+          <dt>数据目录</dt><dd id="about-data"><code class="path">-</code></dd>
+        </dl>
       </div>
-      <div class="link-row">
-        <a class="btn btn-secondary" id="about-local" href="http://127.0.0.1:8848" target="_blank" rel="noopener">本机管理页面</a>
-        <a class="btn" href="https://github.com/TSS-Small-sunshine/StardustFlashLink" target="_blank" rel="noopener noreferrer">在 GitHub 上查看</a>
-      </div>
-      <p class="hint" style="margin-top:14px;">
-        本页面仅监听本机回环地址（127.0.0.1），局域网内其他设备无法访问；所有配置、密码与日志文件都保存在程序所在的数据目录中，删除目录即彻底清除。
-      </p>
-    </div>
 
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">管理操作</h2>
+      <!-- v2.1.2.0：管理操作不再是「一进来四个按钮」；卸载的说辞按识别出的安装方式给 -->
+      <div class="card section">
+        <div class="section-head">
+          <h2 class="section-title">服务与维护</h2>
+          <p class="section-desc" style="margin:0;">卸载的说法按上面识别出的安装方式给（安装包装的没有 uninstall.bat，源码部署的没有卸载器）。</p>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-secondary" id="btn-restart" type="button">重启服务</button>
+          <button class="btn btn-sm btn-danger" id="btn-uninstall" type="button">卸载服务</button>
+          <button class="btn btn-sm btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
+          <button class="btn btn-sm btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
+        </div>
+        <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
       </div>
-      <div class="btn-row">
-        <button class="btn btn-secondary" id="btn-restart" type="button">重启服务</button>
-        <button class="btn btn-danger" id="btn-uninstall" type="button">卸载服务</button>
-        <!-- v1.3 新增：升级历史按钮 -->
-        <button class="btn btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
-        <!-- v2.0.0 新增：查看更新日志按钮 -->
-        <button class="btn btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
-      </div>
-      <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
-    </div>
-
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">日志与诊断</h2>
-        <p class="section-desc" style="margin:0;">业务日志超过 5 MB、升级日志超过 2 MB 会自动轮转（各留几份），不必再手动清理。</p>
-      </div>
-      <div id="log-list" class="hint" style="margin:0 0 12px 0;">正在读取日志占用...</div>
-      <div class="btn-row">
-        <button class="btn btn-secondary" id="btn-logs-refresh" type="button">刷新占用</button>
-        <a class="btn btn-secondary" href="/api/diagnostics">下载诊断包（已脱敏）</a>
-      </div>
-      <p class="hint" style="margin-top:10px;">
-        诊断包 = 版本 / 运行环境 / 服务状态 + 脱敏后的配置 + 各日志尾部（每个 ≤ 512 KB）。
-        账号已打码、MAC 已打码、<strong>不含密码</strong>；校园网内网 IP 与 Wi-Fi 名会保留（排障需要）。
-        反馈问题时把它发给维护者即可。
-      </p>
     </div>
   </section>
 </main>
@@ -2664,6 +3228,29 @@ code.path {
 
   function text(el, v) { if (el) el.textContent = v; }
 
+  /* 路径渲染（四轮修）：长路径以前在窄卡片里会被硬断出「…\config.js / on」这种
+     半截文件名。现在把每一段（含末尾分隔符）包成 inline-block、只在分隔符之后换行；
+     段本身超长时才退化成段内断字。这些都是元素，复制出来的仍是干净的整条路径。 */
+  function pathHtml(p) {
+    var parts = esc(p).split(/([\\/])/);
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+      html += '<span class="seg">' + parts[i] + '</span>' + (i % 2 ? '<wbr>' : '');
+    }
+    return '<code class="path">' + html + '</code>';
+  }
+
+  /* 窄格子里的日期值：把「日期」「时间」两段各自包成 .nb（nowrap，见 CSS），
+     要折就折成两行，不再从 `-` 中间断开成三行。 */
+  function isoValueHtml(iso) {
+    var parts = fmtIso(iso).split(' ');
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+      html += (i ? ' ' : '') + '<span class="nb">' + esc(parts[i]) + '</span>';
+    }
+    return html;
+  }
+
   function fmtIso(iso) {
     if (!iso) return '-';
     return String(iso).replace('T', ' ');
@@ -2765,41 +3352,39 @@ code.path {
   /* ============================================================
      分区 3/6 · 主题
      ============================================================ */
-  function systemTheme() {
-    return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
-  }
+  /* 三种主题循环：BakaXL 风 → 亮色 → 暗色（不再跟随系统：默认就是 baka，跟随会把默认盖掉） */
+  var THEMES = ['baka', 'light', 'dark'];
+  var THEME_LABEL = { baka: '星尘主题', light: '亮色主题', dark: '暗色主题' };
 
   function applyTheme(theme, persist) {
     document.documentElement.setAttribute('data-theme', theme);
     var btn = $('btn-theme');
-    if (btn) btn.setAttribute('aria-label', theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题');
+    if (btn) {
+      var next = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+      btn.setAttribute('aria-label', '切换到' + THEME_LABEL[next]);
+      btn.setAttribute('title', '当前：' + THEME_LABEL[theme] + '（点击切换）');
+    }
     if (persist) {
       try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* 忽略隐私模式限制 */ }
     }
   }
 
   function currentTheme() {
-    return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+    var t = document.documentElement.getAttribute('data-theme');
+    return THEMES.indexOf(t) >= 0 ? t : 'baka';
   }
 
   function bindTheme() {
+    /* 首屏先同步一次：按钮的 aria-label / title 要跟「当前真实主题」一致
+       （三态之后光靠点击才更新会滞后一屏，读屏会念错） */
+    applyTheme(currentTheme(), false);
     var btn = $('btn-theme');
     if (btn) {
       btn.addEventListener('click', function () {
-        var next = currentTheme() === 'dark' ? 'light' : 'dark';
+        var next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
         applyTheme(next, true);
-        toast(next === 'dark' ? '已切换到暗色主题' : '已切换到亮色主题', 'info', 2000);
+        toast('已切换到' + THEME_LABEL[next], 'info', 2000);
       });
-    }
-    if (window.matchMedia) {
-      var mq = window.matchMedia('(prefers-color-scheme: dark)');
-      var onChange = function () {
-        var saved = null;
-        try { saved = localStorage.getItem(THEME_KEY); } catch (e) { saved = null; }
-        if (saved !== 'dark' && saved !== 'light') applyTheme(systemTheme(), false);
-      };
-      if (mq.addEventListener) mq.addEventListener('change', onChange);
-      else if (mq.addListener) mq.addListener(onChange);
     }
   }
 
@@ -2836,15 +3421,15 @@ code.path {
     if (s.network_reachable === true) {
       setDot('kpi-net-dot', 'ok', false);
       text($('kpi-net-text'), '可达');
-      $('kpi-net').className = 'kpi-value tone-ok';
+      $('kpi-net').className = 'stat-value tone-ok';
     } else if (s.network_reachable === false) {
       setDot('kpi-net-dot', 'err', false);
       text($('kpi-net-text'), '不可达');
-      $('kpi-net').className = 'kpi-value tone-err';
+      $('kpi-net').className = 'stat-value tone-err';
     } else {
       setDot('kpi-net-dot', 'unknown', true);
       text($('kpi-net-text'), '未知');
-      $('kpi-net').className = 'kpi-value tone-muted';
+      $('kpi-net').className = 'stat-value tone-muted';
     }
     var _netSub = '上次检查 ' + fmtTimeOnly(s.last_check_at);
     if (s.current_ssid) _netSub += ' · Wi-Fi: ' + s.current_ssid;
@@ -2855,39 +3440,39 @@ code.path {
     if (s.online === true) {
       setDot('kpi-online-dot', 'ok', false);
       text($('kpi-online-text'), '已登录');
-      $('kpi-online').className = 'kpi-value tone-ok';
+      $('kpi-online').className = 'status-word tone-ok';
     } else if (s.online === false) {
       setDot('kpi-online-dot', 'err', false);
       text($('kpi-online-text'), '未登录');
-      $('kpi-online').className = 'kpi-value tone-err';
+      $('kpi-online').className = 'status-word tone-err';
     } else {
       setDot('kpi-online-dot', 'unknown', true);
       text($('kpi-online-text'), '未知');
-      $('kpi-online').className = 'kpi-value tone-muted';
+      $('kpi-online').className = 'status-word tone-muted';
     }
     text($('kpi-online-sub'), '登录结果：' + (s.last_login_success === true ? '成功' : (s.last_login_success === false ? '失败' : '-')));
 
     /* —— 当前账号 —— */
     text($('kpi-account'), s.current_account ? s.current_account : '未配置');
-    $('kpi-account').className = 'kpi-value small mono' + (s.current_account ? '' : ' tone-muted');
+    $('kpi-account').className = 'stat-value mono' + (s.current_account ? '' : ' tone-muted');
     text($('kpi-account-sub'), s.current_account ? '账号 + 运营商后缀' : '请到「配置」页填写账号');
 
     /* —— 上次登录时间 —— */
-    text($('kpi-lastlogin'), s.last_login_at ? fmtIso(s.last_login_at) : '从未');
-    $('kpi-lastlogin').className = 'kpi-value small' + (s.last_login_at ? '' : ' tone-muted');
+    $('kpi-lastlogin').innerHTML = s.last_login_at ? isoValueHtml(s.last_login_at) : '从未';
+    $('kpi-lastlogin').className = 'stat-value' + (s.last_login_at ? '' : ' tone-muted');
     text($('kpi-lastlogin-sub'), s.last_login_at ? '最近一次登录尝试' : '尚无登录记录');
 
     /* —— 上次错误（有值 → 警示色边框） —— */
     var cardErr = $('card-error');
     if (s.last_error) {
       text($('kpi-error'), s.last_error);
-      $('kpi-error').className = 'kpi-value small tone-warn';
-      cardErr.className = 'card kpi kpi-alert';
+      $('kpi-error').className = 'stat-value tone-warn';
+      cardErr.className = 'stat-cell stat-alert';
       text($('kpi-error-sub'), '发生于 ' + fmtTimeOnly(s.last_check_at));
     } else {
       text($('kpi-error'), '无');
-      $('kpi-error').className = 'kpi-value small tone-muted';
-      cardErr.className = 'card kpi';
+      $('kpi-error').className = 'stat-value tone-muted';
+      cardErr.className = 'stat-cell';
       text($('kpi-error-sub'), '最近一次检查未报错');
     }
 
@@ -2919,19 +3504,44 @@ code.path {
     if (!el) return;
     if (countdownDeadline === null) {
       el.textContent = '未计划';
-      el.className = 'kpi-value mono tone-muted';
+      el.className = 'stat-value mono tone-muted';
       text($('kpi-next-sub'), '周期自检未启用或尚未排期');
       return;
     }
     var left = Math.max(0, Math.round((countdownDeadline - Date.now()) / 1000));
     el.textContent = fmtCountdown(left);
-    el.className = 'kpi-value mono' + (left <= 10 ? ' tone-warn' : '');
+    el.className = 'stat-value mono' + (left <= 10 ? ' tone-warn' : '');
     text($('kpi-next-sub'), '剩余 ' + left + ' 秒 · 预计 ' + fmtTimeOnly(countdownAt) + ' 执行');
+  }
+
+  /* v2.1.2.0 动效：数值/状态变了就眨一下 —— 每 3 秒轮询一次，光盯着数字很难发现变化。
+     只在「文本真的变了」时触发；倒计时（kpi-next）刻意排除，否则每秒都在闪。 */
+  var _lastSeen = {};
+  var _FLASH_IDS = ['kpi-online-text', 'kpi-net-text', 'kpi-latency', 'kpi-account', 'kpi-uptime', 'kpi-error'];
+
+  function markValues() {
+    _FLASH_IDS.forEach(function (id) {
+      var el = $(id);
+      if (!el) return;
+      var v = el.textContent;
+      if (_lastSeen[id] !== undefined && _lastSeen[id] !== v) {
+        var box = el.closest ? (el.closest('.kpi-value, .status-word, .stat-value') || el) : el;
+        box.classList.remove('flash');
+        void box.offsetWidth;            /* 强制重排，动画才能重播 */
+        box.classList.add('flash');
+        if (id === 'kpi-online-text') {
+          /* 登录状态变了：让首屏那张主卡也脉冲一圈（「通了 / 断了」要有存在感） */
+          var card = $('card-online');
+          if (card) { card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash'); }
+        }
+      }
+      _lastSeen[id] = v;
+    });
   }
 
   function pollStatus() {
     if (document.hidden) return;
-    API.status().then(renderStatus).catch(function () {
+    API.status().then(function (s) { renderStatus(s); markValues(); }).catch(function () {
       setLiveness('unknown', '服务无响应', true);
     });
   }
@@ -2941,7 +3551,7 @@ code.path {
     var btn = $('btn-login');
     if (btn) { btn.classList.remove('loading'); btn.disabled = false; }
     text($('btn-login-label'), '立即登录');
-    text($('login-hint'), msg || '点击按钮立即触发一次完整的网络检查与登录流程。');
+    text($('login-hint'), msg || '点一下立即触发完整的检查与登录');
     if (type) toast(msg, type);
   }
 
@@ -3138,27 +3748,32 @@ code.path {
     return ok;
   }
 
+  /* 保存配置：配置页吸底条与「关于 → 更新 → 升级设置」共用同一份实现。
+     为什么带 skipValidate：从「关于」保存升级设置时，认证服务器 / 账号可能还没填
+     （新装用户先来这里开自动升级是常见路径），不该被「账号不能为空」拦住。 */
+  function saveConfigFrom(btn, skipValidate) {
+    if (!skipValidate && !validateConfig()) {
+      toast('表单校验未通过，请修正标红字段', 'warn');
+      return;
+    }
+    if (btn) btn.disabled = true;
+    API.saveConfig(collectConfig()).then(function (r) {
+      if (r && r.ok) {
+        toast('配置已保存', 'success');
+        text($('config-state'), '已保存 · ' + nowClock());
+      } else {
+        toast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
+      }
+    }).catch(function () {
+      toast('保存请求失败，请检查服务状态', 'error');
+    }).then(function () { if (btn) btn.disabled = false; });
+  }
+
   function bindConfig() {
     var saveBtn = $('btn-save-config');
-    if (saveBtn) {
-      saveBtn.addEventListener('click', function () {
-        if (!validateConfig()) {
-          toast('表单校验未通过，请修正标红字段', 'warn');
-          return;
-        }
-        saveBtn.disabled = true;
-        API.saveConfig(collectConfig()).then(function (r) {
-          if (r && r.ok) {
-            toast('配置已保存', 'success');
-            text($('config-state'), '已保存 · ' + nowClock());
-          } else {
-            toast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
-          }
-        }).catch(function () {
-          toast('保存请求失败，请检查服务状态', 'error');
-        }).then(function () { saveBtn.disabled = false; });
-      });
-    }
+    if (saveBtn) saveBtn.addEventListener('click', function () { saveConfigFrom(saveBtn, false); });
+    var saveUpd = $('btn-save-update-settings');
+    if (saveUpd) saveUpd.addEventListener('click', function () { saveConfigFrom(saveUpd, true); });
 
     var pwdBtn = $('btn-save-pwd');
     if (pwdBtn) {
@@ -3291,25 +3906,112 @@ code.path {
       text($('about-started'), fmtIso(r.service_started_at));
       uptimeBase = { sec: Number(r.service_uptime_sec) || 0, at: Date.now() };
       text($('about-uptime'), fmtDuration(uptimeBase.sec));
-      if (r.config_file) $('about-config').innerHTML = '<code class="path">' + esc(r.config_file) + '</code>';
-      if (r.data_dir) $('about-data').innerHTML = '<code class="path">' + esc(r.data_dir) + '</code>';
-      if (r.log_file) $('about-log').innerHTML = '<code class="path">' + esc(r.log_file) + '</code>';
+      if (r.install && r.install.mode) renderInstallMode(r.install);
+      if (r.config_file) $('about-config').innerHTML = pathHtml(r.config_file);
+      if (r.data_dir) $('about-data').innerHTML = pathHtml(r.data_dir);
+      if (r.log_file) $('about-log').innerHTML = pathHtml(r.log_file);
     }).catch(function () {
       text($('about-version'), '读取失败');
     }).then(function () {
       /* /api/log_file_path 提供日志文件的绝对路径，作为权威来源优先展示 */
       return API.logPath().then(function (p) {
-        if (p && p.path) $('about-log').innerHTML = '<code class="path">' + esc(p.path) + '</code>';
+        if (p && p.path) $('about-log').innerHTML = pathHtml(p.path);
       }).catch(function () { /* 关于信息已由 /api/about 兜底 */ });
     });
   }
 
-  function bindAbout() {
-    var local = $('about-local');
-    if (local && window.location && window.location.origin && window.location.origin.indexOf('http') === 0) {
-      local.href = window.location.origin;
-      local.textContent = '本机管理页面（' + window.location.origin + '）';
+  /* —— v2.1.2.0：这份程序是怎么装的（安装包 / 源码）+ 更新结果与升流 —— */
+
+  var installInfo = null;
+  var INSTALL_MODE_TEXT = { installer: '安装包安装', source: '源码 / 绿色部署', unknown: '安装方式未识别' };
+
+  /* 安装方式由后端按证据判定（程序目录里的 unins*.exe / 注册表卸载项 / .git …），
+     前端只负责显示 —— 这样「卸载服务」才能按情形说对话，而不是永远一句写死的
+     「运行 uninstall.bat」（安装包装的用户根本找不到那个文件）。 */
+  function renderInstallMode(info) {
+    installInfo = info;
+    var badge = $('about-mode-badge');
+    if (badge) text(badge, INSTALL_MODE_TEXT[info.mode] || INSTALL_MODE_TEXT.unknown);
+    /* v2.1.2.0 四轮：判据不上屏（用户：这类说明是给我看的，不该出现在界面）——
+       改成徽标的悬停提示，鼠标停上去仍能核对；判据本身照旧由 _detect_install_mode()
+       返回、由断言盯着，功能一点没少。 */
+    if (badge && info.evidence && info.evidence.length) {
+      badge.setAttribute('title', '判据：' + info.evidence.join('；'));
     }
+  }
+
+  /* 「我点了检查更新，结果呢？」—— 结论用一条带色的结论条表示：
+     进行中复用状态横幅那套文案（单一来源），空闲时按 last_check_at / latest_version /
+     last_error 直接给结论；三种色调分别对应「好 / 谨慎 / 出错」。 */
+  function renderAboutUpdate() {
+    var localEl = $('about-upd-local');
+    var atEl = $('about-upd-checked');
+    var latestEl = $('about-upd-latest');
+    var resEl = $('about-upd-result');
+    var callout = $('about-upd-callout');
+    var icon = $('about-upd-icon');
+    if (!localEl || !resEl) return;
+
+    function show(kind, svg, msg) {
+      if (callout) callout.className = 'about-callout' + (kind ? ' is-' + kind : '');
+      if (icon) icon.innerHTML = svg || '';
+      text(resEl, msg);
+    }
+
+    return getUpdateJson('/api/update/status').then(function (r) {
+      if (!r || typeof r !== 'object') { show('err', _ICO.cross, '读取失败（服务没响应？）'); return; }
+      updateStateCache = r;
+      text(localEl, 'v' + (r.local_version || '-'));
+      text(latestEl, r.latest_version ? 'v' + r.latest_version : '未知');
+      text(atEl, r.last_check_at ? fmtIso(r.last_check_at) : '尚未检查');
+      if (r.state) {
+        renderUpdateBanner(r);
+        var t = $('update-banner-title');
+        var d = $('update-banner-desc');
+        var kind = r.state === 'downloading' ? 'warn'
+          : (r.state === 'upgrading' || r.state === 'error') ? 'err'
+            : r.state === 'success' ? 'ok' : '';
+        show(kind, r.state === 'success' ? _ICO.check : _ICO.gear,
+             (t ? t.textContent : '') + (d && d.textContent ? '：' + d.textContent : ''));
+      } else if (r.last_error) {
+        show('err', _ICO.warn, '上次检查失败：' + r.last_error);
+      } else if (r.update_available) {
+        show('warn', _ICO.down, '发现新版本 v' + (r.latest_version || '?') + '（当前 v' +
+             (r.local_version || '?') + '）—— 到「配置 → 自动化」点「立即升级」');
+      } else if (r.last_check_at) {
+        show('ok', _ICO.check, '已是最新' + (r.latest_version ? '（远端 v' + r.latest_version + '）' : ''));
+      } else {
+        show('', _ICO.search, '还没检查过 —— 点下面的「立即检查更新」。');
+      }
+    }).catch(function () { show('err', _ICO.cross, '读取失败（服务没响应？）'); });
+  }
+
+  /* 升流小窗：upgrade.log 尾部若干行，省得用户自己去翻文件 */
+  function loadAboutLog() {
+    var box = $('about-update-log');
+    if (!box) return;
+    box.textContent = '读取中…';
+    getUpdateJson('/api/update/history').then(function (r) {
+      var lines = (r && r.lines) || [];
+      box.textContent = lines.length
+        ? lines.slice(-14).join('\n')
+        : '暂无升级流水（第一次自动升级成功后才会有）';
+    }).catch(function () { box.textContent = '读取失败'; });
+  }
+
+  function bindAboutUpdate() {
+    /* 「立即检查更新 / 立即升级」现在是关于页自己的按钮（#btn-update-check-now /
+       #btn-update-install-now，从配置页整块搬过来的），绑定在 update 那一段里，
+       这里不再需要「代理点击配置页按钮」的绕路写法。 */
+    var btnHistory = $('btn-about-history');
+    if (btnHistory) btnHistory.addEventListener('click', openUpdateHistoryModal);
+    var btnLog = $('btn-about-log-refresh');
+    if (btnLog) btnLog.addEventListener('click', loadAboutLog);
+  }
+
+  function bindAbout() {
+    /* v2.1.2.0：原来这里会把「本机管理页面」链接改成本页地址 —— 「访问入口」整块已删
+       （用户原话：「关于的访问入口有存在的必要吗」），本页地址栏里就有。 */
     var btnRestart = $('btn-restart');
     if (btnRestart) btnRestart.addEventListener('click', function () {
       if (!window.confirm('确认重启服务？NSSM 将自动重新拉起进程。')) return;
@@ -3319,7 +4021,13 @@ code.path {
     });
     var btnUninstall = $('btn-uninstall');
     if (btnUninstall) btnUninstall.addEventListener('click', function () {
-      text($('admin-hint'), '请以管理员身份运行程序目录下的 uninstall.bat 完成卸载。');
+      /* v2.1.2.0：按安装方式说对话（以前永远一句「运行 uninstall.bat」，
+         安装包装的用户根本没有那个文件）。判据也一并给出来，方便用户核对。 */
+      var hint = (installInfo && installInfo.uninstall_hint)
+        || '请以管理员身份运行程序目录下的 uninstall.bat 完成卸载。';
+      var ev = installInfo && installInfo.evidence && installInfo.evidence.length
+        ? '（判据：' + installInfo.evidence.join('；') + '）' : '';
+      text($('admin-hint'), hint + ev);
     });
   }
 
@@ -3337,7 +4045,7 @@ code.path {
       if (p) p.classList.toggle('active', n === name);
     });
     if (name === 'config') loadConfig();
-    else if (name === 'about') { loadAbout(); }
+    else if (name === 'about') { loadAbout(); renderAboutUpdate(); }
     else if (name === 'log') reloadLog();
   }
 
@@ -3358,17 +4066,26 @@ code.path {
     });
   }
 
-  /* 品牌 logo 兜底：/branding/* 取不到（手工拷贝文件等）时改用内联星芒标记，避免顶栏破图 */
-  function bindBrand() {
-    var img = $('brand-logo');
+  var _LOGO_STAR = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
+    + '<path d="M12 2.2l1.9 6.1a2 2 0 0 0 1.3 1.3l6.1 1.9-6.1 1.9a2 2 0 0 0-1.3 1.3L12 20.8l-1.9-6.1a2 2 0 0 0-1.3-1.3L2.7 11.5l6.1-1.9a2 2 0 0 0 1.3-1.3L12 2.2z"/></svg>';
+
+  /* 品牌图兜底：/branding/* 取不到（手工拷贝文件等）时改用内联星芒标记，避免破图。
+     顶栏与「关于」页共用（关于页的图更大，按尺寸换一份 SVG）。 */
+  function bindLogoFallback(img, size) {
     if (!img || !img.addEventListener) return;
     img.addEventListener('error', function () {
       var mark = img.parentNode;
       if (!mark) return;
       mark.style.color = 'var(--accent)';
-      mark.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
-        + '<path d="M12 2.2l1.9 6.1a2 2 0 0 0 1.3 1.3l6.1 1.9-6.1 1.9a2 2 0 0 0-1.3 1.3L12 20.8l-1.9-6.1a2 2 0 0 0-1.3-1.3L2.7 11.5l6.1-1.9a2 2 0 0 0 1.3-1.3L12 2.2z"/></svg>';
+      mark.innerHTML = size >= 32
+        ? _LOGO_STAR.replace('width="20" height="20"', 'width="30" height="30"')
+        : _LOGO_STAR;
     }, { once: true });
+  }
+
+  function bindBrand() {
+    bindLogoFallback($('brand-logo'), 20);
+    bindLogoFallback($('about-logo'), 40);
   }
 
   function boot() {
@@ -3379,12 +4096,20 @@ code.path {
     bindConfig();
     bindLog();
     bindAbout();
+    bindAboutUpdate();
     bindUpdate();
 
     startStatusPolling();
     startLogPolling();
     startUpdatePolling();
     loadAbout();
+    renderAboutUpdate();   /* 启动就把「更新」块的结论填上，切到「关于」不该先看到一排「-」 */
+    loadAboutLog();        /* 升流小窗也一起读，省得用户点一下才看见内容 */
+    /* v2.1.2.0：密码徽标现在挂在主页那张「账户与登录密码」卡上，
+       不能等用户点开「配置」页才更新（以前只在 loadConfig 里刷）。 */
+    API.config().then(function (c) {
+      if (c && c.password_status) setPwdBadge(c.password_status);
+    }).catch(function () { /* 读不到就保持「状态未知」 */ });
 
     setInterval(tickCountdown, 1000);
     setInterval(function () {
@@ -3934,13 +4659,13 @@ code.path {
     var d = (m && m.ok) ? m : null;
     var upt = d && isNum(d.uptime_pct) ? d.uptime_pct : null;
     text($('kpi-uptime'), upt === null ? '-' : upt + '%');
-    $('kpi-uptime').className = 'kpi-value' + (upt === null ? ' tone-muted'
+    $('kpi-uptime').className = 'stat-value' + (upt === null ? ' tone-muted'
       : (upt >= 99 ? ' tone-ok' : (upt >= 95 ? ' tone-warn' : ' tone-err')));
     text($('kpi-uptime-sub'), d ? ('有效周期 ' + d.effective_checks + ' / 共 ' + d.checks
       + (d.skip > 0 ? '（跳过 ' + d.skip + '）' : '')) : '等待统计');
 
     text($('kpi-relogin'), d ? String(d.relogin) : '-');
-    $('kpi-relogin').className = 'kpi-value' + (d && d.relogin > 0 ? '' : ' tone-muted');
+    $('kpi-relogin').className = 'stat-value' + (d && d.relogin > 0 ? '' : ' tone-muted');
     text($('kpi-relogin-sub'), d ? ('登录失败 ' + d.fail + ' · 网关不可达 ' + d.unreachable
       + (d.last_relogin_at ? ' · 最近 ' + fmtTimeOnly(d.last_relogin_at) : '')) : '近 7 天');
 
@@ -3951,35 +4676,12 @@ code.path {
       : '从开始检查到登录成功');
 
     text($('kpi-latency'), d && isNum(d.latency_ms) ? (d.latency_ms + ' ms') : '不可达');
-    $('kpi-latency').className = 'kpi-value' + (!d || !isNum(d.latency_ms) ? ' tone-err'
+    $('kpi-latency').className = 'stat-value' + (!d || !isNum(d.latency_ms) ? ' tone-err'
       : (d.latency_ms < 120 ? ' tone-ok' : (d.latency_ms < 400 ? ' tone-warn' : ' tone-err')));
     text($('kpi-latency-sub'), d && d.last_unreachable_at
       ? ('最近一次不可达 ' + fmtTimeOnly(d.last_unreachable_at)) : '到校园网关的 TCP 握手');
-
-    var bars = $('qbars');
-    if (bars) {
-      bars.innerHTML = '';
-      var series = (d && d.series) ? d.series : [];
-      var max = 1;
-      series.forEach(function (s) { max = Math.max(max, (s.relogin || 0) + (s.fail || 0)); });
-      series.forEach(function (s) {
-        var n = (s.relogin || 0) + (s.fail || 0);
-        var col = document.createElement('div'); col.className = 'qbar';
-        var fill = document.createElement('div');
-        fill.className = 'qbar-fill' + ((s.fail || 0) > 0 ? ' qfail' : '');
-        fill.style.height = Math.round(n / max * 100) + '%';
-        fill.title = s.date + '：掉线重登 ' + (s.relogin || 0) + ' · 失败 ' + (s.fail || 0)
-          + ' · 检查 ' + (s.checks || 0) + ' 次';
-        var lab = document.createElement('div'); lab.className = 'qbar-day';
-        lab.textContent = String(s.date || '').slice(5);
-        col.appendChild(fill); col.appendChild(lab);
-        bars.appendChild(col);
-      });
-      text($('quality-note'), d
-        ? ('检查 ' + d.checks + ' 次 · 统计于 ' + (d.generated_at || '-')
-           + (d.avg_reach_ms ? '' : ' · 可达耗时从本版起记录'))
-        : ('暂无数据' + (m && m.error ? '（' + m.error + '）' : '（日志为空）')));
-    }
+    /* v2.1.2.0 三轮：原来这里还要画「连接质量」的 7 天柱图，板块已按用户意见删掉，
+       只保留上面 4 项指标的填充（它们现在直接显示在状态页上，不再藏在折叠里）。 */
   }
 
   function loadMetrics() {
@@ -3987,8 +4689,8 @@ code.path {
   }
 
   (function () {
-    var btn = $('btn-metrics-refresh');
-    if (btn) btn.addEventListener('click', loadMetrics);
+    /* 三轮：连接质量板块没了，「刷新」按钮也一并没有；4 项诊断指标仍靠这次拉取填充，
+       所以启动即拉一次（指标本来就是低频变化的东西，不需要定时轮询）。 */
     loadMetrics();
   })();
 

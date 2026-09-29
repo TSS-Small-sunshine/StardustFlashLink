@@ -361,12 +361,16 @@ check("v2.0.8.0 服务注入 metrics（_attach 在位）",
 check("v2.0.8.0 /api/metrics 路由 + 优雅降级",
       'path == "/api/metrics"' in src_web and "def api_get_metrics(" in src_web
       and "统计模块未就绪" in src_web)
-check("v2.0.8.0 状态页有连接质量卡片",
-      'id="card-quality"' in src_web and 'id="kpi-uptime"' in src_web
-      and 'id="qbars"' in src_web)
-check("v2.0.8.0 柱图是纯 CSS（不引入图表库）",
-      ".qbars" in src_web and "chart.js" not in src_web.lower()
-      and "echarts" not in src_web.lower())
+check("v2.1.2.0 连接质量板块已删（用户：「没啥用」）—— 卡片 / 柱图 / 刷新按钮 / 相关 CSS 全清掉",
+      'id="card-quality"' not in src_web and 'id="qbars"' not in src_web
+      and 'id="btn-metrics-refresh"' not in src_web and 'id="quality-note"' not in src_web
+      and ".qbars" not in src_web and "qbar-fill" not in src_web and "qbar-day" not in src_web)
+check("v2.1.2.0 诊断指标不再折叠（用户：「直接显示出来」）—— 改 4 格统计条，且仍不引图表库",
+      'class="card stat-strip stat-strip-4"' in src_web
+      and 'id="kpi-uptime"' in src_web and 'id="kpi-relogin"' in src_web
+      and 'id="kpi-recover"' in src_web and 'id="kpi-latency"' in src_web
+      and '<details class="diag">' not in src_web and ".diag-body" not in src_web
+      and "chart.js" not in src_web.lower() and "echarts" not in src_web.lower())
 # 行为级：三种走向 + 窗口过滤 + 老格式（没有「耗时」字段）容忍
 _ev = _mx.parse_log_lines([
     "[2026-09-28 07:28:05] [INFO] 开始检查 (reason=periodic)",
@@ -1614,6 +1618,305 @@ _st_ok, _pl_ok = _eula.api_get_changelog()
 check("v2.0.4.0 changelog 正常读取", _st_ok == 200 and int(_pl_ok.get("size") or 0) > 100,
       "status=%s size=%s" % (_st_ok, _pl_ok.get("size")))
 
+# ---- v2.1.2.0：BakaXL 风（星尘主题）—— 默认外观 + 三态循环 ----
+# 为什么要盯这几条：这次动的是「**默认外观**」，坏了不会报错，只会让所有人第一眼看到错的
+# 主题；而新加的整窗图层一旦漏了 pointer-events: none，整页会点不动（静默灾难）。
+import re as _re  # noqa: E402
+
+
+def _css_rule(selector):
+    """从页面 CSS 抠出某条声明的块（只认本文件里「选择器 { … }」的扁平写法，不嵌大括号）。"""
+    _m = _re.search(_re.escape(selector) + r"\s*\{([^}]*)\}", _page)
+    return _m.group(1) if _m else ""
+
+
+def _decl(block, name):
+    _m = _re.search(_re.escape(name) + r"\s*:\s*([^;]+);", block)
+    return _m.group(1).strip() if _m else ""
+
+
+def _pos(needle):
+    """页面里的出现位置（没有就 -1）—— 用来断言「谁在谁前面」这种使用逻辑顺序。"""
+    return _page.index(needle) if needle in _page else -1
+
+
+check("v2.1.2.0 三套令牌并存（:root 亮色 / dark / baka），baka 是实打实的一套",
+      ":root {" in _page and '[data-theme="dark"] {' in _page
+      and '[data-theme="baka"] {' in _page
+      and _decl(_css_rule('[data-theme="baka"]'), "--material") != ""
+      and _decl(_css_rule('[data-theme="baka"]'), "--accent") != "")
+check("v2.1.2.0 整窗大图背景只挂在 baka 上（老主题的 body::before 仍是三处色晕）",
+      "radial-gradient" in _css_rule('[data-theme="baka"] body::before')
+      and "var(--glow-a)" in _css_rule("body::before"))
+_baka_mask = _css_rule('[data-theme="baka"] body::after')
+check("v2.1.2.0 整窗遮罩不吃点击（漏了 pointer-events: none 整页就点不动）",
+      _decl(_baka_mask, "pointer-events") == "none", repr(_baka_mask[:60]))
+check("v2.1.2.0 背景 / 遮罩都压在内容层之下（负 z-index < .wrap 的 1）",
+      _decl(_css_rule('[data-theme="baka"] body::before'), "z-index") == "-3"
+      and _decl(_baka_mask, "z-index") == "-2"
+      and _decl(_css_rule(".wrap"), "z-index") == "1")
+check("v2.1.2.0 首屏按使用逻辑排：「状态 + 立即登录」在同一张卡里，且都在诊断指标之前",
+      _pos('class="card status-hero"') >= 0
+      and _pos('id="card-online"') >= 0 and _pos('id="btn-login"') >= 0
+      and _pos('id="card-online"') < _pos('id="btn-login"') < _pos('id="card-uptime"'))
+
+# —— 第三轮（用户反馈：「状态 / 配置 / 日志 改了个寂寞」——只改表面不算，得动信息架构）——
+check("v2.1.2.0 状态页：状态与动作合并成一张卡（不再两张卡各空一半），旧的 .lead 结构清掉",
+      'class="card status-hero"' in _page and 'class="status-word" id="kpi-online"' in _page
+      and 'class="status-hero-act"' in _page and 'class="lead"' not in _page
+      and '.action-card {' not in _page)
+check("v2.1.2.0 状态页：5 项日常从「卡墙」改成一条统计条（格间竖线，出错那格浅橙底）",
+      'class="card stat-strip"' in _page and _page.count('class="stat-cell"') >= 5
+      and 'lead-facts' not in _page and '.stat-cell.stat-alert' in _page
+      and "--warn-fill" in _page)
+check("v2.1.2.0 状态页：统计条换了类名，JS 也同步（不然轮询一跑样式就被覆盖）",
+      "'stat-value tone-ok'" in _page and "'status-word tone-ok'" in _page
+      and "'stat-value mono'" in _page and "cardErr.className = 'stat-cell'" in _page
+      and "'stat-value mono tone-muted'" in _page)
+check("v2.1.2.0 页面两栏布局：配置页与状态页共用同一套（左主右辅，窄屏塌成一栏）",
+      _page.count('class="page-cols"') == 2 and _page.count('<div class="page-col">') == 4
+      and ".page-cols { display: grid" in _page and ".page-col { display: grid" in _page
+      and ".page-col > .status-hero, .page-col > .stat-strip { margin-top: 0; }" in _page
+      and "@media (max-width: 980px) { .page-cols" in _page
+      and "cfg-page" not in _page and "cfg-col" not in _page)
+check("v2.1.2.0 状态页左右两栏：左「状态 + 日常统计条 + 诊断指标条」/ 右「账户与登录密码」",
+      _pos('id="card-online"') < _pos('class="card stat-strip"')
+      < _pos('class="card stat-strip stat-strip-4"') < _pos('id="card-password"')
+      and _pos('id="card-password"') < _pos('id="panel-config"'),
+      "online@%s strip@%s diag@%s pwd@%s" % (_pos('id="card-online"'),
+          _pos('class="card stat-strip"'), _pos('class="card stat-strip stat-strip-4"'),
+          _pos('id="card-password"')))
+check("v2.1.2.0 状态页右栏的账号密码竖排（右栏约 430px，四列会变窄条）；端口卡与升级设置仍一行三列",
+      'class="pw-row pw-row-4"' not in _page and ".pw-row-4" not in _page
+      and _page.count('class="pw-row pw-row-3"') == 2
+      and ".pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in _page
+      and ".pw-row .field > input, .pw-row .field > select { max-width: none; }" in _page
+      and "pw-grid" not in _page)
+check("v2.1.2.0 字体统一到 MiSans（装了优先用，没装退回系统栈；仓库不加字体文件）",
+      '"MiSans", "MiSans VF", "MiSans Regular", "MiSans Normal"' in _page
+      and "--font-ui:" in _page and "--font-mono: var(--font-ui);" in _page
+      and "font-family: var(--font-ui);" in _page and "font-family: var(--font-mono);" in _page
+      and "font-variant-numeric: tabular-nums;" in _page
+      and "@font-face {" not in _page and "ui-monospace" not in _page)
+check("v2.1.2.0 日志页：改成终端窗口 —— 标题栏 + 实时状态在终端之上（原来压在下面，等于标题栏装脚上）",
+      'class="card log-window"' in _page and 'class="log-window-bar"' in _page
+      and 'class="log-dots"' in _page
+      and _pos('class="log-window-bar"') < _pos('id="log-box"')
+      and _pos('class="log-meta"') < _pos('id="log-box"')
+      and _decl(_css_rule(".log-meta"), "margin-left") == "auto")
+check("v2.1.2.0 日志页：占用与诊断包改两栏（原来一长段说明把整行撑满）",
+      'class="log-diag-cols"' in _page and "日志占用与诊断包" in _page
+      and _pos('id="log-list"') < _pos('id="btn-logs-refresh"')
+      and _decl(_css_rule(".log-diag-cols"), "display") == "grid")
+check("v2.1.2.0 品牌大标题已撤（不再与顶栏重复）+ 诊断指标不再折叠（三轮：直接显示）",
+      'class="hero-title"' not in _page and '<details class="diag">' not in _page
+      and _page.count('<details class="diag fold">') >= 3   # 折叠机制仍服务于配置 / 关于的进阶设置
+      and 'class="diag-summary"' in _page)
+check("v2.1.2.0 首屏默认主题 = baka，三种取值都认（存过的用户不被清掉）",
+      "var theme = 'baka';" in _page
+      and "saved === 'baka' || saved === 'dark' || saved === 'light'" in _page
+      and "systemTheme" not in _page and "matchMedia" not in _page)
+_theme_arr = _re.search(r"var THEMES = \[([^\]]+)\]", _page)
+_palette = [t.strip().strip("'") for t in _theme_arr.group(1).split(",")] if _theme_arr else []
+_seq = []
+if _palette:
+    _cur = _palette[0]
+    for _ in range(len(_palette)):
+        _cur = _palette[(_palette.index(_cur) + 1) % len(_palette)]
+        _seq.append(_cur)
+check("v2.1.2.0 点三下回到原点（三态循环闭合：baka → light → dark → baka）",
+      _palette == ["baka", "light", "dark"] and _seq == ["light", "dark", "baka"],
+      "%s / %s" % (_palette, _seq))
+check("v2.1.2.0 按钮静态标签不再写死两态，且首屏同步一次（读屏别念错）",
+      'aria-label="切换亮色 / 暗色主题"' not in _page
+      and "applyTheme(currentTheme(), false);" in _page)
+
+
+# ---- v2.1.2.0（第二轮，按用户反馈重排）：账号密码上主页 / 关于页重做 / 安装方式识别 ----
+# 用户原话：「把账户与密码移动到主页」「配置每个版块占这么多真的好吗」「关于放的很臃肿」
+#           「更新的边上应该放一个小的日志窗或者告诉检测到新版本的结果」
+#           「关于的访问入口有存在的必要吗」「卸载服务的提示是写死的吗？有没有办法区分」
+class _FakeProbe:
+    """给 `_detect_install_mode` 用的假探测（判据命中顺序必须可断言，且不碰真机）。"""
+
+    def __init__(self, uninstaller=None, reg=(), files=(), dirs=()):
+        self._unins = uninstaller
+        self._reg = set(reg)
+        self._files = set(files)
+        self._dirs = set(dirs)
+
+    def isfile(self, path):
+        return path in self._files
+
+    def isdir(self, path):
+        return path in self._dirs
+
+    def find_uninstaller(self, app_dir):
+        return self._unins
+
+    def reg_exists(self, subkey):
+        return subkey in self._reg
+
+
+_det = _web_api_probe._detect_install_mode
+_app = r"C:\Program Files\DrcomAutoLogin"
+_ins = _det(_app, probe=_FakeProbe(uninstaller="unins000.exe", reg=[_web_api_probe._SERVICE_REG_KEY]))
+check("v2.1.2.0 安装方式：目录里有 Inno 卸载器 → 安装包，且提示走「设置 → 应用」",
+      _ins["mode"] == "installer" and "应用" in _ins["uninstall_hint"]
+      and "unins000.exe" in _ins["uninstall_hint"] and _ins["service_installed"] is True,
+      _ins["uninstall_hint"][:60])
+_reg_only = _det(_app, probe=_FakeProbe(reg=[_web_api_probe._UNINSTALL_REG_KEYS[0]]))
+check("v2.1.2.0 安装方式：只剩注册表卸载项也判安装包（卸载器被改名 / 挪走时），",
+      _reg_only["mode"] == "installer" and _reg_only["uninstaller"] is None,
+      _reg_only["mode"])
+_src = _det(r"D:\code\StardustFlashLink", probe=_FakeProbe(
+    files=[r"D:\code\StardustFlashLink\packaging\setup.iss"]))
+check("v2.1.2.0 安装方式：源码树特征 → 源码部署，提示运行 uninstall.bat",
+      _src["mode"] == "source" and "uninstall.bat" in _src["uninstall_hint"]
+      and "安装包安装" not in _src["uninstall_hint"], _src["uninstall_hint"][:60])
+check("v2.1.2.0 安装方式：卸载器优先于源码特征（装完的源码目录不该被判成源码）",
+      _det(_app, probe=_FakeProbe(uninstaller="unins001.exe", dirs=[_app + r"\.git"]))["mode"]
+      == "installer")
+# 真机实测撞到的组合（本机装过安装包，但当前跑的是源码工作区）：必须判「当前这份代码」
+_src_reg = _det(r"D:\code\wt", probe=_FakeProbe(
+    files=[r"D:\code\wt\packaging\setup.iss"],
+    reg=[_web_api_probe._UNINSTALL_REG_KEYS[0], _web_api_probe._SERVICE_REG_KEY]))
+check("v2.1.2.0 安装方式：源码树 + 注册表卸载项 → 判源码（别引去卸载没在跑的那份），并附注另有安装副本",
+      _src_reg["mode"] == "source" and "uninstall.bat" in _src_reg["uninstall_hint"]
+      and "安装包安装的副本" in _src_reg["uninstall_hint"],
+      _src_reg["uninstall_hint"][:70])
+_unk = _det(r"C:\some\where", probe=_FakeProbe())
+check("v2.1.2.0 安装方式：都没命中 → unknown，且两种卸载途径都提到",
+      _unk["mode"] == "unknown" and "uninstall.bat" in _unk["uninstall_hint"]
+      and "应用" in _unk["uninstall_hint"])
+_about_saved = {k: getattr(_web_api_probe, k, None) for k in
+                ("BASE_DIR", "LOG_FILE", "CONFIG_FILE", "PASSWORD_FILE", "LOG_DIR",
+                 "VERSION", "VERSION_FULL", "CODENAME", "CODENAME_CN", "logger",
+                 "_snapshot_state")}
+
+
+class _FakeLogger:
+    def warning(self, *a, **k):
+        pass
+
+    def exception(self, *a, **k):
+        pass
+
+
+_web_api_probe.BASE_DIR = _app            # 假安装目录：不依赖本机真实布局
+_web_api_probe.LOG_FILE = _app + r"\logs\campus_login.log"
+_web_api_probe.CONFIG_FILE = _app + r"\config.json"
+_web_api_probe.PASSWORD_FILE = _app + r"\password.txt"
+_web_api_probe.LOG_DIR = _app + r"\logs"
+_web_api_probe.VERSION = "1.2.3"
+_web_api_probe.VERSION_FULL = "1.2.3 (test)"
+_web_api_probe.CODENAME = "Test"
+_web_api_probe.CODENAME_CN = "测试"
+_web_api_probe.logger = _FakeLogger()
+_web_api_probe._snapshot_state = lambda: {"service_started_at": "2026-09-29T10:00:00",
+                                          "service_uptime_sec": 60}
+try:
+    _about_payload = _web_api_probe.api_get_about()
+finally:
+    for _k, _v in _about_saved.items():
+        if _v is not None:
+            setattr(_web_api_probe, _k, _v)
+check("v2.1.2.0 /api/about 带上 install 判定 + 卸载提示（前端据此说对话）",
+      isinstance(_about_payload.get("install"), dict)
+      and _about_payload["install"].get("mode") in ("installer", "source", "unknown")
+      and bool(_about_payload["install"].get("uninstall_hint")),
+      str(_about_payload.get("install", {}).get("mode")))
+check("v2.1.2.0 卸载提示不再写死一句话（按 installInfo 给，兜底才用旧文案）",
+      "installInfo.uninstall_hint" in _page and "installInfo.evidence" in _page
+      and 'id="about-mode-badge"' in _page)
+
+# —— 搬运结果：谁该在哪个面板里（用位置断言，防止以后又被搬回去）——
+_end_status = _pos('id="panel-config"')
+_end_config = _pos('id="panel-log"')
+_end_log = _pos('id="panel-about"')
+check("v2.1.2.0 账户与登录密码在「状态」页（不是配置页）",
+      _pos('id="card-password"') >= 0 and _pos('id="card-password"') < _end_status
+      and _pos('id="cfg-account"') < _end_status,
+      "card-password@%s panel-config@%s" % (_pos('id="card-password"'), _end_status))
+check("v2.1.2.0 日志与诊断搬到了「日志」页（不再挤在关于页）",
+      _pos('id="log-list"') > _end_config and _pos('id="log-list"') < _end_log
+      and _pos('id="btn-logs-refresh"') < _end_log,
+      "log-list@%s panel-log@%s panel-about@%s" % (_pos('id="log-list"'), _end_config, _end_log))
+check("v2.1.2.0 关于页：删掉「访问入口」、加上「更新」块与升流小窗、管理操作折起来",
+      "about-local" not in _page
+      and 'id="about-upd-result"' in _page and 'id="about-update-log"' in _page
+      and _pos('id="btn-update-check-now"') > _end_log   # 检查按钮也在关于页里（三轮搬来）
+      and _pos('id="about-upd-result"') > _end_log)  # 确实落在关于面板里（不是别处）
+check("v2.1.2.0 配置页瘦身：主流程之外的都折起来（新建方案 / 网络位置守卫）",
+      _page.count('<details class="diag fold">') >= 2
+      and 'id="guard-summary-hint"' in _page and 'class="fold-body field"' in _page)
+
+# —— 第四轮（用户：删掉那几条说明性文案 + 顶部提示条；修长路径换行与全局间距）——
+check("v2.1.2.0 顶部说明条整条已删（连同样式与那条空转的进场动画）",
+      'class="hint-strip"' not in _page and ".hint-strip {" not in _page
+      and "本服务仅监听" not in _page and "查看源码" not in _page
+      and "@keyframes riseIn" not in _page and "animation: riseIn" not in _page)
+check("v2.1.2.0 三条「说明性文案」不上屏（诊断脚注 / 凭据说明 / 安装判据）",
+      "不另存状态文件" not in _page and "完整凭据" not in _page
+      and "about-mode-evidence" not in _page
+      and "badge.setAttribute('title', '判据：'" in _page)   # 判据改悬停提示，信息没丢
+check("v2.1.2.0 统计条里的 ISO 日期不再折成三行（日期 / 时间两段 nowrap，最多两行）",
+      ".nb { white-space: nowrap; }" in _page
+      and "display: flex; align-items: center; flex-wrap: wrap;" in _page
+      and "function isoValueHtml(iso) {" in _page
+      and "$('kpi-lastlogin').innerHTML = s.last_login_at ? isoValueHtml(s.last_login_at)" in _page)
+check("v2.1.2.0 次要操作不再用主按钮尺寸：「服务与维护」四键缩成 btn-sm（窄栏里少占一行）",
+      ".btn-sm { padding: 7px 14px; font-size: 13px; gap: 5px; }" in _page
+      and 'class="btn btn-sm btn-secondary" id="btn-restart"' in _page
+      and 'class="btn btn-sm btn-danger" id="btn-uninstall"' in _page
+      and 'class="btn btn-sm btn-secondary" id="btn-update-history"' in _page
+      and 'class="btn btn-sm btn-secondary" id="btn-changelog"' in _page)
+check("v2.1.2.0 间距收口成三个令牌（卡片内距 / 卡片间距 / 字段间距），不再各处随手写",
+      "--pad-card: 20px;" in _page and "--gap-card: 14px;" in _page and "--gap-field: 16px;" in _page
+      and "  padding: var(--pad-card);" in _page
+      and ".page-col { display: grid; gap: var(--gap-card);" in _page
+      and ".field { position: relative; margin-bottom: var(--gap-field); }" in _page
+      and ".stat-cell { padding: 15px var(--pad-card);" in _page)
+check("v2.1.2.0 长路径只在目录分隔符后换行（不再断成「半个圆角框」/ 半截文件名）",
+      "code.path {\n  display: block;" in _page
+      and "code.path .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere;" in _page
+      and "function pathHtml(p) {" in _page and "split(/([\\\\/])/)" in _page
+      and '<span class="seg">' in _page
+      and "grid-template-columns: 84px minmax(0, 1fr);" in _page)
+check("v2.1.2.0 升级相关整块搬进「关于 → 更新」（配置页不再出现任何升级字段 / 按钮）",
+      _pos('id="cfg-auto-update-enabled"') > _end_log and _pos('id="cfg-update-interval"') > _end_log
+      and _pos('id="cfg-update-disk"') > _end_log and _pos('id="rollback-version"') > _end_log
+      and _pos('id="btn-update-install-now"') > _end_log
+      and _pos('id="cfg-auto-interval"') < _end_config   # 周期自检仍留在配置页（对照）
+      and _pos('id="cfg-auto-interval"') < _end_log,
+      "cfg-update-interval@%s panel-log@%s panel-about@%s"
+      % (_pos('id="cfg-update-interval"'), _end_config, _end_log))
+check("v2.1.2.0 关于页的升级设置自带保存按钮，且跳过配置页校验（新装用户会先来这儿开自动升级）",
+      'id="btn-save-update-settings"' in _page
+      and "saveConfigFrom(saveUpd, true)" in _page and "saveConfigFrom(saveBtn, false)" in _page)
+check("v2.1.2.0 横向表单行：端口卡与关于页升级设置各一行三列（不会再被 auto-fit 挤出空轨）",
+      _page.count('class="pw-row pw-row-3"') == 2
+      and ".pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in _page)
+# —— 第二轮打磨（用户：「排版要重新设计」「动效要做」「关于里 Logo 也没打上去」）——
+check("v2.1.2.0 关于页用的是真品牌 Logo（取不到才回退内联星芒）",
+      'id="about-logo"' in _page and 'src="/branding/web-logo-64.png"' in _page
+      and "bindLogoFallback($('about-logo'), 40)" in _page)
+check("v2.1.2.0 关于页：结论条 + 三张数据牌 + 数据/维护两栏（不再是一列白卡堆到底）",
+      'id="about-upd-callout"' in _page and 'class="about-callout' in _page
+      and 'class="about-stats"' in _page and 'id="about-upd-latest"' in _page
+      and 'class="about-cols"' in _page)
+check("v2.1.2.0 动效层：统一缓动令牌 + 卡片进场 + 数值变化脉冲 + 折叠淡入",
+      "--ease: cubic-bezier" in _page and "--dur-3:" in _page
+      and "@keyframes cardIn" in _page and "@keyframes statePulse" in _page
+      and "@keyframes valueFlash" in _page and "@keyframes foldIn" in _page
+      and ".kpi-value.flash" in _page and "markValues();" in _page)
+check("v2.1.2.0 配置页不再为单个字段占一整张卡（管理页面端口并进「网络与服务端口」）",
+      'class="section-title">网络与服务端口' in _page
+      and 'id="cfg-ui-port"' in _page and ">Web UI<" not in _page)
+check("v2.1.2.0 密码徽标在主页也要能更新（不能只在 loadConfig 里刷）",
+      "c.password_status" in _page and "setPwdBadge(c.password_status)" in _page)
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -1702,13 +2005,25 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.1.0", version.VERSION == "2.1.1.0", version.VERSION)
+check("版本 = 2.1.2.0", version.VERSION == "2.1.2.0", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
       "%s / %s" % (version.CODENAME, version.CODENAME_CN))
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
+
+# v2.1.2.0：版本字面量同步补齐 —— 这几个位置以前只改了文件头，banner / NSSM 服务描述
+# 一路漂到了 v2.0.14.0 / v2.1.0.0（用户 `sc qc DrcomAutoLogin` 看到的描述是过期的 ✗）。
+check("v2.1.2.0 install.bat 的 banner 与 NSSM 服务描述也同步版本号",
+      ("Windows 服务安装 (v%s)" % version.VERSION) in _inst14
+      and ('DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v%s）"'
+           % version.VERSION) in _inst14)
+check("v2.1.2.0 uninstall.bat 的 banner 也同步版本号",
+      ("服务 - 卸载 (v%s)" % version.VERSION) in _uinst14)
+check("v2.1.2.0 setup.iss 的 NSSM 服务描述改用 {#MyAppVersion}（不再写死版本号）",
+      "DrcomAutoLogin Description \"星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v{#MyAppVersion}）\""
+      in _iss_src)
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))
 sys.exit(1 if FAILS else 0)
