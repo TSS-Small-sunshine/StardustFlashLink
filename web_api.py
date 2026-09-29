@@ -60,6 +60,9 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
             load_config, save_config, save_password_to_disk,
             validate_config, snapshot_state, get_password, now_iso,
             stop_event, run_once_fn,
+            # v2.1.3.0：方案专属密码（每方案一个 password.<方案名>.txt）
+            profile_has_own_password=None, remove_profile_password=None,
+            load_password_from_disk=None,
             # 注入到 web_api 模块命名空间，标志 / 兼容别名
             eula_api_get_changelog=None,
             # auto_update 模块的可选注入（commit 5 才存在；现 commit 4 暂不引用）
@@ -100,6 +103,10 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
     g["_load_config"] = load_config
     g["_save_config"] = save_config
     g["_save_password_to_disk"] = save_password_to_disk
+    # v2.1.3.0：方案专属密码的读写帮手（都由 联网_service.py 注入；没注入就优雅降级）
+    g["_profile_has_own_password"] = profile_has_own_password
+    g["_remove_profile_password"] = remove_profile_password
+    g["_load_password_from_disk"] = load_password_from_disk
     g["_validate_config"] = validate_config
     g["_snapshot_state"] = snapshot_state
     g["_get_password"] = get_password
@@ -279,15 +286,28 @@ def api_get_wifi():
 
 
 def api_get_profiles():
-    """GET /api/profiles — 配置方案列表（方案 = 位置相关字段的快照）。"""
+    """GET /api/profiles — 配置方案列表（方案 = 位置相关字段的快照）。
+
+    v2.1.3.0：每项多一个 `has_own_password`（该方案有没有自己的
+    `password.<方案名>.txt`）—— 界面上要能一眼看出「这个方案的密码是独立的，
+    还是跟别的方案共用公共 password.txt」✓。
+    """
     mod = globals().get("_profiles_mod")
     if mod is None:
         return {"ok": False, "error": "方案模块未就绪", "items": []}
     try:
-        return mod.list_profiles()
+        data = mod.list_profiles()
     except Exception as exc:  # noqa: BLE001 —— 面板坏了不影响配置页其它部分
         logger.exception("读取配置方案失败: %s", exc)
         return {"ok": False, "error": "读取方案失败：{}".format(exc), "items": []}
+    has_own = globals().get("_profile_has_own_password")
+    if has_own is not None and isinstance(data, dict):
+        for item in (data.get("items") or []):
+            try:
+                item["has_own_password"] = bool(has_own(item.get("name")))
+            except Exception:       # noqa: BLE001 —— 判不出来就当没有，别把接口打崩
+                item["has_own_password"] = False
+    return data
 
 
 def api_post_profiles_save(payload):
@@ -345,6 +365,153 @@ def api_post_profiles_auto(payload):
         logger.exception("切换自动方案开关失败: %s", exc)
         return 500, {"ok": False, "error": "保存失败：{}".format(exc)}
     return 200, {"ok": True, "auto_switch": payload["enabled"]}
+
+
+def api_post_credentials(payload):
+    """POST /api/credentials — 一次保存「账号 / 运营商 / 密码」（v2.1.3.0）。
+
+    body:
+        scope:   "current"（默认）| "profile"
+        name:    方案名（scope=profile 时必填）
+        account: 账号（可留空 = 还没定 / 校内直连；给了就必须是纯数字）
+        suffix:  运营商后缀（必须是 空 / @yd / @dx / @lt 之一）
+        password: 新密码（给了就写；不传 / 空 = 不动密码）
+        clear_password: true = 删掉该方案的专属密码（回落公共 password.txt，仅 profile）
+
+    两个范围的区别（这是「多网络多账号」能用的关键）：
+        - **current**：改顶层配置的账号 / 后缀（状态页那张「账户与登录密码」卡），
+          密码写「当前生效的密码文件」—— 当前方案有专属文件就是它，否则公共 `password.txt` ✓；
+        - **profile**：改**该方案**的账号 / 后缀（**合并**进方案 values，网关、检查间隔、
+          守卫白名单一个都不动 ✓），密码写该方案专属的 `password.<方案名>.txt` ✓。
+          于是「宿舍一套账号密码、教学楼另一套」切方案 = 连账号带密码一起换 ✓。
+          ⚠️ 界面把账号填进状态卡（scope=current）时是改**顶层**的 —— 方案里存过的账号
+          不会跟着变（方案仍然是它自己那一套 ✓），这正是「多账号」想要的行为。
+
+    铁律不变：密码**永远不写进 config.json** ✗ —— 只落密码文件，
+    所以导出配置、诊断包、`_smoke_static.py` 的隐私断言全都照常成立 ✓。
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    scope = payload.get("scope") or "current"
+    if scope not in ("current", "profile"):
+        return 400, {"ok": False, "error": "scope 只能是 current / profile"}
+    mod = globals().get("_profiles_mod")
+    name = payload.get("name") or ""
+    if scope == "profile":
+        if mod is None:
+            return 503, {"ok": False, "error": "方案模块未就绪"}
+        if not isinstance(name, str) or not name.strip():
+            return 400, {"ok": False, "error": "scope=profile 时必须给方案名"}
+        # 方案必须**已经存在** ✓ —— 否则「只给密码不给账号」时会给一个不存在的方案
+        # 写出一个 password.<名字>.txt 野文件（还看不出错，因为登录时会静默回落公共文件 ✗）。
+        key = mod.normalize_name(name)
+        if not key:
+            return 400, {"ok": False, "error": "方案名不合法（≤24 字符，且不含 \\ / : * ? \" < > |）"}
+        try:
+            _profiles_now = (_load_config() or {}).get("profiles") or {}
+        except Exception:       # noqa: BLE001 —— 读不到就当没有，宁可拒了也别写野文件
+            _profiles_now = {}
+        if key not in _profiles_now:
+            return 400, {"ok": False, "error": "没有这个方案：{}".format(key)}
+
+    # —— 1. 账号 / 后缀：先做形状校验（数值范围交给 _validate_config / 方案校验）——
+    account = payload.get("account")
+    if account is not None:
+        if not isinstance(account, str):
+            return 400, {"ok": False, "error": "account 必须是字符串"}
+        account = account.strip()
+        if account and not account.isdigit():
+            return 400, {"ok": False, "error": "账号只能是数字（学号 / 工号），或留空"}
+    suffix = payload.get("suffix")
+    if suffix is not None and suffix not in ALLOWED_SUFFIXES:
+        return 400, {"ok": False, "error": "suffix 必须是 空 / @yd / @dx / @lt 之一"}
+
+    saved_account = account if account is not None else None
+    saved_suffix = suffix if suffix is not None else None
+
+    if scope == "current":
+        # 部分更新：**基于现有配置**改这两个键 ✓ ——
+        # 绝不能只把 {account, suffix} 丢给 _save_config：它会用 DEFAULT_CONFIG 把
+        # 其它字段补成默认值，等于把网关 / 端口 / 间隔一起重置 ✗。
+        try:
+            cfg = dict(_load_config() or {})
+        except Exception as exc:  # noqa: BLE001
+            return 500, {"ok": False, "error": "读取配置失败：{}".format(exc)}
+        if account is not None:
+            cfg["account"] = account
+        if suffix is not None:
+            cfg["suffix"] = suffix
+        errors = _validate_config(cfg)
+        if errors:
+            return 400, {"ok": False, "error": "；".join(errors)}
+        try:
+            _save_config(cfg)
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            _log("写 config.json 失败: %s", exc, level=logging.ERROR)
+            return 500, {"ok": False, "error": "写文件失败"}
+        saved_account = cfg.get("account", "")
+        saved_suffix = cfg.get("suffix", "")
+    else:
+        values = {}
+        if account is not None:
+            values["account"] = account
+        if suffix is not None:
+            values["suffix"] = suffix
+        if values:
+            result = mod.update_profile_values(name, values)
+            if not result.get("ok"):
+                return 400, {"ok": False, "error": result.get("error") or "保存方案失败"}
+            saved_account = result["values"].get("account", "")
+            saved_suffix = result["values"].get("suffix", "")
+            # 改的是**当前方案** → 顺手把它重新应用一遍 ✓：否则「方案里改了账号、
+            # 状态页还显示旧账号」，用户只能再点一次「应用」才发现改对了 ✗。
+            # activate() 同时负责重载密码文件（方案可能刚有了自己的 password.<方案名>.txt）✓。
+            try:
+                cfg_now = _load_config() or {}
+            except Exception:       # noqa: BLE001 —— 读不到就不重应用，别把保存搞失败
+                cfg_now = {}
+            if mod.normalize_name(name) == (cfg_now.get("active_profile") or ""):
+                applied = mod.activate(name)
+                if not applied.get("ok"):
+                    _log("改完方案凭据后重新应用失败：%s", applied.get("error"),
+                         level=logging.WARNING)
+
+    # —— 2. 密码：写 / 删（都不碰 config.json）——
+    pwd = payload.get("password")
+    pwd_state = "unchanged"
+    if isinstance(pwd, str) and pwd:
+        try:
+            _save_password_to_disk(pwd, profile=(name if scope == "profile" else None))
+        except ValueError as exc:
+            return 400, {"ok": False, "error": str(exc)}
+        except OSError as exc:
+            _log("写密码文件失败: %s", exc, level=logging.ERROR)
+            return 500, {"ok": False, "error": "写密码文件失败"}
+        pwd_state = "set"
+    elif pwd is not None and not isinstance(pwd, str):
+        return 400, {"ok": False, "error": "password 必须是字符串"}
+    elif scope == "profile" and payload.get("clear_password"):
+        remover = globals().get("_remove_profile_password")
+        if remover is None or not remover(name):
+            return 400, {"ok": False, "error": "该方案没有自己的密码文件（本来就共用公共密码）"}
+        pwd_state = "removed"
+        # 删掉的可能正是「当前生效」的那个文件（当前方案 + 无公共文件）→ 重读一次，
+        # 别让服务继续拿着已删文件的旧密码去登录 ✗。
+        reload_pwd = globals().get("_load_password_from_disk")
+        if reload_pwd is not None:
+            try:
+                reload_pwd()
+            except Exception as exc:  # noqa: BLE001 —— 重读失败不该让保存整体失败
+                _log("删除方案密码后重载密码失败：%s", exc, level=logging.WARNING)
+
+    _log("凭据已更新（scope=%s%s）", scope,
+         "，方案「{}」".format(name) if scope == "profile" else "")
+    return 200, {"ok": True, "scope": scope,
+                 "name": (mod.normalize_name(name) if scope == "profile" else ""),
+                 "account": "" if saved_account is None else saved_account,
+                 "suffix": "" if saved_suffix is None else saved_suffix,
+                 "password": pwd_state}
 
 
 def api_get_status():
@@ -1437,6 +1604,11 @@ class _Handler(BaseHTTPRequestHandler):
                 status, body = api_post_password(payload)
                 _send_json(self, status, body)
                 return
+            # v2.1.3.0：账号 / 运营商 / 密码一次存（状态页凭据卡 + 配置页「方案凭据」）
+            if path == "/api/credentials":
+                status, body = api_post_credentials(payload)
+                _send_json(self, status, body)
+                return
             if path == "/api/restart":
                 status, body = api_post_restart(self)
                 _send_json(self, status, body)
@@ -1477,7 +1649,10 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             _send_json(self, 404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
-            logger.exception("POST %s 异常: %s", path, exc)
+            # 走模块自带的 _log（logger 没注入时静默）—— 直接写 `logger.exception` 的话，
+            # 在「只挂了 web_api、没跑 _attach」的场景（冒烟测试）里会 NameError，
+            # 把真正的异常盖住 ✗，客户端只看到「连接被重置」。
+            _log("POST %s 异常: %s", path, exc, level=logging.ERROR)
             _send_json(self, 500, {"ok": False, "error": "internal: {}".format(exc)})
 
 
@@ -2063,6 +2238,8 @@ a:hover { color: var(--accent-hover); }
 .pw-row { display: grid; gap: 0 var(--gap-field); }
 .pw-row > .field { margin-bottom: var(--gap-field); min-width: 0; }
 .pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pw-row-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 560px) { .pw-row-2 { grid-template-columns: minmax(0, 1fr); } }
 /* 行内每格只有 200-350px，不再需要「输入框最长 560px」那条限宽 */
 .pw-row .field > input, .pw-row .field > select { max-width: none; }
 @media (max-width: 1000px) { .pw-row-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
@@ -2698,7 +2875,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <div class="field">
           <label for="pwd-new">账户登录密码</label>
           <input type="password" id="pwd-new" autocomplete="new-password">
-          <div class="hint">至少 1 个字符</div>
+          <div class="hint">留空 = 不改密码（要改的话至少 1 个字符）</div>
         </div>
         <div class="field">
           <label for="pwd-confirm">再次输入密码</label>
@@ -2706,9 +2883,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           <div class="hint">两次需一致才保存</div>
           <div class="err" id="err-pwd" role="alert"></div>
         </div>
+        <!-- v2.1.3.0：这张卡以前只存密码 —— 账号 / 运营商改了**没有任何按钮能保存**
+             （「保存账户登录密码」只 POST /api/password）。现在一次存三样。 -->
+        <div class="hint" id="cred-scope">保存范围：账号与运营商写进本机配置；密码写「当前生效的密码文件」（当前方案有专属密码就是它，否则公共 <span class="mono">password.txt</span>），<b>不写进配置文件</b>。</div>
         <div class="field-foot">
           <span class="hint">保存后立即生效，无需重启服务。</span>
-          <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
+          <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账号与密码</button>
         </div>
       </div>
     </div><!-- /page-col -->
@@ -2766,6 +2946,58 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         </div>
         <div class="err" id="err-profile" role="alert"></div>
       </div>
+      <!-- v2.1.3.0：**方案自己的账号 / 密码**（多网络多账号的落地点）。
+           选中方案 → 在这里给它单独设账号 / 运营商 / 密码：
+             · 账号与后缀**合并**进方案（不动网关、检查间隔、守卫白名单）；
+             · 密码写该方案专属的 password.<方案名>.txt（切方案时连账号带密码一起换）；
+             · 密码留空 = 不改；勾「删除专属密码」= 回落到公共 password.txt。
+           改的若正是**当前方案**，保存后会自动重新应用（状态页马上显示新账号）。 -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>选中方案的账号与密码</span>
+          <span class="diag-hint" id="profile-cred-hint">选中方案后可在这里给它单独设账号 / 密码</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body">
+          <div class="pw-row pw-row-2">
+            <div class="field">
+              <label for="profile-account">账号</label>
+              <input type="text" id="profile-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
+              <div class="hint">只填数字；留空 = 这个方案不带账号（沿用顶层的）</div>
+              <div class="err" id="err-profile-account" role="alert"></div>
+            </div>
+            <div class="field">
+              <label for="profile-suffix">运营商</label>
+              <select id="profile-suffix">
+                <option value="">校园用户（无后缀）</option>
+                <option value="@yd">中国移动 @yd</option>
+                <option value="@dx">中国电信 @dx</option>
+                <option value="@lt">中国联通 @lt</option>
+              </select>
+              <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
+            </div>
+          </div>
+          <div class="pw-row pw-row-2">
+            <div class="field">
+              <label for="profile-pwd">该方案的专属密码</label>
+              <input type="password" id="profile-pwd" autocomplete="new-password">
+              <div class="hint">留空 = 不改；填了就写进 <span class="mono">password.&lt;方案名&gt;.txt</span></div>
+            </div>
+            <div class="field">
+              <label for="profile-pwd-confirm">再次输入密码</label>
+              <input type="password" id="profile-pwd-confirm" autocomplete="new-password">
+              <div class="hint">两次需一致才保存</div>
+              <div class="err" id="err-profile-pwd" role="alert"></div>
+            </div>
+          </div>
+          <div class="field-foot">
+            <label style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-2);">
+              <input type="checkbox" id="profile-pwd-clear"> 删除该方案的专属密码（改用公共密码）
+            </label>
+            <button class="btn btn-secondary" id="btn-profile-cred-save" type="button">保存到选中方案</button>
+          </div>
+        </div>
+      </details>
     </div>
 
     <!-- v2.1.2.0：「账户与登录密码」已搬到「状态」页（主页）—— 日常改得最多的东西
@@ -3346,6 +3578,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     login: function () { return postJson('/api/login'); },
     saveConfig: function (cfg) { return postJson('/api/config', cfg); },
     savePassword: function (pwd) { return postJson('/api/password', { password: pwd }); },
+    /* v2.1.3.0：账号 / 运营商 / 密码一次存（scope=current 状态页；scope=profile 方案） */
+    saveCredentials: function (body) { return postJson('/api/credentials', body || {}); },
     restart: function () { return postJson('/api/restart'); }
   };
 
@@ -3778,15 +4012,30 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var pwdBtn = $('btn-save-pwd');
     if (pwdBtn) {
       pwdBtn.addEventListener('click', function () {
+        /* v2.1.3.0：这张卡以前**只**存密码 —— 帐号 / 运营商在界面上能改、点了保存却没反应
+           （「保存账户登录密码」只 POST /api/password）→ 看着像「改了没保存」。
+           现在一次存三样：账号 + 运营商 + 密码（密码留空 = 不改）。 */
+        var accEl = $('cfg-account');
+        var account = accEl ? accEl.value.trim() : '';
+        var suffix = $('cfg-suffix') ? $('cfg-suffix').value : '';
         var p1 = $('pwd-new').value;
         var p2 = $('pwd-confirm').value;
         text($('err-pwd'), '');
-        if (!p1) { setFieldError('pwd-new', 'err-pwd', '账户登录密码不能为空'); return; }
-        if (p1 !== p2) { setFieldError('pwd-confirm', 'err-pwd', '两次输入的账户登录密码不一致'); return; }
+        if ($('err-account')) text($('err-account'), '');
+        if (account && !isIntString(account)) {
+          setFieldError('cfg-account', 'err-account', '账号只能是数字（学号 / 工号），或留空');
+          return;
+        }
+        if (p1 || p2) {
+          if (!p1) { setFieldError('pwd-new', 'err-pwd', '要改密码的话密码不能为空'); return; }
+          if (p1 !== p2) { setFieldError('pwd-confirm', 'err-pwd', '两次输入的账户登录密码不一致'); return; }
+        }
+        var body = { scope: 'current', account: account, suffix: suffix };
+        if (p1) body.password = p1;
         pwdBtn.disabled = true;
-        API.savePassword(p1).then(function (r) {
+        API.saveCredentials(body).then(function (r) {
           if (r && r.ok) {
-            toast('账户登录密码已更新', 'success');
+            toast(p1 ? '账号与密码已保存' : '账号已保存', 'success');
             $('pwd-new').value = '';
             $('pwd-confirm').value = '';
             clearErrors();
@@ -4540,9 +4789,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   })();
 
   /* ===== 配置方案（v2.0.9.0 / B5）：教室 / 宿舍 / 家里 ===== */
+  /* v2.1.3.0：缓存最近一次列表 —— 选中方案时要拿它回填「账号与密码」编辑框 */
+  var lastProfileItems = [];
   function renderProfiles(p) {
     var sel = $('profile-select');
     var items = (p && p.ok && p.items) ? p.items : [];
+    lastProfileItems = items;
     if (sel) {
       sel.innerHTML = '';
       if (!items.length) {
@@ -4558,7 +4810,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         var acc = (it.values && it.values.account) ? String(it.values.account) : '';
         var suf = (it.values && it.values.suffix) ? String(it.values.suffix) : '';
         opt.textContent = it.name + (it.active ? '（当前）' : '') + (it.auto ? ' · 自动' : '')
-          + (acc ? (' · ' + acc + suf) : '');
+          + (acc ? (' · ' + acc + suf) : '') + (it.has_own_password ? ' · 专属密码' : '');
         sel.appendChild(opt);
       });
     }
@@ -4579,6 +4831,31 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
          : '还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。'));
     var auto = $('profile-auto-switch');
     if (auto) auto.checked = !!(p && p.auto_switch);
+    fillProfileCreds();   /* v2.1.3.0：把选中方案自己的账号 / 后缀回填进编辑框 */
+  }
+
+  /* v2.1.3.0：把「选中方案」的账号 / 后缀 / 有没有专属密码填进编辑区。
+     密码框永远留空（接口从不回传密码原文），只用提示说明它有没有独立密码文件。 */
+  function fillProfileCreds() {
+    var sel = $('profile-select');
+    var name = sel ? sel.value : '';
+    var it = null;
+    lastProfileItems.forEach(function (x) { if (x.name === name) it = x; });
+    var acc = $('profile-account');
+    if (acc) acc.value = (it && it.values && it.values.account) ? String(it.values.account) : '';
+    var suf = $('profile-suffix');
+    if (suf) suf.value = (it && it.values && it.values.suffix) ? String(it.values.suffix) : '';
+    if ($('profile-pwd')) $('profile-pwd').value = '';
+    if ($('profile-pwd-confirm')) $('profile-pwd-confirm').value = '';
+    if ($('profile-pwd-clear')) $('profile-pwd-clear').checked = false;
+    ['err-profile-account', 'err-profile-pwd'].forEach(function (id) {
+      if ($(id)) text($(id), '');
+    });
+    text($('profile-cred-hint'), it
+      ? (it.has_own_password
+         ? ('「' + it.name + '」有专属密码文件（password.' + it.name + '.txt）')
+         : ('「' + it.name + '」现在跟别的方案共用公共密码（填下面的密码 = 给它单独设一个）'))
+      : '选中方案后可在这里给它单独设账号 / 密码');
   }
 
   function loadProfiles() {
@@ -4604,6 +4881,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var applyBtn = $('btn-profile-apply');
     var delBtn = $('btn-profile-delete');
     var autoBox = $('profile-auto-switch');
+    var selEl = $('profile-select');
     var useCurSsidBtn = $('profile-use-current-ssid');
     if (useCurSsidBtn) useCurSsidBtn.addEventListener('click', function () {
       var box = $('profile-match-ssids');
@@ -4643,6 +4921,48 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     });
     if (autoBox) autoBox.addEventListener('change', function () {
       profileAction('/api/profiles/auto', { enabled: !!autoBox.checked });
+    });
+    /* v2.1.3.0：选中方案 → 回填它的账号 / 后缀；保存 = 把账号 + 专属密码写进这个方案 */
+    if (selEl) selEl.addEventListener('change', fillProfileCreds);
+    var credBtn = $('btn-profile-cred-save');
+    if (credBtn) credBtn.addEventListener('click', function () {
+      var name = selEl ? selEl.value : '';
+      if (!name) { text($('err-profile'), '先在列表里选一个方案'); return; }
+      var account = $('profile-account') ? $('profile-account').value.trim() : '';
+      var suffix = $('profile-suffix') ? $('profile-suffix').value : '';
+      var p1 = $('profile-pwd') ? $('profile-pwd').value : '';
+      var p2 = $('profile-pwd-confirm') ? $('profile-pwd-confirm').value : '';
+      text($('err-profile'), '');
+      text($('err-profile-pwd'), '');
+      text($('err-profile-account'), '');
+      if (account && !isIntString(account)) {
+        setFieldError('profile-account', 'err-profile-account', '账号只能是数字（学号 / 工号），或留空');
+        return;
+      }
+      if (p1 !== p2) {
+        setFieldError('profile-pwd-confirm', 'err-profile-pwd', '两次输入的密码不一致');
+        return;
+      }
+      var clear = $('profile-pwd-clear') && $('profile-pwd-clear').checked;
+      var body = { scope: 'profile', name: name, account: account, suffix: suffix };
+      if (p1) body.password = p1;
+      if (clear) body.clear_password = true;
+      credBtn.disabled = true;
+      API.saveCredentials(body).then(function (r) {
+        if (r && r.ok) {
+          var msg = '方案「' + name + '」的账号已保存';
+          if (r.password === 'set') msg += '，专属密码已写入 password.' + name + '.txt';
+          else if (r.password === 'removed') msg += '，专属密码已删除（改用公共密码）';
+          toast(msg, 'success', 4000);
+          loadProfiles();
+          /* 改的若是**当前方案**，后端已顺手重新应用 → 表单要跟着刷新，免得显示旧账号 */
+          loadConfig();
+        } else {
+          setFieldError('profile-pwd', 'err-profile-pwd', (r && r.error) || '保存失败');
+        }
+      }).catch(function () {
+        setFieldError('profile-pwd', 'err-profile-pwd', '请求失败，请检查服务状态');
+      }).then(function () { credBtn.disabled = false; });
     });
     loadProfiles();
   })();

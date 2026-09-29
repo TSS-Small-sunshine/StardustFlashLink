@@ -143,6 +143,34 @@ def upsert(profiles, name, values, match_ssids=None):
     return current, []
 
 
+def update_values(profiles, name, values):
+    """**合并**改一个已有方案的 values（只动传进来的那几个键 ✓）。返回 ``(新 profiles, 错误列表)``。
+
+    与 `upsert` 的分工（v2.1.3.0 加，专门为「方案自己的账号 / 后缀」这类局部编辑）：
+        - `upsert`       = 整个 values 换掉（「用当前配置保存」= 新建 / 覆盖方案）；
+        - `update_values`= 只改这几项 —— 否则在界面上改个账号，会把该方案的网关、
+          检查间隔、守卫白名单一起抹掉 ✗。
+    方案不存在时**报错**而不是顺手新建 ✓：编辑框里手滑少打一个字不该悄悄多出一个方案。
+    """
+    key = normalize_name(name)
+    if not key:
+        return (profiles or {}), ["方案名不能为空（≤{} 字符，且不含 \\ / : * ? \" < > |）"
+                                  .format(MAX_NAME_LEN)]
+    current = dict(profiles or {})
+    entry = current.get(key)
+    if not isinstance(entry, dict):
+        return (profiles or {}), ["没有这个方案：{}".format(key)]
+    merged = dict(entry.get("values") or {})
+    merged.update({k: v for k, v in (values or {}).items() if k in PROFILE_KEYS})
+    errors = validate_values(merged)
+    if errors:
+        return (profiles or {}), errors
+    new_entry = dict(entry)
+    new_entry["values"] = merged
+    current[key] = new_entry
+    return current, []
+
+
 def delete(profiles, name):
     """删掉一个方案。返回 ``(新 profiles, 是否删掉了)``。"""
     current = dict(profiles or {})
@@ -214,8 +242,13 @@ def describe(values):
 # ============================================================
 # 运行时引用注入（由 联网_service.py 在 main() 里调用）
 # ============================================================
-def _attach(*, logger=None, load_config=None, save_config=None, validate_config=None):
-    """注入共享对象，与 web_api / auto_update / metrics 的 `_attach` 策略一致。"""
+def _attach(*, logger=None, load_config=None, save_config=None, validate_config=None,
+            load_password_from_disk=None):
+    """注入共享对象，与 web_api / auto_update / metrics 的 `_attach` 策略一致。
+
+    `load_password_from_disk`（v2.1.3.0 起）：切方案后要重读密码文件 —— 方案可以带
+    自己的 `password.<方案名>.txt`，不重读就会继续用上一个方案的密码 ✗。
+    """
     g = globals()
     if logger is not None:
         g["logger"] = logger
@@ -225,6 +258,8 @@ def _attach(*, logger=None, load_config=None, save_config=None, validate_config=
         g["_save_config"] = save_config
     if validate_config is not None:
         g["_validate_config"] = validate_config
+    if load_password_from_disk is not None:
+        g["load_password_from_disk"] = load_password_from_disk
     return g
 
 
@@ -275,6 +310,29 @@ def save_profile(name, values, match_ssids=None):
     return {"ok": True, "name": normalize_name(name), "count": len(profiles)}
 
 
+def update_profile_values(name, values):
+    """读配置 → **合并**改某个方案的 values → 落盘。返回 ``{ok, error, name, values}``。
+
+    界面「保存到选中方案」走这里（账号 / 运营商这类局部编辑 ✓）。
+    """
+    loader = globals().get("_load_config")
+    saver = globals().get("_save_config")
+    if loader is None or saver is None:
+        return {"ok": False, "error": "服务未就绪"}
+    try:
+        cfg = loader() or {}
+    except Exception as exc:    # noqa: BLE001
+        return {"ok": False, "error": "读取配置失败：{}".format(exc)}
+    profiles, errors = update_values(cfg.get("profiles") or {}, name, values)
+    if errors:
+        return {"ok": False, "error": "；".join(errors)}
+    cfg = dict(cfg)
+    cfg["profiles"] = profiles
+    saver(cfg)
+    return {"ok": True, "name": normalize_name(name),
+            "values": (profiles.get(normalize_name(name)) or {}).get("values") or {}}
+
+
 def activate(name):
     """应用一个方案并落盘。返回 ``{ok, error, applied, desc}``。
 
@@ -294,6 +352,18 @@ def activate(name):
     if errors:
         return {"ok": False, "error": "；".join(errors)}
     saver(merged)
+    # v2.1.3.0：**切方案之后必须重载密码** —— 方案可以带自己的 `password.<方案名>.txt`；
+    # 不重载的话服务会继续用上一个方案的密码，登录一路失败却「配置看着都对」✗
+    # （旧实现只在服务启动时读过一次密码文件）。
+    # 重载失败**不算切换失败**（配置已经切好了 ✓），记一条日志即可，免得把方案标记回滚掉。
+    reload_pwd = globals().get("load_password_from_disk")
+    if reload_pwd is not None:
+        try:
+            reload_pwd()
+        except Exception as exc:      # noqa: BLE001
+            log = globals().get("logger")
+            if log is not None:
+                log.warning("切换方案后重载密码失败：%s", exc)
     values = snapshot(merged)
     log = globals().get("logger")
     if log is not None:
