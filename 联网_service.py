@@ -114,6 +114,10 @@ except OSError as exc:
 # ============================================================
 STATE = {
     "service_started_at": None,
+    # v2.1.1.0：最近一次「网络变化触发的检查」（没触发过就是 None ✓）
+    # 为什么留着它：用户看到日志里突然多了一次登录时，能回答「为什么」✓
+    "last_net_change_at": None,
+    "last_net_change_why": None,
     "network_reachable": None,
     "online": None,
     "last_login_at": None,
@@ -577,6 +581,51 @@ def _startup_trigger():
 # v2.0.14.0（P3-2）：周期自检循环体抛异常后的冷却时间（测试里会临时调小）
 PERIODIC_ERROR_BACKOFF_SEC = 60
 
+# —— v2.1.1.0：网络变化即触发（治「刚连上 Wi-Fi 要干等到下个周期才登录」）——
+# 老行为：`STOP_EVENT.wait(wait_sec)` 一口气睡完整个间隔（最长 60 分钟）✗ ——
+#   开机 / 睡醒 / 走到另一个 Wi-Fi 之后，哪怕网络早就通了，也要等下一个周期才登录 ✗
+#   （用户感知：「Wi-Fi 连上了它却半天不登」）。
+# 新行为：把长等待**拆成小步**，边走边看：
+#   - 每跳（5 秒）做一次**不起进程**的探测：主用地址变没变（protocol.primary_local_ip ✓）
+#   - 每 12 跳（约 1 分钟）才做一次要起进程的 Wi-Fi 名探测（protocol.get_current_ssid ✓）
+#   - 地址变了 / Wi-Fi 名变了 → **立刻**检查（不退避语义、不动周期 ✓）
+NETWATCH_TICK_SEC = 5
+NETWATCH_SSID_EVERY_TICKS = 12
+
+
+class NetworkWatcher:
+    """记住上次看到的「地址 / Wi-Fi 名」，判断要不要提前检查 ✓。
+
+    纯逻辑（不碰网络、不碰文件）→ 好测 ✓；真探测由调用方喂进来 ✓。
+    """
+
+    def __init__(self):
+        self.address = None
+        self.ssid = None
+
+    def observe_address(self, address):
+        """看主用地址变没变 → `(要立刻检查吗, 原因说明)` ✓。"""
+        previous = self.address
+        if previous == address:
+            return False, ""
+        self.address = address
+        # 只有「拿到了地址」才算刚连上网 ✓；断网（变成空）不折腾（真查也会被守卫拦住 ✓）
+        if address and address != previous:
+            return True, "本机地址 {} → {}".format(previous or "（无）", address)
+        return False, ""
+
+    def observe_ssid(self, ssid):
+        """看 Wi-Fi 名变没变（= 换场景 ✓）→ `(要立刻检查吗, 原因说明)` ✓。"""
+        if not ssid:
+            return False, ""            # 读不到名字就不乱判 ✓（与守卫的 fail-open 同口径 ✓）
+        previous = self.ssid
+        if previous == ssid:
+            return False, ""
+        self.ssid = ssid
+        if previous is None:
+            return False, ""            # 第一次探到名字不算「换场景」✓（启动那次已经查过 ✓）
+        return True, "Wi-Fi {} → {}".format(previous, ssid)
+
 
 def run_periodic():
     """周期自检：尊重 auto_check_enabled 与 BACKOFF.until。
@@ -626,8 +675,41 @@ def run_periodic():
                     datetime.now() + timedelta(seconds=wait_sec)
                 ).isoformat(timespec="seconds")
 
-            # 中断等待
-            if STOP_EVENT.wait(wait_sec):
+            # —— v2.1.1.0：长等待拆成小步，边走边看网络变化 ✓ ——
+            # （原来是 STOP_EVENT.wait(wait_sec) 一口气睡完，最长 60 分钟 ✗）
+            watcher = NetworkWatcher()
+            watcher.address = _protocol_mod.primary_local_ip(cfg["host"], cfg.get("port", 80))
+            remaining = float(wait_sec)
+            tick_index = 0
+            net_change = ""
+            while remaining > 0 and not STOP_EVENT.is_set():
+                step = min(NETWATCH_TICK_SEC, remaining)
+                if STOP_EVENT.wait(step):
+                    return
+                remaining -= step
+                tick_index += 1
+
+                changed, why = watcher.observe_address(
+                    _protocol_mod.primary_local_ip(cfg["host"], cfg.get("port", 80))
+                )
+                # Wi-Fi 名探测要起进程（netsh / nmcli），别每 5 秒都来一次 ✗
+                if not changed and tick_index % NETWATCH_SSID_EVERY_TICKS == 0:
+                    changed, why = watcher.observe_ssid(_protocol_mod.get_current_ssid())
+                if changed:
+                    net_change = why
+                    break
+
+            if net_change:
+                logger.info("网络变化（%s）→ 立刻检查，不等下一个周期", net_change)
+                _set_state(
+                    last_net_change_at=datetime.now().isoformat(timespec="seconds"),
+                    last_net_change_why=net_change,
+                )
+                # reason 带 netwatch 前缀：日志里一眼能看出这次是「变化触发的」✓
+                run_once("netwatch")
+                continue
+
+            if STOP_EVENT.is_set():
                 return
 
             run_once("periodic")

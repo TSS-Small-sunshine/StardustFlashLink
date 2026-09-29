@@ -149,6 +149,26 @@ def wait_network(host, port, timeout):
     return False
 
 
+def primary_local_ip(host, port=80):
+    """本机在「通往 host」这条路上用的源 IP（**UDP connect，不发包、不起进程** ✓）。
+
+    为什么要它（v2.1.1.0）：网络变化监视每 5 秒看一次「地址变没变」✓ ——
+    这时候**绝不能**去跑 `ipconfig`（一次几十毫秒、还要起进程 ✗），
+    UDP connect 只让内核选一下路由，微秒级 ✓。
+
+    拿不到（没有默认路由等）→ 返回空串 "" ✓。
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect((host, int(port)))
+            return sock.getsockname()[0]
+        finally:
+            sock.close()
+    except OSError:
+        return ""
+
+
 def discover_network(host):
     """获取本机在校园网段的 IP 和 MAC，用于登录表单。
 

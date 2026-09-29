@@ -1338,6 +1338,37 @@ check("v2.0.14.0 周期自检异常后线程仍活着（不再静默死掉）",
       not _th14.is_alive() and len(_svc14_calls) >= 2 and any("周期自检循环异常" in l for l in _boom_log.lines),
       repr((_th14.is_alive(), len(_svc14_calls), _boom_log.lines[:1])))
 
+# ---- v2.1.1.0：网络变化即触发（治「刚连上 Wi-Fi 要干等到下一个周期才登录」）----
+# 老行为：run_periodic 一口气 wait(wait_sec)（最长 60 分钟），网络早就通了也不登 ✗
+_w1 = svc.NetworkWatcher()
+check("v2.1.1.0 网络监视：拿到地址才算「刚连上网」",
+      _w1.observe_address("") == (False, "")
+      and _w1.observe_address("172.16.59.11")[0] is True
+      and _w1.observe_address("172.16.59.11") == (False, ""))
+_w2 = svc.NetworkWatcher()
+_w2.observe_address("10.0.0.5")
+check("v2.1.1.0 网络监视：换网立刻检查，断网不折腾",
+      _w2.observe_address("172.16.30.7")[0] is True
+      and _w2.observe_address("") == (False, "")
+      and _w2.observe_address("172.16.30.7")[0] is True)
+_w3 = svc.NetworkWatcher()
+check("v2.1.1.0 网络监视：Wi-Fi 名变了才算「换场景」",
+      _w3.observe_ssid(None) == (False, "")
+      and _w3.observe_ssid("Campus-WiFi") == (False, "")
+      and _w3.observe_ssid("Dorm-WiFi")[0] is True
+      and _w3.observe_ssid("Dorm-WiFi") == (False, "")
+      and "Dorm-WiFi" in _w3.observe_ssid("Campus-WiFi")[1])
+check("v2.1.1.0 主用地址探测：UDP connect 即刻返回（不发包 / 不起进程）",
+      _proto.primary_local_ip("127.0.0.1", 80) == "127.0.0.1"
+      and _proto.primary_local_ip("127.0.0.1") == "127.0.0.1")
+check("v2.1.1.0 采样节拍：便宜通道秒级、贵通道明显更慢",
+      1 <= svc.NETWATCH_TICK_SEC <= 5
+      and svc.NETWATCH_SSID_EVERY_TICKS >= 2
+      and svc.NETWATCH_TICK_SEC * svc.NETWATCH_SSID_EVERY_TICKS <= 120,
+      repr((svc.NETWATCH_TICK_SEC, svc.NETWATCH_SSID_EVERY_TICKS)))
+check("v2.1.1.0 状态里留了「为什么突然查了一次」",
+      "last_net_change_at" in svc.STATE and "last_net_change_why" in svc.STATE)
+
 # ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
 # P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的
 # 异常（HTTPError / URLError 包装 / socket 层错误）都会顺手把密码写进日志 ✗。
