@@ -1436,6 +1436,53 @@ finally:
     if _mp_saved_load is not None:
         svc._load_config = _mp_saved_load
 
+# ---- v2.1.1.0：安全冗余（新功能不许把既有防护漏掉）----
+import web_api as _web_api_probe  # noqa: E402
+
+_sec_cfg = {"account": "2023000001", "host": "172.16.80.3", "port": 80,
+            "profiles": {"宿舍": {"values": {"account": "2023999999", "suffix": "@yd"}},
+                         "教学楼": {"values": {"account": "2023000001", "suffix": ""}}},
+            "suffix": ""}
+check("v2.1.1.0 脱敏收集：顶层 + 每个方案里的账号都会被列出来（去重）",
+      _web_api_probe._profile_accounts(_sec_cfg) == ["2023000001", "2023999999"],
+      repr(_web_api_probe._profile_accounts(_sec_cfg)))
+_masked = _web_api_probe._mask_cfg_accounts(_sec_cfg, _web_api_probe._profile_accounts(_sec_cfg))
+check("v2.1.1.0 诊断包配置：**方案里的账号也打码**（多账号一起脱敏）",
+      "2023999999" not in str(_masked) and "2023000001" not in str(_masked)
+      and "2023******" in str(_masked),
+      str(_masked.get("profiles")))
+check("v2.1.1.0 脱敏是深拷贝：**不污染内存里的实时配置**",
+      _sec_cfg["profiles"]["宿舍"]["values"]["account"] == "2023999999"
+      and _sec_cfg["account"] == "2023000001")
+check("v2.1.1.0 长的账号先替换（短账号不会把长账号截一半）",
+      _web_api_probe._mask_every_account("A=2023000001 B=202300000123",
+                                         ["2023000001", "202300000123"]).count("*") > 0
+      and "202300000123" not in _web_api_probe._mask_every_account(
+          "x 202300000123", ["2023000001", "202300000123"]))
+_sec_ignore = pathlib.Path(".gitignore").read_text(encoding="utf-8")
+check("v2.1.1.0 每个方案的密码文件都被 .gitignore 覆盖（一个都不能入库）",
+      "password.txt" in _sec_ignore and "password.*.txt" in _sec_ignore)
+_sec_saved = {k: getattr(_web_api_probe, k, None)
+              for k in ("_load_config", "_get_password", "_snapshot_state")}
+_web_api_probe._load_config = lambda: dict(_sec_cfg)
+_web_api_probe._get_password = lambda: "#Fake-Pwd-0000#"
+_web_api_probe._snapshot_state = lambda: {}
+try:
+    _sec_zip = _web_api_probe._build_diagnostics_zip()
+finally:
+    for _k, _v in _sec_saved.items():
+        if _v is not None:
+            setattr(_web_api_probe, _k, _v)
+with zipfile.ZipFile(io.BytesIO(_sec_zip)) as _zf:
+    _sec_names = _zf.namelist()
+    _sec_cfg_text = _zf.read("config.json").decode("utf-8")
+check("v2.1.1.0 诊断包里**没有任何密码文件**，密码原文也不在包内",
+      all("password" not in n for n in _sec_names)
+      and "#Fake-Pwd-0000#" not in _sec_zip.decode("utf-8", "replace"),
+      repr(_sec_names))
+check("v2.1.1.0 诊断包 config.json：两个账号都已脱敏",
+      "2023000001" not in _sec_cfg_text and "2023999999" not in _sec_cfg_text)
+
 # ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
 # P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的
 # 异常（HTTPError / URLError 包装 / socket 层错误）都会顺手把密码写进日志 ✗。

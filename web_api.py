@@ -759,10 +759,64 @@ def _mask_account(text, account):
     return text.replace(account, keep + "*" * max(4, len(account) - len(keep)))
 
 
-def _desensitize(text, account="", password=""):
-    """诊断包 / 日志展示前的脱敏（v2.0.12.0）。
+def _profile_accounts(cfg):
+    """收集配置里的**所有**账号：顶层 + 每个方案里存的（v2.1.1.0 多网络多账号 ✓）。
 
-    - 账号 → 「前 4 位 + ******」✓
+    为什么要单独收集（安全冗余 ✓）：方案里可能存着**跟顶层不一样**的账号 ——
+    只按顶层那一个做替换的话，方案里的账号会**原样进诊断包** ✗。
+    """
+    out = []
+    top = str((cfg or {}).get("account") or "").strip()
+    if top:
+        out.append(top)
+    profiles = (cfg or {}).get("profiles") or {}
+    if isinstance(profiles, dict):
+        for entry in profiles.values():
+            values = entry.get("values") if isinstance(entry, dict) else None
+            account = str((values or {}).get("account") or "").strip()
+            if account and account not in out:
+                out.append(account)
+    return out
+
+
+def _mask_every_account(text, accounts):
+    """把文本里出现的**每一个**账号都打码 ✓（**长的先替** ✗ —— 否则短账号会把长账号截一半 ✗）。"""
+    if not text:
+        return text
+    for account in sorted([str(a) for a in (accounts or []) if a], key=len, reverse=True):
+        text = _mask_account(text, account)
+    return text
+
+
+def _mask_cfg_accounts(cfg, accounts):
+    """诊断包专用：**深拷贝**配置并把所有账号打码（顶层 + 每个方案 ✓）。
+
+    必须是深拷贝 ✗ —— 直接改 `cfg` 会把内存里的实时配置也改坏 ✓（老代码只改了自己那份副本的顶层字段 ✓）。
+    """
+    out = dict(cfg or {})
+    if out.get("account"):
+        out["account"] = _mask_every_account(str(out["account"]), accounts)
+    profiles = out.get("profiles")
+    if isinstance(profiles, dict):
+        masked_profiles = {}
+        for name, entry in profiles.items():
+            if isinstance(entry, dict):
+                entry = dict(entry)
+                values = entry.get("values")
+                if isinstance(values, dict):
+                    values = dict(values)
+                    if values.get("account"):
+                        values["account"] = _mask_every_account(str(values["account"]), accounts)
+                    entry["values"] = values
+            masked_profiles[name] = entry
+        out["profiles"] = masked_profiles
+    return out
+
+
+def _desensitize(text, account="", password="", accounts=None):
+    """诊断包 / 日志展示前的脱敏（v2.0.12.0；v2.1.1.0 支持多账号 ✓）。
+
+    - 账号 → 「前 4 位 + ******」✓ —— `accounts` 里的**每一个**都替换 ✓
     - 密码 → `***`（正常情况下日志里不该有；这是**兜底**，且它永远不会被写进包 ✓）
     - MAC → 前 4 位 + `********` ✓
     - **IP 保留**：校园网内网地址（172.16.x.x 那类网关）是排障必需 ——
@@ -770,8 +824,8 @@ def _desensitize(text, account="", password=""):
     """
     if not text:
         return text
-    if account:
-        text = _mask_account(text, account)
+    every = [account] + list(accounts or [])
+    text = _mask_every_account(text, every)
     if password:
         text = text.replace(password, "***")
     return _MAC_RE.sub(lambda m: m.group(0)[:4] + "*" * (len(m.group(0)) - 4), text)
@@ -848,6 +902,9 @@ def _build_diagnostics_zip():
     except Exception:  # noqa: BLE001
         cfg = {}
     account = str(cfg.get("account") or "")
+    # v2.1.1.0（安全冗余 ✓）：方案里可能存着**别的**账号（多网络多账号 ✓）——
+    # 全部收集起来一起脱敏，免得方案里的账号原样进包 ✗。
+    accounts = _profile_accounts(cfg)
     password = ""
     try:
         password = _get_password() or ""   # 只为「万一被记进日志」兜底；它本身永不出现在包里
@@ -857,9 +914,7 @@ def _build_diagnostics_zip():
         snap = _snapshot_state()
     except Exception:  # noqa: BLE001
         snap = {}
-    masked_cfg = dict(cfg)
-    if account:
-        masked_cfg["account"] = _mask_account(account, account)
+    masked_cfg = _mask_cfg_accounts(cfg, accounts)
     summary = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "version": VERSION,
@@ -890,7 +945,7 @@ def _build_diagnostics_zip():
         zf.writestr("config.json", json.dumps(masked_cfg, ensure_ascii=False, indent=2))
         for name, path in _log_paths()[:DIAGNOSTIC_MAX_FILES]:
             zf.writestr("logs/{}".format(name),
-                        _desensitize(_diagnostic_read(path), account, password))
+                        _desensitize(_diagnostic_read(path), account, password, accounts))
     return buf.getvalue()
 
 
