@@ -1795,8 +1795,24 @@ check("v2.1.2.0 关于页：删掉「访问入口」、加上「更新」块与�
       and 'id="btn-about-check"' in _page
       and _pos('id="about-upd-result"') > _end_log)  # 确实落在关于面板里（不是别处）
 check("v2.1.2.0 配置页瘦身：主流程之外的都折起来（新建方案 / 网络位置守卫）",
-      _page.count('<details class="diag fold">') >= 3
+      _page.count('<details class="diag fold">') >= 2
       and 'id="guard-summary-hint"' in _page and 'class="fold-body field"' in _page)
+# —— 第二轮打磨（用户：「排版要重新设计」「动效要做」「关于里 Logo 也没打上去」）——
+check("v2.1.2.0 关于页用的是真品牌 Logo（取不到才回退内联星芒）",
+      'id="about-logo"' in _page and 'src="/branding/web-logo-64.png"' in _page
+      and "bindLogoFallback($('about-logo'), 40)" in _page)
+check("v2.1.2.0 关于页：结论条 + 三张数据牌 + 数据/维护两栏（不再是一列白卡堆到底）",
+      'id="about-upd-callout"' in _page and 'class="about-callout' in _page
+      and 'class="about-stats"' in _page and 'id="about-upd-latest"' in _page
+      and 'class="about-cols"' in _page)
+check("v2.1.2.0 动效层：统一缓动令牌 + 卡片进场 + 数值变化脉冲 + 折叠淡入",
+      "--ease: cubic-bezier" in _page and "--dur-3:" in _page
+      and "@keyframes cardIn" in _page and "@keyframes statePulse" in _page
+      and "@keyframes valueFlash" in _page and "@keyframes foldIn" in _page
+      and ".kpi-value.flash" in _page and "markValues();" in _page)
+check("v2.1.2.0 配置页不再为单个字段占一整张卡（管理页面端口并进「网络与服务端口」）",
+      'class="section-title">网络与服务端口' in _page
+      and 'id="cfg-ui-port"' in _page and ">Web UI<" not in _page)
 check("v2.1.2.0 密码徽标在主页也要能更新（不能只在 loadConfig 里刷）",
       "c.password_status" in _page and "setPwdBadge(c.password_status)" in _page)
 

@@ -2044,7 +2044,8 @@ a:hover { color: var(--accent-hover); }
 
 /* --- v2.1.2.0：表单类折叠（配置页「新建 / 覆盖方案」等）与两列表单 --- */
 .fold-body { margin-top: 12px; }
-.pw-grid { display: grid; gap: 0 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+/* 两列表单：固定两列 + 限宽（auto-fit 在宽屏会挤成三列，表格化表单反而更难读） */
+.pw-grid { display: grid; gap: 0 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 780px; }
 .pw-grid .field { margin-bottom: 16px; }
 .cfg-cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: start; }
 
@@ -2295,6 +2296,110 @@ code.path {
 .update-banner-link { font-size: 13px; font-weight: 500; }
 
 /* ============================================================
+   13. 动效与细节（v2.1.2.0 重做）—— 统一节奏，不再到处各写各的
+   ============================================================ */
+:root {
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --dur-1: 0.16s;   /* 悬停 / 按压 */
+  --dur-2: 0.28s;   /* 折叠 / 弹层 */
+  --dur-3: 0.42s;   /* 进场 */
+}
+
+/* —— 进场：切换标签页时，卡片依次浮起（错峰收得很紧，总时长 ≈0.35s，不拖沓） —— */
+@keyframes cardIn { from { opacity: 0; transform: translateY(12px) scale(0.996); } to { opacity: 1; transform: none; } }
+.panel.active .card { animation: cardIn var(--dur-2) var(--ease) backwards; }
+.panel.active .grid > .card:nth-child(1), .panel.active > .card:nth-child(1) { animation-delay: 0s; }
+.panel.active .grid > .card:nth-child(2), .panel.active > .card:nth-child(2) { animation-delay: 0.03s; }
+.panel.active .grid > .card:nth-child(3), .panel.active > .card:nth-child(3) { animation-delay: 0.06s; }
+.panel.active .grid > .card:nth-child(4), .panel.active > .card:nth-child(4) { animation-delay: 0.09s; }
+.panel.active .grid > .card:nth-child(5), .panel.active > .card:nth-child(5) { animation-delay: 0.12s; }
+.panel.active .grid > .card:nth-child(n+6) { animation-delay: 0.15s; }
+
+/* —— 状态变化：主状态卡脉冲一圈，让人看见「通了 / 断了」 —— */
+@keyframes statePulse {
+  0% { box-shadow: 0 0 0 0 rgba(107, 92, 255, 0.30), var(--shadow-2); }
+  70% { box-shadow: 0 0 0 16px rgba(107, 92, 255, 0), var(--shadow-2); }
+  100% { box-shadow: 0 0 0 0 rgba(107, 92, 255, 0), var(--shadow-2); }
+}
+/* 用 id 而不是纯类选择器：`.panel.active .card`（3 个类）会盖掉 `.lead-state.flash`，
+   那脉冲就永远播不出来（层叠优先级坑，实测过） */
+#card-online.flash, .lead-state.flash { animation: statePulse 0.95s var(--ease); }
+
+/* —— 数值变了就眨一下（不然盯着看不出它动过） —— */
+@keyframes valueFlash { 0% { color: var(--accent); transform: translateY(-1px); } 100% { color: inherit; transform: none; } }
+.kpi-value.flash { animation: valueFlash 0.7s ease; }
+
+/* —— 折叠：展开时内容淡入上浮（箭头旋转已有） —— */
+@keyframes foldIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+details[open] > .diag-body, details[open] > .fold-body { animation: foldIn var(--dur-2) var(--ease); }
+details.diag > summary:active .diag-caret { transform: scale(0.9); }
+
+/* —— 按钮：悬停抬起 + 按下回弹 + 键盘焦点环 —— */
+.btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 20px -8px rgba(40, 40, 80, 0.45); }
+.btn:active:not(:disabled) { transform: translateY(0) scale(0.975); }
+.btn:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+.btn-lg { padding: 12px 26px; font-size: 15px; }
+
+/* —— 卡片：悬停抬高一档（分层更明确） —— */
+.card:hover { transform: translateY(-2px); }
+
+/* —— 标签页：底色平滑 + 选中的图标弹一下 —— */
+.tab { transition: background-color var(--dur-1) ease, color var(--dur-1) ease, box-shadow var(--dur-1) ease; }
+@keyframes tabPop { 0% { transform: scale(0.85); } 60% { transform: scale(1.08); } 100% { transform: none; } }
+.tab[aria-selected="true"] svg { animation: tabPop 0.34s var(--ease); }
+
+/* —— 表单：聚焦环随主题色；配置页不再把输入框拉成 1000px 长条 —— */
+.card.section .field > input:not([type="checkbox"]):not([type="file"]),
+.card.section .field > select { max-width: 560px; }
+.card.section .field > input[type="number"] { max-width: 200px; }
+.pw-grid .field > input, .pw-grid .field > select { max-width: none; }
+.field input:focus-visible, .field select:focus-visible {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3.5px var(--accent-soft);
+}
+
+/* —— 表单尾部行：说明在左、按钮在右（不再是孤零零一个按钮） —— */
+.field-foot { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.field-foot > .hint { margin: 0; }
+
+/* —— 关于页：真 Logo + 两栏 + 结论条 —— */
+.about-mark {
+  width: 64px; height: 64px; flex: none; border-radius: var(--r-lg);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(160deg, #ffffff, #eef0ff);
+  border: 1px solid var(--hairline); box-shadow: var(--shadow-1), var(--highlight);
+  overflow: hidden;
+}
+.about-mark img { width: 40px; height: 40px; object-fit: contain; display: block; }
+.about-mark svg { color: var(--accent); }
+.about-hero { align-items: flex-start; }
+.about-cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
+.about-stats { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px; }
+.about-stat { padding: 12px 14px; border-radius: var(--r-md); background: var(--fill); border: 1px solid var(--hairline); }
+.about-stat-label { font-size: 12px; color: var(--text-2); }
+.about-stat-value { margin-top: 4px; font-size: 15px; font-weight: 600; color: var(--text-strong); word-break: break-word; }
+.about-callout {
+  display: flex; align-items: flex-start; gap: 9px;
+  padding: 12px 14px; border-radius: var(--r-md);
+  background: var(--accent-softer); border: 1px solid var(--accent-soft);
+  font-size: 13.5px; color: var(--text);
+}
+.about-callout.is-ok { background: var(--ok-fill); border-color: rgba(48, 209, 88, 0.35); }
+.about-callout.is-warn { background: var(--warn-fill); border-color: rgba(255, 159, 10, 0.40); }
+.about-callout.is-err { background: var(--err-fill); border-color: rgba(255, 69, 58, 0.40); }
+.about-callout svg { flex: none; margin-top: 1px; }
+.about-log-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.about-log-head .diag-hint { margin-left: auto; }
+
+/* 终端小窗：像个真终端 */
+.log-box.mini { height: auto; max-height: 260px; margin-top: 10px; font-size: 12px; position: relative; }
+
+/* 关于页头部：Logo | 名称 + 一句话 | 两张小牌（启动 / 运行时长），窄屏自动折行 */
+.about-hero { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 18px; align-items: center; }
+.about-hero-main { min-width: 0; }
+.about-hero-side { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(112px, auto)); }
+
+/* ============================================================
    12. 响应式（≤720px 平板；≤480px 手机）
    ============================================================ */
 @media (max-width: 720px) {
@@ -2477,7 +2582,10 @@ code.path {
           <div class="err" id="err-pwd" role="alert"></div>
         </div>
       </div>
-      <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
+      <div class="field-foot">
+        <span class="hint">保存后立即生效，无需重启服务。</span>
+        <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
+      </div>
     </div>
 
     <!-- 日常关心的几项：跟首屏同一屏内，不用滚 -->
@@ -2618,20 +2726,28 @@ code.path {
 
     <div class="card section">      
       <div class="section-head">
-        <h2 class="section-title">认证服务器</h2>
-        <p class="section-desc" style="margin:0;">校园网认证网关地址与端口。</p>
+        <h2 class="section-title">网络与服务端口</h2>
+        <p class="section-desc" style="margin:0;">校园网认证网关，以及本管理页面监听的端口（改端口后需重启服务生效）。</p>
       </div>
-      <div class="field">
-        <label for="cfg-host">认证服务器地址</label>
-        <input type="text" id="cfg-host" class="cfg-lg" placeholder="例如 172.16.80.3" autocomplete="off" spellcheck="false">
-        <div class="hint">认证网关的 IP 或域名</div>
-        <div class="err" id="err-host" role="alert"></div>
-      </div>
-      <div class="field">
-        <label for="cfg-port">认证端口</label>
-        <input type="number" id="cfg-port" class="cfg-lg" min="1" max="65535" step="1" inputmode="numeric">
-        <div class="hint">取值 1-65535，通常为 80</div>
-        <div class="err" id="err-port" role="alert"></div>
+      <div class="pw-grid">
+        <div class="field">
+          <label for="cfg-host">认证服务器地址</label>
+          <input type="text" id="cfg-host" class="cfg-lg" placeholder="例如 172.16.80.3" autocomplete="off" spellcheck="false">
+          <div class="hint">认证网关的 IP 或域名</div>
+          <div class="err" id="err-host" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-port">认证端口</label>
+          <input type="number" id="cfg-port" class="cfg-lg" min="1" max="65535" step="1" inputmode="numeric">
+          <div class="hint">取值 1-65535，通常为 80</div>
+          <div class="err" id="err-port" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-ui-port">管理页面监听端口</label>
+          <input type="number" id="cfg-ui-port" class="cfg-lg" min="1024" max="65535" step="1" inputmode="numeric">
+          <div class="hint">1024-65535，仅监听 127.0.0.1，默认 8848</div>
+          <div class="err" id="err-ui-port" role="alert"></div>
+        </div>
       </div>
     </div>
 
@@ -2744,18 +2860,8 @@ code.path {
       </div>
     </div>
 
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">Web UI</h2>
-        <p class="section-desc" style="margin:0;">管理页面本身的服务端口，修改后需重启服务生效。</p>
-      </div>
-      <div class="field">
-        <label for="cfg-ui-port">监听端口</label>
-        <input type="number" id="cfg-ui-port" class="cfg-lg" min="1024" max="65535" step="1" inputmode="numeric">
-        <div class="hint">取值 1024-65535，仅监听 127.0.0.1，默认 8848</div>
-        <div class="err" id="err-ui-port" role="alert"></div>
-      </div>
-    </div>
+    <!-- v2.1.2.0：「Web UI 监听端口」并进了上面的「网络与服务端口」——
+         为一个字段占一整张卡，是配置页变长的最大原因之一。 -->
 
     <div class="config-io-row">
       <button class="btn btn-secondary" id="btn-config-export" type="button">导出配置</button>
@@ -2821,15 +2927,18 @@ code.path {
   <section class="panel" id="panel-about" role="tabpanel" aria-labelledby="tab-about" tabindex="-1">
     <!-- v2.1.2.0：真正的「关于」—— 这是什么 / 哪个版本 / 怎么装的（安装方式后端自动识别） -->
     <div class="card section about-hero">
-      <span class="about-mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.2l1.9 6.1a2 2 0 0 0 1.3 1.3l6.1 1.9-6.1 1.9a2 2 0 0 0-1.3 1.3L12 20.8l-1.9-6.1a2 2 0 0 0-1.3-1.3L2.7 11.5l6.1-1.9a2 2 0 0 0 1.3-1.3L12 2.2z"/></svg></span>
-      <div>
+      <span class="about-mark" aria-hidden="true"><img id="about-logo" src="/branding/web-logo-64.png" alt=""></span>
+      <div class="about-hero-main">
         <div class="about-name">星尘闪连 <span class="about-ver" id="about-version">-</span></div>
         <p class="about-tagline">Dr.COM 校园网自动登录 · 全程本机运行，密码不出这台电脑</p>
         <p class="about-meta">
           <span class="badge badge-muted" id="about-mode-badge">识别安装方式…</span>
-          <span>启动于 <b id="about-started">-</b></span>
-          <span>已运行 <b id="about-uptime" class="mono">-</b></span>
+          <span id="about-mode-evidence"></span>
         </p>
+      </div>
+      <div class="about-hero-side">
+        <div class="about-stat"><div class="about-stat-label">启动于</div><div class="about-stat-value" id="about-started">-</div></div>
+        <div class="about-stat"><div class="about-stat-label">已运行</div><div class="about-stat-value mono" id="about-uptime">-</div></div>
       </div>
     </div>
 
@@ -2838,61 +2947,55 @@ code.path {
     <div class="card section">
       <div class="section-head">
         <h2 class="section-title">更新</h2>
-        <p class="section-desc" style="margin:0;">最近一次检查的结论与升级流水都在这一块；触发按钮和详细设置仍在「配置 → 自动化」里。</p>
+        <p class="section-desc" style="margin:0;">「我点了检查更新，结果呢？」—— 结论与升级流水都在这儿，不用再去翻日志；触发按钮与详细设置仍在「配置 → 自动化」。</p>
       </div>
-      <dl class="info">
-        <dt>当前版本</dt><dd id="about-upd-local" class="mono">-</dd>
-        <dt>最近一次检查</dt><dd id="about-upd-checked">尚未检查</dd>
-        <dt>结论</dt><dd id="about-upd-result">-</dd>
-      </dl>
+      <div class="about-stats">
+        <div class="about-stat"><div class="about-stat-label">当前版本</div><div class="about-stat-value mono" id="about-upd-local">-</div></div>
+        <div class="about-stat"><div class="about-stat-label">最近一次检查</div><div class="about-stat-value" id="about-upd-checked">尚未检查</div></div>
+        <div class="about-stat"><div class="about-stat-label">远端最新</div><div class="about-stat-value mono" id="about-upd-latest">-</div></div>
+      </div>
+      <div class="about-callout" id="about-upd-callout">
+        <span id="about-upd-icon" aria-hidden="true"></span>
+        <span id="about-upd-result">还没检查过 —— 点下面的「立即检查更新」。</span>
+      </div>
       <div class="btn-row" style="margin-top:14px;">
         <button class="btn btn-secondary" id="btn-about-check" type="button">立即检查更新</button>
         <button class="btn btn-secondary" id="btn-about-history" type="button">查看升级历史</button>
       </div>
-      <details class="diag fold" id="about-log-wrap">
-        <summary class="diag-summary">
-          <span>升级流水（logs/upgrade.log 尾部）</span>
-          <span class="diag-hint">检查 / 下载 / 安装每一步都在这</span>
-          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
-        </summary>
-        <div class="fold-body">
-          <button class="btn btn-secondary" id="btn-about-log-refresh" type="button">刷新</button>
-          <pre class="log-box mini" id="about-update-log">展开即读取…</pre>
-        </div>
-      </details>
-    </div>
-
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">数据与文件位置</h2>
+      <div class="about-log-head">
+        <span class="diag-hint" style="margin-left:0;">升级流水 · logs/upgrade.log 尾部</span>
+        <button class="btn btn-secondary" id="btn-about-log-refresh" type="button">刷新</button>
       </div>
-      <dl class="info">
-        <dt>配置文件</dt><dd id="about-config"><code class="path">-</code></dd>
-        <dt>日志文件</dt><dd id="about-log"><code class="path">-</code></dd>
-        <dt>数据目录</dt><dd id="about-data"><code class="path">-</code></dd>
-      </dl>
+      <pre class="log-box mini" id="about-update-log">正在读取…</pre>
     </div>
 
-    <!-- v2.1.2.0：管理操作折起来 —— 「关于」页不该一进来就是四个按钮；
-         而且卸载的说辞得按「怎么装的」给（安装包装的根本没有 uninstall.bat）。 -->
-    <details class="diag fold">
-      <summary class="diag-summary">
-        <span>服务与维护</span>
-        <span class="diag-hint">重启服务 / 卸载 / 升级历史 / 更新日志</span>
-        <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
-      </summary>
-      <div class="fold-body">
+    <div class="about-cols">
+      <div class="card section">
+        <div class="section-head">
+          <h2 class="section-title">数据与文件位置</h2>
+        </div>
+        <dl class="info">
+          <dt>配置文件</dt><dd id="about-config"><code class="path">-</code></dd>
+          <dt>日志文件</dt><dd id="about-log"><code class="path">-</code></dd>
+          <dt>数据目录</dt><dd id="about-data"><code class="path">-</code></dd>
+        </dl>
+      </div>
+
+      <!-- v2.1.2.0：管理操作不再是「一进来四个按钮」；卸载的说辞按识别出的安装方式给 -->
+      <div class="card section">
+        <div class="section-head">
+          <h2 class="section-title">服务与维护</h2>
+          <p class="section-desc" style="margin:0;">卸载的说法按上面识别出的安装方式给（安装包装的没有 uninstall.bat，源码部署的没有卸载器）。</p>
+        </div>
         <div class="btn-row">
           <button class="btn btn-secondary" id="btn-restart" type="button">重启服务</button>
           <button class="btn btn-danger" id="btn-uninstall" type="button">卸载服务</button>
-          <!-- v1.3 新增：升级历史按钮 -->
           <button class="btn btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
-          <!-- v2.0.0 新增：查看更新日志按钮 -->
           <button class="btn btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
         </div>
         <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
       </div>
-    </details>
+    </div>
   </section>
 </main>
 
@@ -3304,9 +3407,34 @@ code.path {
     text($('kpi-next-sub'), '剩余 ' + left + ' 秒 · 预计 ' + fmtTimeOnly(countdownAt) + ' 执行');
   }
 
+  /* v2.1.2.0 动效：数值/状态变了就眨一下 —— 每 3 秒轮询一次，光盯着数字很难发现变化。
+     只在「文本真的变了」时触发；倒计时（kpi-next）刻意排除，否则每秒都在闪。 */
+  var _lastSeen = {};
+  var _FLASH_IDS = ['kpi-online-text', 'kpi-net-text', 'kpi-latency', 'kpi-account', 'kpi-uptime', 'kpi-error'];
+
+  function markValues() {
+    _FLASH_IDS.forEach(function (id) {
+      var el = $(id);
+      if (!el) return;
+      var v = el.textContent;
+      if (_lastSeen[id] !== undefined && _lastSeen[id] !== v) {
+        var box = el.closest ? (el.closest('.kpi-value') || el) : el;
+        box.classList.remove('flash');
+        void box.offsetWidth;            /* 强制重排，动画才能重播 */
+        box.classList.add('flash');
+        if (id === 'kpi-online-text') {
+          /* 登录状态变了：让首屏那张主卡也脉冲一圈（「通了 / 断了」要有存在感） */
+          var card = $('card-online');
+          if (card) { card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash'); }
+        }
+      }
+      _lastSeen[id] = v;
+    });
+  }
+
   function pollStatus() {
     if (document.hidden) return;
-    API.status().then(renderStatus).catch(function () {
+    API.status().then(function (s) { renderStatus(s); markValues(); }).catch(function () {
       setLiveness('unknown', '服务无响应', true);
     });
   }
@@ -3692,36 +3820,54 @@ code.path {
     installInfo = info;
     var badge = $('about-mode-badge');
     if (badge) text(badge, INSTALL_MODE_TEXT[info.mode] || INSTALL_MODE_TEXT.unknown);
+    var ev = $('about-mode-evidence');
+    if (ev) text(ev, info.evidence && info.evidence.length ? '判据：' + info.evidence.join('；') : '');
   }
 
-  /* 「我点了检查更新，结果呢？」—— 有进行中的状态就复用状态横幅那套文案（单一来源），
-     否则用 last_check_at / latest_version / last_error 直接给结论。 */
+  /* 「我点了检查更新，结果呢？」—— 结论用一条带色的结论条表示：
+     进行中复用状态横幅那套文案（单一来源），空闲时按 last_check_at / latest_version /
+     last_error 直接给结论；三种色调分别对应「好 / 谨慎 / 出错」。 */
   function renderAboutUpdate() {
     var localEl = $('about-upd-local');
     var atEl = $('about-upd-checked');
+    var latestEl = $('about-upd-latest');
     var resEl = $('about-upd-result');
-    if (!localEl || !atEl || !resEl) return;
+    var callout = $('about-upd-callout');
+    var icon = $('about-upd-icon');
+    if (!localEl || !resEl) return;
+
+    function show(kind, svg, msg) {
+      if (callout) callout.className = 'about-callout' + (kind ? ' is-' + kind : '');
+      if (icon) icon.innerHTML = svg || '';
+      text(resEl, msg);
+    }
+
     return getUpdateJson('/api/update/status').then(function (r) {
-      if (!r || typeof r !== 'object') { text(resEl, '读取失败'); return; }
+      if (!r || typeof r !== 'object') { show('err', _ICO.cross, '读取失败（服务没响应？）'); return; }
       updateStateCache = r;
       text(localEl, 'v' + (r.local_version || '-'));
+      text(latestEl, r.latest_version ? 'v' + r.latest_version : '未知');
       text(atEl, r.last_check_at ? fmtIso(r.last_check_at) : '尚未检查');
       if (r.state) {
         renderUpdateBanner(r);
         var t = $('update-banner-title');
         var d = $('update-banner-desc');
-        text(resEl, (t ? t.textContent : '') + (d && d.textContent ? '：' + d.textContent : ''));
+        var kind = r.state === 'downloading' ? 'warn'
+          : (r.state === 'upgrading' || r.state === 'error') ? 'err'
+            : r.state === 'success' ? 'ok' : '';
+        show(kind, r.state === 'success' ? _ICO.check : _ICO.gear,
+             (t ? t.textContent : '') + (d && d.textContent ? '：' + d.textContent : ''));
       } else if (r.last_error) {
-        text(resEl, '上次检查失败：' + r.last_error);
+        show('err', _ICO.warn, '上次检查失败：' + r.last_error);
       } else if (r.update_available) {
-        text(resEl, '发现新版本 v' + (r.latest_version || '?') + '（当前 v' + (r.local_version || '?') +
-                    '）—— 可到「配置 → 自动化」点「立即升级」');
+        show('warn', _ICO.down, '发现新版本 v' + (r.latest_version || '?') + '（当前 v' +
+             (r.local_version || '?') + '）—— 到「配置 → 自动化」点「立即升级」');
       } else if (r.last_check_at) {
-        text(resEl, '已是最新' + (r.latest_version ? '（远端 v' + r.latest_version + '）' : ''));
+        show('ok', _ICO.check, '已是最新' + (r.latest_version ? '（远端 v' + r.latest_version + '）' : ''));
       } else {
-        text(resEl, '还没检查过 —— 点上面的「立即检查更新」');
+        show('', _ICO.search, '还没检查过 —— 点下面的「立即检查更新」。');
       }
-    }).catch(function () { text(resEl, '读取失败'); });
+    }).catch(function () { show('err', _ICO.cross, '读取失败（服务没响应？）'); });
   }
 
   /* 升流小窗：upgrade.log 尾部若干行，省得用户自己去翻文件 */
@@ -3749,8 +3895,6 @@ code.path {
     if (btnHistory) btnHistory.addEventListener('click', openUpdateHistoryModal);
     var btnLog = $('btn-about-log-refresh');
     if (btnLog) btnLog.addEventListener('click', loadAboutLog);
-    var wrap = $('about-log-wrap');
-    if (wrap) wrap.addEventListener('toggle', function () { if (wrap.open) loadAboutLog(); });
   }
 
   function bindAbout() {
@@ -3810,17 +3954,26 @@ code.path {
     });
   }
 
-  /* 品牌 logo 兜底：/branding/* 取不到（手工拷贝文件等）时改用内联星芒标记，避免顶栏破图 */
-  function bindBrand() {
-    var img = $('brand-logo');
+  var _LOGO_STAR = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
+    + '<path d="M12 2.2l1.9 6.1a2 2 0 0 0 1.3 1.3l6.1 1.9-6.1 1.9a2 2 0 0 0-1.3 1.3L12 20.8l-1.9-6.1a2 2 0 0 0-1.3-1.3L2.7 11.5l6.1-1.9a2 2 0 0 0 1.3-1.3L12 2.2z"/></svg>';
+
+  /* 品牌图兜底：/branding/* 取不到（手工拷贝文件等）时改用内联星芒标记，避免破图。
+     顶栏与「关于」页共用（关于页的图更大，按尺寸换一份 SVG）。 */
+  function bindLogoFallback(img, size) {
     if (!img || !img.addEventListener) return;
     img.addEventListener('error', function () {
       var mark = img.parentNode;
       if (!mark) return;
       mark.style.color = 'var(--accent)';
-      mark.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">'
-        + '<path d="M12 2.2l1.9 6.1a2 2 0 0 0 1.3 1.3l6.1 1.9-6.1 1.9a2 2 0 0 0-1.3 1.3L12 20.8l-1.9-6.1a2 2 0 0 0-1.3-1.3L2.7 11.5l6.1-1.9a2 2 0 0 0 1.3-1.3L12 2.2z"/></svg>';
+      mark.innerHTML = size >= 32
+        ? _LOGO_STAR.replace('width="20" height="20"', 'width="30" height="30"')
+        : _LOGO_STAR;
     }, { once: true });
+  }
+
+  function bindBrand() {
+    bindLogoFallback($('brand-logo'), 20);
+    bindLogoFallback($('about-logo'), 40);
   }
 
   function boot() {
@@ -3839,6 +3992,7 @@ code.path {
     startUpdatePolling();
     loadAbout();
     renderAboutUpdate();   /* 启动就把「更新」块的结论填上，切到「关于」不该先看到一排「-」 */
+    loadAboutLog();        /* 升流小窗也一起读，省得用户点一下才看见内容 */
     /* v2.1.2.0：密码徽标现在挂在主页那张「账户与登录密码」卡上，
        不能等用户点开「配置」页才更新（以前只在 loadConfig 里刷）。 */
     API.config().then(function (c) {
