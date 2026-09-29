@@ -21,7 +21,8 @@
 </p>
 
 <p align="center">
-  🛠 <b>3.0 跨平台版（DEV 线）正在开发中</b>：Rust + Slint，Windows / Linux / macOS 同源 →
+  🛠 <b>3.0 跨平台版（DEV 线）正在开发中</b>：Rust + Slint，Windows / Linux / macOS 同源 ·
+  已完成 M0–M2（界面 / 设置窗口 / 方案页 / 单实例 / 自启），M3 收尾中 →
   <a href="#开发中30-跨平台版dev-线">看进展</a>
 </p>
 
@@ -110,7 +111,7 @@
 | 版本线 | 版本 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | **2.x（稳定线）** | `v2.1.0.0 "Vega"`（织女星，2026-09-28） | 🟢 积极维护 | **你现在用的这条**：Windows 10/11 —— [Release](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/latest) 与自动升级通道都以它为准 ✓ |
-| **3.0（DEV 线）** | `3.0.0.0-preview.1` | 🚧 开发中（**仅预览**） | 跨平台重写（Rust + Slint：Windows / Linux / macOS 同源）；只发预览版，**正式用户的自动升级收不到它** ✓ → [看进展](#开发中30-跨平台版dev-线) |
+| **3.0（DEV 线）** | `3.0.0.0-preview.1` | 🚧 开发中（**仅预览**，M3 收尾中） | **跨平台重写：Rust 核心 + Slint 原生界面**，Windows / Linux / macOS 同源 ✓。已完成 M0–M2（命令行 12 个子命令、主窗口 / 设置窗口 / **配置方案页**、单实例、开机自启、门户检测）+ M3 的**服务化**与**打包地基**；**184 项测试、三平台 CI 全绿** ✓。只发预览版 —— **正式用户的自动升级收不到它** ✓ → [看进展](#开发中30-跨平台版dev-线) |
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -131,7 +132,7 @@
 | 目标平台 | Windows 10/11 · Linux（x86_64 / aarch64 / **armv7**，含树莓派）· macOS（Intel / Apple Silicon） |
 | 技术选型 | **Rust 核心 + Slint 原生界面**：零 WebView、零运行时解释器、单文件可执行 |
 | 兼容性 | `config.json` / `password.txt` 格式与 API 路径**与 2.x 保持一致** ✓（老用户零迁移 ✓） |
-| 已经能干什么 | 命令行 `version` / `status` / `selfcheck` / `login` / `run` / `profile` / `diagnostics` / `serve` / `portal` / `autostart`；桌面界面：主窗口 + **设置窗口** + **配置方案页**（按 Wi-Fi 自动切）+ 单实例 |
+| 已经能干什么 | 命令行：`version` / `status` / `selfcheck` / `login` / `run` / `profile` / `diagnostics` / `serve` / `portal`（门户检测）/ `autostart`（开机自启）/ `service`（常驻服务）/ `checksum`（SHA-256）/ `package-files`（打包）；桌面界面：主窗口 + **设置窗口** + **配置方案页**（按 Wi-Fi 自动切）+ 单实例 |
 | 状态 | 🚧 **开发中，只发预览版** —— 通道是 `prerelease`，**正式用户的自动升级收不到它** ✓；暂时别当日常主力 ✗ |
 | 看进展 | 分支上的 [`docs/PLATFORMS.md`](https://github.com/TSS-Small-sunshine/StardustFlashLink/blob/dev/3.0-altair/docs/PLATFORMS.md)（路线图 / 平台矩阵 / 实测情报）、[`desktop/README.md`](https://github.com/TSS-Small-sunshine/StardustFlashLink/blob/dev/3.0-altair/desktop/README.md)（怎么跑起来） |
 
