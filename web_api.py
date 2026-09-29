@@ -1565,6 +1565,11 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 :root {
   color-scheme: light;
 
+  /* —— 间距（四轮：统一节奏，别再各处 14/16/18/20 随手写）—— */
+  --pad-card: 20px;    /* 卡片内边距：所有卡片一致，左右文字边界才对得齐 */
+  --gap-card: 14px;    /* 卡片之间、卡片内大块之间 */
+  --gap-field: 16px;   /* 表单字段之间 */
+
   /* —— 字体（三轮：统一到 MiSans）——
      小米 MiSans 已装就直接用（Windows 上双击 MiSans-Regular.otf 安装即可，本机已装）；
      没装就退回系统字体栈 —— 绝不出现缺字方框，也不挑系统 / 语言。
@@ -1935,30 +1940,9 @@ a:hover { color: var(--accent-hover); }
 .tab:focus-visible, .icon-btn:focus-visible, .btn:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
 
 /* ============================================================
-   5. 顶部说明条（玻璃 notes bar）
+   5. （原「顶部说明条」已删：那是给开发者 / 维护者看的信息，不该占用户首屏一行 ——
+      其中的隐私事实仍写在 README 与「关于」页的「数据与文件位置」里）
    ============================================================ */
-.hint-strip {
-  display: flex; align-items: center; gap: 10px;
-  margin: 20px auto 18px; padding: 11px 16px; max-width: 1080px;
-  background: var(--material-2); border: 1px solid var(--hairline);
-  border-radius: var(--r-md); color: var(--text-2);
-  font-size: 13px;
-  box-shadow: var(--highlight), var(--shadow-1);
-  backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
-  position: relative; z-index: 1;
-  animation: riseIn 0.32s cubic-bezier(0.32, 0.72, 0, 1);
-}
-.hint-strip-icon { display: inline-flex; color: var(--text-3); flex: none; }
-.hint-strip-text { color: var(--text-2); flex: 1 1 auto; min-width: 0; }
-.hint-strip-link {
-  display: inline-flex; align-items: center; gap: 3px; flex: none;
-  color: var(--accent); font-weight: 500; white-space: nowrap;
-  padding: 4px 10px; border-radius: var(--r-pill);
-  background: var(--accent-softer);
-  transition: background-color 0.18s;
-}
-.hint-strip-link:hover { background: var(--accent-soft); }
-@keyframes riseIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
 
 /* ============================================================
    6. 面板 / 卡片 / KPI
@@ -1970,14 +1954,14 @@ a:hover { color: var(--accent-hover); }
 }
 @keyframes panelFadeIn { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: none; } }
 
-.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); }
+.grid { display: grid; gap: var(--gap-card); grid-template-columns: repeat(auto-fit, minmax(212px, 1fr)); }
 .card {
   background: var(--material);
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-1), var(--highlight);
   backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
-  padding: 20px;
+  padding: var(--pad-card);
   transition: box-shadow 0.22s ease, transform 0.22s ease, border-color 0.22s ease;
 }
 .card:hover { box-shadow: var(--shadow-2), var(--highlight); transform: translateY(-1px); }
@@ -2012,7 +1996,7 @@ a:hover { color: var(--accent-hover); }
 /* v2.1.2.0 二轮：状态 + 动作合并成一张卡（原来左边一张空卡、右边飘着一个巨大按钮） */
 .status-hero {
   display: flex; align-items: center; justify-content: space-between; gap: 20px 28px; flex-wrap: wrap;
-  padding: 20px 24px; margin-top: 14px; box-shadow: var(--shadow-2), var(--highlight);
+  padding: var(--pad-card); margin-top: var(--gap-card); box-shadow: var(--shadow-2), var(--highlight);
 }
 .status-hero-main { min-width: 0; }
 .status-kicker { font-size: 11.5px; font-weight: 600; letter-spacing: 0.07em; color: var(--text-3); }
@@ -2031,11 +2015,11 @@ a:hover { color: var(--accent-hover); }
 /* 日常统计条：5 格挤在一张卡里，格间一条竖线（原来 5 张卡排成一面卡墙） */
 .stat-strip {
   display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
-  margin-top: 14px; padding: 0; overflow: hidden;
+  margin-top: var(--gap-card); padding: 0; overflow: hidden;
 }
 /* 诊断指标条（三轮）：4 格 —— 诊断详情不折叠了，直接跟上面那条并排显示 */
 .stat-strip-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.stat-cell { padding: 15px 18px; border-left: 1px solid var(--hairline); min-width: 0; }
+.stat-cell { padding: 15px var(--pad-card); border-left: 1px solid var(--hairline); min-width: 0; }
 .stat-cell:first-child { border-left: none; }
 .stat-label { font-size: 12px; color: var(--text-2); }
 .stat-value {
@@ -2072,8 +2056,8 @@ a:hover { color: var(--accent-hover); }
    （三轮收敛：只剩一行三列 —— 配置页「网络与服务端口」、关于页「升级设置」。
      账号密码那些字段在状态页右栏（约 430px 宽）里竖排，所以不需要四列版。）
      为什么不用 auto-fit：它在宽屏会挤出第 5、6 条空轨，用显式列数 + 媒体查询递减更可控。 */
-.pw-row { display: grid; gap: 0 18px; }
-.pw-row > .field { margin-bottom: 16px; min-width: 0; }
+.pw-row { display: grid; gap: 0 var(--gap-field); }
+.pw-row > .field { margin-bottom: var(--gap-field); min-width: 0; }
 .pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 /* 行内每格只有 200-350px，不再需要「输入框最长 560px」那条限宽 */
 .pw-row .field > input, .pw-row .field > select { max-width: none; }
@@ -2116,6 +2100,9 @@ a:hover { color: var(--accent-hover); }
 .btn-danger { background: var(--fill); color: var(--err); border-color: var(--hairline); box-shadow: var(--highlight); }
 .btn-danger:hover:not(:disabled) { background: var(--err-fill); color: var(--err); border-color: rgba(255, 69, 58, 0.35); }
 .btn-lg { padding: 13px 32px; font-size: 15px; font-weight: 500; min-width: 190px; border-radius: var(--r-pill); }
+/* 小尺寸按钮（四轮加）：给「服务与维护」这种角落里的次要操作——窄栏里四个默认尺寸按钮
+   会占掉两行、看着比标题还重，缩一档就只占一行多，主次也更清楚 */
+.btn-sm { padding: 7px 14px; font-size: 13px; gap: 5px; }
 .btn-spinner {
   display: none; width: 14px; height: 14px; border-radius: 50%;
   border: 2px solid rgba(255, 255, 255, 0.45); border-top-color: #fff;
@@ -2124,11 +2111,11 @@ a:hover { color: var(--accent-hover); }
 .btn.loading .btn-spinner { display: inline-block; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.section { margin-bottom: 14px; }
-.section-head { margin-bottom: 16px; }
+.section { margin-bottom: var(--gap-card); }
+.section-head { margin-bottom: var(--gap-field); }
 .section-title { font-size: 17px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .section-desc { font-size: 13px; color: var(--text-2); margin-top: 5px; line-height: 1.5; }
-.field { position: relative; margin-bottom: 18px; }
+.field { position: relative; margin-bottom: var(--gap-field); }
 .field:last-child { margin-bottom: 0; }
 .field > label:not(.switch) { display: block; font-size: 13px; font-weight: 500; margin-bottom: 7px; color: var(--text-2); }
 .field input[type=text], .field input[type=number], .field input[type=password],
@@ -2236,13 +2223,24 @@ a:hover { color: var(--accent-hover); }
 /* ============================================================
    9. 关于面板
    ============================================================ */
-.info { display: grid; grid-template-columns: 132px 1fr; gap: 12px 20px; font-size: 14px; margin: 0; }
+.info { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px var(--gap-field); font-size: 14px; margin: 0; }
 .info dt { color: var(--text-2); }
 .info dd { margin: 0; word-break: break-all; color: var(--text); }
+/* 路径块（四轮修）：以前是 inline 的小药丸，长路径会在中间断成两截「半个圆角框」；
+   改成块级容器，长路径在同一个圆角块里换行。
+   换行点也只给在目录分隔符之后（见 code.path .seg）——不会再断出「config.js / on」
+   这种半截文件名。 */
 code.path {
+  display: block;
   background: var(--fill); border: 1px solid var(--hairline); border-radius: var(--r-xs);
-  padding: 3px 9px; font-size: 12.5px; color: var(--text-2);
+  padding: 5px 10px; font-size: 12.5px; color: var(--text-2);
+  line-height: 1.5;
 }
+/* 每一段（含末尾的 \ 或 /）是一个 inline-block：段内不折行，只允许在段边界换行；
+   万一某一段本身比容器还长，才退化成段内断字（不会溢出卡片）。
+   注意：这里不能用 overflow-wrap: anywhere / break-word 写在 code.path 上 ——
+   实测它会让浏览器抢在段边界之前把路径从中间劈开。 */
+code.path .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; vertical-align: top; }
 .link-row { display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* ============================================================
@@ -2404,7 +2402,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 .about-mark img { width: 40px; height: 40px; object-fit: contain; display: block; }
 .about-mark svg { color: var(--accent); }
 .about-hero { align-items: flex-start; }
-.about-cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
+.about-cols { display: grid; gap: var(--gap-card); grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); align-items: start; }
 .about-stats { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px; }
 .about-stat { padding: 12px 14px; border-radius: var(--r-md); background: var(--fill); border: 1px solid var(--hairline); }
 .about-stat-label { font-size: 12px; color: var(--text-2); }
@@ -2432,15 +2430,15 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 
 /* —— 页面两栏布局（配置页与状态页共用）：左主右辅，窄屏塌成一栏 ——
    用户要的「左右放」= 像配置页那样把**卡片**分两栏，而不是把表单字段排成一行。 */
-.page-cols { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: start; }
-.page-col { display: grid; gap: 14px; align-content: start; min-width: 0; }
+.page-cols { display: grid; gap: var(--gap-card); grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: start; }
+.page-col { display: grid; gap: var(--gap-card); align-content: start; min-width: 0; }
 /* 列内用 gap 排版，卡片自己的 margin-bottom / margin-top 会变成双倍间距 */
 .page-col > .card.section, .page-col > details, .page-col > .card { margin-bottom: 0; }
 .page-col > .status-hero, .page-col > .stat-strip { margin-top: 0; }
 @media (max-width: 980px) { .page-cols { grid-template-columns: minmax(0, 1fr); } }
 
 /* —— 日志页：终端窗口（顶栏一行放标题与实时状态） —— */
-.log-window { padding: 14px 16px 16px; }
+.log-window { padding: var(--pad-card); }
 .log-window-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
 .log-dots { display: inline-flex; gap: 5px; flex: none; }
 .log-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--track); }
@@ -2448,7 +2446,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 .log-dots i:nth-child(2) { background: #febc2e; }
 .log-dots i:nth-child(3) { background: #28c840; }
 .log-window-title { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
-.log-diag-cols { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.log-diag-cols { display: grid; gap: var(--gap-card); grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
 
 /* ============================================================
    12. 响应式（≤720px 平板；≤480px 手机）
@@ -2457,7 +2455,6 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   .wrap { padding: 16px 18px 56px; }
   .topbar-inner { padding: 12px 18px 8px; }
   .topbar-nav { padding: 0 18px 10px; }
-  .hint-strip { margin: 16px 18px 14px; padding: 10px 14px; font-size: 12.5px; flex-wrap: wrap; }
   .grid { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; }
   .brand-name { font-size: 15px; }
   .kpi { min-height: 104px; }
@@ -2486,7 +2483,6 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   .wrap { padding: 14px 14px 48px; }
   .topbar-inner { padding: 10px 14px 8px; }
   .topbar-nav { padding: 0 14px 10px; }
-  .hint-strip { margin: 14px 14px 12px; font-size: 12px; padding: 9px 12px; }
   .grid { grid-template-columns: 1fr; gap: 12px; }
   .kpi { min-height: 92px; padding: 16px; }
   .kpi-value { font-size: 21px; }
@@ -2558,12 +2554,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   </div>
 </header>
 
-<div class="hint-strip" role="note">
-  <span class="hint-strip-icon" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.6" y="10.2" width="14.8" height="10.2" rx="3.2"/><path d="M8.6 10.2V7.9a3.4 3.4 0 0 1 6.8 0v2.3"/></svg></span>
-  <span class="hint-strip-text">本服务仅监听 127.0.0.1，所有数据保存在本机；密码仅保存到 password.txt。</span>
-  <a class="hint-strip-link" href="https://github.com/TSS-Small-sunshine/StardustFlashLink" target="_blank" rel="noopener noreferrer">查看源码 →</a>
-</div>
-
+<!-- v2.1.2.0 四轮：顶部那条说明条已删（那是给开发者 / 维护者看的，不该占用户首屏一行） -->
 <main class="wrap" id="main">
 
   <!-- v2.1.2.0：首屏不再放「品牌大标题」（与顶栏重复、白占位置），
@@ -2675,9 +2666,6 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <div class="stat-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
       </div>
     </div>
-    <p class="hint" style="margin:8px 2px 0;">
-      诊断指标（近 7 天）· 数字取自 <span class="mono">logs/campus_login.log</span>：每个检查周期都留下了走向，不另存状态文件（重启不清零、升级不丢）。
-    </p>
     </div><!-- /page-col -->
 
     <!-- 右栏：账户与登录密码。三轮从「立即登录」下面挪进右栏（字段竖排 —— 这里约 430px 宽，
@@ -2686,7 +2674,6 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       <div class="card section" id="card-password">
         <div class="section-head">
           <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
-          <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
         </div>
         <div class="field">
           <label for="cfg-account">账号</label>
@@ -2973,8 +2960,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <div class="about-name">星尘闪连 <span class="about-ver" id="about-version">-</span></div>
         <p class="about-tagline">Dr.COM 校园网自动登录 · 全程本机运行，密码不出这台电脑</p>
         <p class="about-meta">
-          <span class="badge badge-muted" id="about-mode-badge">识别安装方式…</span>
-          <span id="about-mode-evidence"></span>
+          <span class="badge badge-muted" id="about-mode-badge" title="">识别安装方式…</span>
         </p>
       </div>
       <div class="about-hero-side">
@@ -3082,10 +3068,10 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           <p class="section-desc" style="margin:0;">卸载的说法按上面识别出的安装方式给（安装包装的没有 uninstall.bat，源码部署的没有卸载器）。</p>
         </div>
         <div class="btn-row">
-          <button class="btn btn-secondary" id="btn-restart" type="button">重启服务</button>
-          <button class="btn btn-danger" id="btn-uninstall" type="button">卸载服务</button>
-          <button class="btn btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
-          <button class="btn btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
+          <button class="btn btn-sm btn-secondary" id="btn-restart" type="button">重启服务</button>
+          <button class="btn btn-sm btn-danger" id="btn-uninstall" type="button">卸载服务</button>
+          <button class="btn btn-sm btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
+          <button class="btn btn-sm btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
         </div>
         <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
       </div>
@@ -3237,6 +3223,18 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   }
 
   function text(el, v) { if (el) el.textContent = v; }
+
+  /* 路径渲染（四轮修）：长路径以前在窄卡片里会被硬断出「…\config.js / on」这种
+     半截文件名。现在把每一段（含末尾分隔符）包成 inline-block、只在分隔符之后换行；
+     段本身超长时才退化成段内断字。这些都是元素，复制出来的仍是干净的整条路径。 */
+  function pathHtml(p) {
+    var parts = esc(p).split(/([\\/])/);
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+      html += '<span class="seg">' + parts[i] + '</span>' + (i % 2 ? '<wbr>' : '');
+    }
+    return '<code class="path">' + html + '</code>';
+  }
 
   function fmtIso(iso) {
     if (!iso) return '-';
@@ -3894,15 +3892,15 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       uptimeBase = { sec: Number(r.service_uptime_sec) || 0, at: Date.now() };
       text($('about-uptime'), fmtDuration(uptimeBase.sec));
       if (r.install && r.install.mode) renderInstallMode(r.install);
-      if (r.config_file) $('about-config').innerHTML = '<code class="path">' + esc(r.config_file) + '</code>';
-      if (r.data_dir) $('about-data').innerHTML = '<code class="path">' + esc(r.data_dir) + '</code>';
-      if (r.log_file) $('about-log').innerHTML = '<code class="path">' + esc(r.log_file) + '</code>';
+      if (r.config_file) $('about-config').innerHTML = pathHtml(r.config_file);
+      if (r.data_dir) $('about-data').innerHTML = pathHtml(r.data_dir);
+      if (r.log_file) $('about-log').innerHTML = pathHtml(r.log_file);
     }).catch(function () {
       text($('about-version'), '读取失败');
     }).then(function () {
       /* /api/log_file_path 提供日志文件的绝对路径，作为权威来源优先展示 */
       return API.logPath().then(function (p) {
-        if (p && p.path) $('about-log').innerHTML = '<code class="path">' + esc(p.path) + '</code>';
+        if (p && p.path) $('about-log').innerHTML = pathHtml(p.path);
       }).catch(function () { /* 关于信息已由 /api/about 兜底 */ });
     });
   }
@@ -3919,8 +3917,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     installInfo = info;
     var badge = $('about-mode-badge');
     if (badge) text(badge, INSTALL_MODE_TEXT[info.mode] || INSTALL_MODE_TEXT.unknown);
-    var ev = $('about-mode-evidence');
-    if (ev) text(ev, info.evidence && info.evidence.length ? '判据：' + info.evidence.join('；') : '');
+    /* v2.1.2.0 四轮：判据不上屏（用户：这类说明是给我看的，不该出现在界面）——
+       改成徽标的悬停提示，鼠标停上去仍能核对；判据本身照旧由 _detect_install_mode()
+       返回、由断言盯着，功能一点没少。 */
+    if (badge && info.evidence && info.evidence.length) {
+      badge.setAttribute('title', '判据：' + info.evidence.join('；'));
+    }
   }
 
   /* 「我点了检查更新，结果呢？」—— 结论用一条带色的结论条表示：

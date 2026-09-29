@@ -1851,7 +1851,33 @@ check("v2.1.2.0 配置页瘦身：主流程之外的都折起来（新建方案 
       _page.count('<details class="diag fold">') >= 2
       and 'id="guard-summary-hint"' in _page and 'class="fold-body field"' in _page)
 
-# —— 第三轮之二（用户：「改成左右排版」「配置里和更新相关的不该移到关于吗」）——
+# —— 第四轮（用户：删掉那几条说明性文案 + 顶部提示条；修长路径换行与全局间距）——
+check("v2.1.2.0 顶部说明条整条已删（连同样式与那条空转的进场动画）",
+      'class="hint-strip"' not in _page and ".hint-strip {" not in _page
+      and "本服务仅监听" not in _page and "查看源码" not in _page
+      and "@keyframes riseIn" not in _page and "animation: riseIn" not in _page)
+check("v2.1.2.0 三条「说明性文案」不上屏（诊断脚注 / 凭据说明 / 安装判据）",
+      "不另存状态文件" not in _page and "完整凭据" not in _page
+      and "about-mode-evidence" not in _page
+      and "badge.setAttribute('title', '判据：'" in _page)   # 判据改悬停提示，信息没丢
+check("v2.1.2.0 次要操作不再用主按钮尺寸：「服务与维护」四键缩成 btn-sm（窄栏里少占一行）",
+      ".btn-sm { padding: 7px 14px; font-size: 13px; gap: 5px; }" in _page
+      and 'class="btn btn-sm btn-secondary" id="btn-restart"' in _page
+      and 'class="btn btn-sm btn-danger" id="btn-uninstall"' in _page
+      and 'class="btn btn-sm btn-secondary" id="btn-update-history"' in _page
+      and 'class="btn btn-sm btn-secondary" id="btn-changelog"' in _page)
+check("v2.1.2.0 间距收口成三个令牌（卡片内距 / 卡片间距 / 字段间距），不再各处随手写",
+      "--pad-card: 20px;" in _page and "--gap-card: 14px;" in _page and "--gap-field: 16px;" in _page
+      and "  padding: var(--pad-card);" in _page
+      and ".page-col { display: grid; gap: var(--gap-card);" in _page
+      and ".field { position: relative; margin-bottom: var(--gap-field); }" in _page
+      and ".stat-cell { padding: 15px var(--pad-card);" in _page)
+check("v2.1.2.0 长路径只在目录分隔符后换行（不再断成「半个圆角框」/ 半截文件名）",
+      "code.path {\n  display: block;" in _page
+      and "code.path .seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere;" in _page
+      and "function pathHtml(p) {" in _page and "split(/([\\\\/])/)" in _page
+      and '<span class="seg">' in _page
+      and "grid-template-columns: 84px minmax(0, 1fr);" in _page)
 check("v2.1.2.0 升级相关整块搬进「关于 → 更新」（配置页不再出现任何升级字段 / 按钮）",
       _pos('id="cfg-auto-update-enabled"') > _end_log and _pos('id="cfg-update-interval"') > _end_log
       and _pos('id="cfg-update-disk"') > _end_log and _pos('id="rollback-version"') > _end_log
