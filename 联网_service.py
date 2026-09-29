@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.2.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -256,18 +256,61 @@ def _get_password():
         return _PWD_VALUE
 
 
-def _save_password_to_disk(password):
-    """写入**当前生效的密码文件**（原子写：唯一 tmp → replace，v2.0.6.2 起 tmp 名带 pid）。"""
+def _save_password_to_disk(password, profile=None):
+    """写入密码文件（原子写：唯一 tmp → replace，v2.0.6.2 起 tmp 名带 pid）。
+
+    v2.1.3.0：`profile` 给定时写**那个方案的专属密码文件**（`password.<方案名>.txt`）✓；
+    不给 = 写「当前生效的密码文件」（老行为，一个字符都没变 ✓）。
+
+    ⚠️ 两个容易写错的点：
+      1. 只有写进**当前生效的那个文件**时才更新内存里的 `_PWD_VALUE` —— 给别的方案存
+         密码绝不该把正在用的密码换掉 ✗；
+      2. 「是不是当前生效文件」必须**写完之后再算**：第一次给当前方案建专属密码时，
+         写之前 `active_password_file()` 还会回退到公共文件 ✗（那时专属文件还不存在）。
+    """
     global _PWD_VALUE
     if not isinstance(password, str) or len(password) < 1:
         raise ValueError("password 必须是非空字符串")
-    path = active_password_file()
+    if profile:
+        path = password_file_for(profile)
+        if path == PASSWORD_FILE:
+            # fail-closed：方案名不合法就别悄悄写到公共文件上 ✗（那会改掉别人的密码）
+            raise ValueError("方案名不合法：{!r}".format(profile))
+    else:
+        path = active_password_file()
     tmp = "{}.{}.tmp".format(path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(password.rstrip("\r\n") + "\n")
     os.replace(tmp, path)
-    with PWD_LOCK:
-        _PWD_VALUE = password
+    if os.path.abspath(path) == os.path.abspath(active_password_file()):
+        with PWD_LOCK:
+            _PWD_VALUE = password
+    return path
+
+
+def profile_has_own_password(profile_name):
+    """该方案有没有**专属密码文件**（没有 = 用公共 `password.txt` ✓）。"""
+    path = password_file_for(profile_name)
+    return path != PASSWORD_FILE and os.path.isfile(path)
+
+
+def remove_profile_password(profile_name):
+    """删掉某个方案的专属密码文件（删完它回落公共 `password.txt` ✓）。返回是否真删了。
+
+    ⚠️ 只删文件、**不动内存里的密码**：删的不是当前生效文件时，正在用的密码不该变 ✗；
+    是当前生效文件的话，由调用方 `_load_password_from_disk()` 重新读一遍 ✓。
+    """
+    path = password_file_for(profile_name)
+    if path == PASSWORD_FILE:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        logger.warning("删除方案密码文件失败（%s）：%s", os.path.basename(path), exc)
+        return False
 
 
 # ============================================================
@@ -908,6 +951,10 @@ def main():
         stop_event=STOP_EVENT,
         run_once_fn=run_once,
         auto_update_mod=_auto_update_mod,
+        # v2.1.3.0：方案专属密码（/api/credentials 用）
+        profile_has_own_password=profile_has_own_password,
+        remove_profile_password=remove_profile_password,
+        load_password_from_disk=_load_password_from_disk,
     )
     # 4.7b 连接质量统计（v2.0.8.0；v2.0.8.1 起带降级）：只要日志目录 + 配置读取 + logger
     if _METRICS_IMPORT_ERROR:
@@ -930,6 +977,8 @@ def main():
             load_config=_load_config,
             save_config=_save_config,
             validate_config=_validate_config,
+            # v2.1.3.0：方案可以带自己的密码文件 → 切方案后要重读密码 ✓
+            load_password_from_disk=_load_password_from_disk,
         )
         # 把「按 SSID 自动切方案」挂到协议层（protocol 只认回调，不 import profiles）。
         # ⚠️ 这里**绝对不能**再写 `import protocol as _protocol_mod` ✗ ——

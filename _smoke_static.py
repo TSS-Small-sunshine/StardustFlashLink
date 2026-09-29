@@ -1440,6 +1440,117 @@ finally:
     if _mp_saved_load is not None:
         svc._load_config = _mp_saved_load
 
+# ---- v2.1.3.0：方案自己的账号 / 密码（多网络多账号的落地点）----
+# (1) profiles.update_values：**合并**改，只动传进来的键（不是整个 values 换掉 ✗）
+_pf_merge = {"宿舍": {"values": {"host": "1.1.1.1", "account": "2023000001",
+                                 "auto_check_interval_min": 30},
+                      "match_ssids": ["Dorm-WiFi"]}}
+_merged, _merr = _pf.update_values(_pf_merge, "宿舍", {"account": "2023000002", "suffix": "@yd"})
+check("v2.1.3.0 方案凭据是**合并**改：网关 / 间隔 / Wi-Fi 匹配一个都没被抹掉",
+      not _merr
+      and _merged["宿舍"]["values"]["host"] == "1.1.1.1"
+      and _merged["宿舍"]["values"]["auto_check_interval_min"] == 30
+      and _merged["宿舍"]["values"]["account"] == "2023000002"
+      and _merged["宿舍"]["values"]["suffix"] == "@yd"
+      and _merged["宿舍"]["match_ssids"] == ["Dorm-WiFi"],
+      repr((_merr, _merged.get("宿舍"))))
+check("v2.1.3.0 合并是深拷贝：没污染传进去的那份配置",
+      _pf_merge["宿舍"]["values"]["account"] == "2023000001")
+check("v2.1.3.0 方案不存在 → 报错（手滑少打一个字不该悄悄多出一个方案）",
+      _pf.update_values(_pf_merge, "没有这个", {"account": "1"})[1] != [])
+check("v2.1.3.0 不认识的键被过滤掉（密码永远进不了方案 values）",
+      "password" not in _pf.update_values(_pf_merge, "宿舍", {"password": "x"})[0]["宿舍"]["values"])
+
+# (2) 服务侧：方案专属密码文件（真文件，写到临时目录里）
+import tempfile as _tf  # noqa: E402
+
+_cred_dir = _tf.mkdtemp(prefix="drcom_cred_")
+_cred_saved = {k: getattr(svc, k, None) for k in ("BASE_DIR", "PASSWORD_FILE", "_PWD_VALUE")}
+_cred_saved_load = getattr(svc, "_load_config", None)
+_cred_active = {"name": "宿舍"}
+svc.BASE_DIR = _cred_dir
+svc.PASSWORD_FILE = os.path.join(_cred_dir, "password.txt")
+svc._profiles_mod = _pf
+svc._load_config = lambda: {"active_profile": _cred_active["name"]}
+try:
+    with open(svc.PASSWORD_FILE, "w", encoding="utf-8") as _f:
+        _f.write("public-pwd\n")
+    svc._PWD_VALUE = "public-pwd"
+    _cred_path = svc._save_password_to_disk("#Demo-0002#", profile="宿舍")
+    check("v2.1.3.0 方案密码写进 password.<方案名>.txt，公共文件一个字节都不动",
+          _cred_path.endswith("password.宿舍.txt") and os.path.isfile(_cred_path)
+          and open(svc.PASSWORD_FILE, encoding="utf-8").read().strip() == "public-pwd",
+          repr(_cred_path))
+    check("v2.1.3.0 **第一次**给当前方案建专属密码：内存密码立刻跟着换",
+          svc._get_password() == "#Demo-0002#", repr(svc._get_password()))
+    check("v2.1.3.0 生效文件优先级：方案专属文件存在 → 就是它",
+          svc.active_password_file() == _cred_path, repr(svc.active_password_file()))
+    svc._PWD_VALUE = "public-pwd"
+    svc._save_password_to_disk("#Demo-0003#", profile="教学楼")
+    check("v2.1.3.0 给**别的**方案存密码 → 正在用的密码不受影响",
+          svc._get_password() == "public-pwd", repr(svc._get_password()))
+    _cred_active["name"] = "教学楼"
+    svc._load_password_from_disk()
+    check("v2.1.3.0 切到带专属密码的方案并重读 → 内存密码换成该方案的",
+          svc._get_password() == "#Demo-0003#", repr(svc._get_password()))
+    check("v2.1.3.0 profile_has_own_password：写过的为真、没写过的为假",
+          svc.profile_has_own_password("教学楼") is True
+          and svc.profile_has_own_password("没写过") is False)
+    svc.remove_profile_password("教学楼")
+    check("v2.1.3.0 删掉方案专属密码 → 回落公共文件（内存密码不擅自改）",
+          svc.profile_has_own_password("教学楼") is False
+          and svc.active_password_file() == svc.PASSWORD_FILE
+          and svc._get_password() == "#Demo-0003#")
+    _cred_before = open(svc.PASSWORD_FILE, encoding="utf-8").read()
+    _cred_raised = False
+    try:
+        svc._save_password_to_disk("#Demo-9999#", profile="a/b")
+    except ValueError:
+        _cred_raised = True
+    check("v2.1.3.0 方案名不合法 → 拒绝写（fail-closed：绝不悄悄落到公共密码上）",
+          _cred_raised and open(svc.PASSWORD_FILE, encoding="utf-8").read() == _cred_before)
+finally:
+    for _k, _v in _cred_saved.items():
+        setattr(svc, _k, _v)
+    if _cred_saved_load is not None:
+        svc._load_config = _cred_saved_load
+
+# (3) 切换方案要重载密码（否则切完还在用上一个方案的密码，登录一路失败却「配置看着都对」✗）
+_pf_reloads = []
+_pf._attach(load_config=lambda: {"profiles": {"宿舍": {"values": {"account": "2023000001"}}},
+                                 "active_profile": ""},
+            save_config=lambda cfg: None, validate_config=lambda cfg: [],
+            load_password_from_disk=lambda: _pf_reloads.append(1))
+check("v2.1.3.0 切方案后自动重载密码文件",
+      _pf.activate("宿舍").get("ok") is True and _pf_reloads == [1], repr(_pf_reloads))
+
+
+def _pf_boom():
+    raise RuntimeError("读取密码文件炸了")
+
+
+_pf._attach(load_config=lambda: {"profiles": {"宿舍": {"values": {"account": "1"}}},
+                                 "active_profile": ""},
+            save_config=lambda cfg: None, validate_config=lambda cfg: [],
+            load_password_from_disk=_pf_boom)
+check("v2.1.3.0 重载密码失败**不算**切方案失败（配置已切好，只记一条日志）",
+      _pf.activate("宿舍").get("ok") is True)
+
+# (4) 界面：状态页那张卡现在能存账号了；配置页能编辑「方案自己的账号 / 密码」
+check("v2.1.3.0 状态页凭据卡：一次存「账号 + 运营商 + 密码」（不再是只存密码 ✗）",
+      'id="btn-save-pwd" type="button">保存账号与密码' in _page
+      and "API.saveCredentials" in _page and "scope: 'current'" in _page)
+check("v2.1.3.0 状态页明确写了保存范围（账号进配置、密码单独存文件）",
+      'id="cred-scope"' in _page and "密码永不写进配置文件" in _page
+      and _page.index('id="btn-save-pwd"') < _page.index('id="cred-scope"'))
+check("v2.1.3.0 配置页有「保存到选中方案」的账号 / 密码编辑区",
+      'id="btn-profile-cred-save"' in _page and 'id="profile-account"' in _page
+      and 'id="profile-pwd"' in _page and 'id="profile-pwd-clear"' in _page
+      and "scope: 'profile'" in _page)
+check("v2.1.3.0 端点里没有任何「把密码写进配置」的写法，PROFILE_KEYS 里也没有密码字段",
+      'cfg["password"]' not in src_web and "cfg['password']" not in src_web
+      and all("password" not in k for k in _pf.PROFILE_KEYS))
+
 # ---- v2.1.1.0：安全冗余（新功能不许把既有防护漏掉）----
 import web_api as _web_api_probe  # noqa: E402
 
@@ -2005,7 +2116,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.2.0", version.VERSION == "2.1.2.0", version.VERSION)
+check("版本 = 2.1.3.0", version.VERSION == "2.1.3.0", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
