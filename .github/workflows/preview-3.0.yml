@@ -148,7 +148,15 @@ jobs:
           if [ -f "target/${{ matrix.target }}/release/${APP_NAME}" ]; then
             PKG_EXE="${APP_NAME}"
           fi
-          OUT=$("$HOST_BIN" package-files --out "$STAGE" --target "${{ matrix.label }}" --exe "$PKG_EXE")
+          # deb 的架构名要跟着**目标**走 ✗（宿主是 amd64，但包可能是 armhf ✓）
+          DEB_ARCH=""
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)      DEB_ARCH="amd64" ;;
+            aarch64-unknown-linux-gnu)     DEB_ARCH="arm64" ;;
+            armv7-unknown-linux-gnueabihf) DEB_ARCH="armhf" ;;
+          esac
+          OUT=$("$HOST_BIN" package-files --out "$STAGE" --target "${{ matrix.label }}" \
+            --exe "$PKG_EXE" --arch "$DEB_ARCH")
           printf '%s\n' "$OUT"
           NAME=$(printf '%s\n' "$OUT" | head -1)
 

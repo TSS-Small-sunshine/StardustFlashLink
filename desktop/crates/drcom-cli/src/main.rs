@@ -90,7 +90,7 @@ fn print_help() {
          autostart on|off|status [--dry-run]    开机自启（当前用户级，免管理员 ✓；跑的是无界面循环）\n  \
          service install|uninstall|start|stop|restart|status [--dry-run]   注册成常驻服务（Windows 走 NSSM ✓）\n  \
          checksum [文件]             算 SHA-256（不给文件就算自己 ✓）—— 打包校验 / 升级凭据 ✓\n  \
-         package-files --out DIR     写出该平台随包分发的说明文件（.desktop / Info.plist / README ✓）\n  \
+         package-files --out DIR [--target T] [--exe E] [--arch A]   写出该平台随包分发的说明文件\n  \
          archive --out F.zip DIR...  打包目录成 ZIP（用自带实现 ✓，不需要外部 zip/tar ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
@@ -492,11 +492,14 @@ fn package_files_cmd(args: &[String]) -> i32 {
         .map(|meta| meta.len())
         .unwrap_or(0);
     // 交叉编译时，宿主编出来的辅助程序会自报宿主目标 ✗ → 允许显式覆盖 ✓
-    let info = drcom_core::package::PackageInfo::current(&exe_name, size).with_overrides(
-        take_opt(args, "--target").as_deref(),
-        take_opt(args, "--exe").as_deref(),
-        take_opt(args, "--version").as_deref(),
-    );
+    let info = drcom_core::package::PackageInfo::current(&exe_name, size)
+        .with_overrides(
+            take_opt(args, "--target").as_deref(),
+            take_opt(args, "--exe").as_deref(),
+            take_opt(args, "--version").as_deref(),
+        )
+        // deb 架构也要能覆盖 ✓（宿主是 amd64，但包可能是 armhf ✓）
+        .with_arch(take_opt(args, "--arch").as_deref());
 
     let mut written: Vec<String> = Vec::new();
     let mut result = write_package_file(

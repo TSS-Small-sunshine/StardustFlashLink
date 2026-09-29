@@ -21,6 +21,9 @@ pub struct PackageInfo {
     pub exe_name: String,
     /// 人类可读名的尺寸（字节，写进 deb 的 `Installed-Size` ✓）
     pub size_bytes: u64,
+    /// deb 架构名覆盖（**交叉编译时必须给** ✓：在 x86_64 runner 上给 armv7 打包时，
+    /// 宿主自报是 `amd64` ✗ —— 那样打出来的包架构是错的 ✗）
+    pub deb_arch: Option<String>,
 }
 
 impl PackageInfo {
@@ -31,6 +34,7 @@ impl PackageInfo {
             target: platform::target_label(),
             exe_name: exe_name.to_string(),
             size_bytes,
+            deb_arch: None,
         }
     }
 
@@ -53,6 +57,31 @@ impl PackageInfo {
             self.version = value.to_string();
         }
         self
+    }
+
+    /// 覆盖 deb 的架构名 ✓（`amd64` / `arm64` / `armhf` ✓）。
+    pub fn with_arch(mut self, arch: Option<&str>) -> PackageInfo {
+        if let Some(value) = arch {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                self.deb_arch = Some(trimmed.to_string());
+            }
+        }
+        self
+    }
+
+    /// 实际写进 deb 的架构名 ✓（有覆盖用覆盖 ✓，否则按本机架构换算 ✓）。
+    pub fn deb_arch_name(&self) -> String {
+        if let Some(value) = self.deb_arch.as_deref() {
+            return value.to_string();
+        }
+        match platform::arch() {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "armv7" => "armhf",
+            other => other,
+        }
+        .to_string()
     }
 }
 
@@ -92,13 +121,11 @@ pub fn desktop_entry(info: &PackageInfo) -> String {
 }
 
 /// Debian 的 `control` ✓（`Installed-Size` 单位是 KB ✓ —— 这是 deb 的规矩 ✓）。
+///
+/// ⚠️ 格式上有个**硬要求**：长描述（`Description:` 之后的续行）**必须以一个空格开头** ✓。
+/// Rust 的 `\` 续行会把行首空白吃掉 ✗ —— 真踩过：dpkg-deb 直接报
+/// `parsing file '…/control' near line 8 package '…'` ✗✓（所以这里用 `\x20` 显式写出那个空格 ✓）。
 pub fn deb_control(info: &PackageInfo) -> String {
-    let architecture = match platform::arch() {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        "armv7" => "armhf",
-        other => other,
-    };
     format!(
         "Package: {package}\n\
          Version: {version}\n\
@@ -108,10 +135,10 @@ pub fn deb_control(info: &PackageInfo) -> String {
          Installed-Size: {size_kb}\n\
          Maintainer: Stardust Flash Link <noreply@example.invalid>\n\
          Description: 校园网认证网关自动登录\n\
-         自动检查校园网在线状态，掉线自动重登；支持按 Wi-Fi 自动切换配置方案。\n",
+         \x20自动检查校园网在线状态，掉线自动重登；支持按 Wi-Fi 自动切换配置方案。\n",
         package = platform::APP_ID,
         version = info.version,
-        architecture = architecture,
+        architecture = info.deb_arch_name(),
         size_kb = (info.size_bytes + 1023) / 1024
     )
 }
@@ -182,7 +209,53 @@ mod tests {
             target: "linux-x86_64".to_string(),
             exe_name: "stardust-flash-link".to_string(),
             size_bytes: 4_500_000,
+            deb_arch: None,
         }
+    }
+
+    #[test]
+    fn deb_control_lines_are_structurally_valid() {
+        // dpkg-deb 会因为「续行没缩进」当场报错 ✗（真踩过：near line 8 package '…' ✗）——
+        // 所以这里断言的是**行结构** ✓，而不是「字段都在」✗（子串断言抓不到这个坑 ✗）。
+        let control = deb_control(&info());
+        assert!(control.ends_with('\n'), "control 要以换行结尾 ✓");
+        let lines: Vec<&str> = control.trim_end_matches('\n').split('\n').collect();
+        assert!(lines[0].starts_with("Package: "), "{}", lines[0]);
+        for (index, line) in lines.iter().enumerate().skip(1) {
+            let is_field = line
+                .split_once(':')
+                .map(|(name, _)| !name.trim().is_empty() && !name.contains(' '))
+                .unwrap_or(false);
+            assert!(
+                is_field || line.starts_with(' '),
+                "第 {} 行既不是字段、也不是缩进续行 ✗: {:?}",
+                index + 1,
+                line
+            );
+        }
+        let desc = lines
+            .iter()
+            .position(|line| line.starts_with("Description: "))
+            .expect("必须有 Description ✓");
+        assert!(
+            lines[desc + 1].starts_with(' '),
+            "Description 的续行必须以一个空格开头 ✗: {:?}",
+            lines[desc + 1]
+        );
+    }
+
+    #[test]
+    fn deb_arch_follows_override_then_host() {
+        let plain = info();
+        assert!(!plain.deb_arch_name().is_empty(), "宿主也要能换算出来 ✓");
+        assert_eq!(info().with_arch(Some("armhf")).deb_arch_name(), "armhf");
+        assert_eq!(
+            info().with_arch(Some("   ")).deb_arch_name(),
+            plain.deb_arch_name(),
+            "空白覆盖要忽略 ✓"
+        );
+        assert_eq!(info().with_arch(None).deb_arch_name(), plain.deb_arch_name());
+        assert!(deb_control(&info().with_arch(Some("arm64"))).contains("Architecture: arm64"));
     }
 
     #[test]
