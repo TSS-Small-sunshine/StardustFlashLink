@@ -1,0 +1,205 @@
+import { Theme, PillButton, FormRow, ToggleSwitch } from "theme.slint";
+
+export component SettingsWindow inherits Window {
+    title: "星尘闪连 · 设置";
+    width: 700px;
+    height: 720px;
+    background: @linear-gradient(160deg, Theme.bg-deep 0%, Theme.bg-mid 55%, Theme.bg-high 100%);
+
+    // —— 表单字段（双向绑定 ✓，由 Rust 填充初值 ✓）——
+    in-out property <string> host: "";
+    in-out property <string> port-text: "";
+    in-out property <string> account: "";
+    in-out property <string> suffix: "";
+    in-out property <string> password-text: "";
+    in-out property <string> interval-text: "";
+    in-out property <string> wait-text: "";
+    in-out property <bool> guard-enabled: false;
+    in-out property <string> guard-ssids: "";
+    in-out property <string> guard-subnets: "";
+    in-out property <bool> auto-update: false;
+
+    // —— 只读信息 ——
+    in property <string> channel-label: "";
+    in property <string> password-hint: "";
+    in property <string> data-dir: "";
+    in property <[string]> interval-choices: [];
+    in property <string> message: "";
+    in property <string> message-kind: "info";
+
+    callback save();
+    callback test-connection();
+    callback open-data-dir();
+    callback refresh-view();
+    callback dismiss();
+
+    VerticalLayout {
+        padding: 24px;
+        spacing: 8px;
+
+        Text {
+            text: "设置";
+            font-size: 22px;
+            font-weight: 700;
+            color: Theme.text-primary;
+        }
+        Rectangle {
+            height: 3px;
+            border-radius: 2px;
+            background: @linear-gradient(90deg, Theme.aurora-start 0%, Theme.aurora-end 100%);
+        }
+
+        FormRow {
+            label: "认证网关";
+            value <=> root.host;
+            hint: "校园网 Dr.COM 网关地址，例如 172.16.80.3";
+        }
+        FormRow {
+            label: "网关端口";
+            value <=> root.port-text;
+            hint: "一般是 80（登录固定走 801，无需填）";
+        }
+        FormRow {
+            label: "账号";
+            value <=> root.account;
+            hint: "学号；留空也能保存（只是会跳过登录 ✓）";
+        }
+        FormRow {
+            label: "账号后缀";
+            value <=> root.suffix;
+            hint: "校内公共场合留空；宿舍走移动宽带填 @yd —— 想按 Wi-Fi 自动切就用「配置方案」✓";
+        }
+        FormRow {
+            label: "密码";
+            value <=> root.password-text;
+            secret: true;
+            hint: root.password-hint;
+        }
+
+        // 检查间隔：一排可选药丸（来源与核心同一个常量 ✓）
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: "检查间隔";
+                width: 132px;
+                font-size: 13px;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            for choice in root.interval-choices : PillButton {
+                text: choice;
+                primary: root.interval-text == choice;
+                min-width: 56px;
+                clicked => { root.interval-text = choice; }
+            }
+            Text {
+                text: "分钟";
+                font-size: 12px;
+                color: Theme.text-dim;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        FormRow {
+            label: "等网络超时";
+            value <=> root.wait-text;
+            hint: "秒；冷启动/刚连上 Wi-Fi 时先等一会儿再检查 ✓";
+        }
+
+        ToggleSwitch {
+            label: "网络位置守卫";
+            checked <=> root.guard-enabled;
+        }
+        FormRow {
+            label: "允许的 Wi-Fi";
+            value <=> root.guard-ssids;
+            hint: "逗号分隔；命中就检查（读不到 Wi-Fi 名时一律放行 ✓）";
+        }
+        FormRow {
+            label: "允许的网段";
+            value <=> root.guard-subnets;
+            hint: "逗号分隔 CIDR，例如 172.16.0.0/12,10.0.0.0/8（有线也适用 ✓）";
+        }
+
+        ToggleSwitch {
+            label: "自动升级";
+            checked <=> root.auto-update;
+        }
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Text {
+                text: "升级通道";
+                width: 132px;
+                font-size: 13px;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.channel-label;
+                font-size: 13px;
+                color: Theme.text-primary;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        // —— 提示 / 校验结果 ——
+        Rectangle {
+            vertical-stretch: 1;
+            border-radius: Theme.radius-sm;
+            background: Theme.card-bg;
+            border-width: 1px;
+            border-color: Theme.card-stroke;
+
+            VerticalLayout {
+                padding: Theme.gap-sm;
+                alignment: start;
+                spacing: 4px;
+                Text {
+                    text: root.message;
+                    wrap: word-wrap;
+                    font-size: 12px;
+                    color: root.message-kind == "ok" ? Theme.ok
+                        : root.message-kind == "danger" ? Theme.danger
+                        : root.message-kind == "warn" ? Theme.warn
+                        : Theme.text-muted;
+                }
+            }
+        }
+
+        // —— 按钮区 ——
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            PillButton {
+                text: "保存";
+                primary: true;
+                clicked => { root.save(); }
+            }
+            PillButton {
+                text: "测试连接";
+                clicked => { root.test-connection(); }
+            }
+            PillButton {
+                text: "重新读取";
+                clicked => { root.refresh-view(); }
+            }
+            PillButton {
+                text: "打开数据目录";
+                clicked => { root.open-data-dir(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            PillButton {
+                text: "关闭";
+                clicked => { root.dismiss(); }
+            }
+        }
+
+        Text {
+            text: "配置目录：" + root.data-dir;
+            font-size: 11px;
+            color: Theme.text-dim;
+            wrap: word-wrap;
+        }
+    }
+}

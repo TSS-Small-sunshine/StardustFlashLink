@@ -1,4 +1,6 @@
 import { Theme, StatCard, PillButton } from "theme.slint";
+// 设置窗口在另一个文件里；这里**转出**它，`slint::include_modules!()` 才能一起生成 ✓
+export { SettingsWindow } from "settings.slint";
 
 export component AppWindow inherits Window {
     title: "星尘闪连 3.0（预览版）";
@@ -27,6 +29,7 @@ export component AppWindow inherits Window {
     callback do-check();
     callback do-selfcheck();
     callback open-data-dir();
+    callback open-settings();
     callback refresh();
 
     VerticalLayout {
@@ -157,6 +160,11 @@ export component AppWindow inherits Window {
                 text: "刷新状态";
                 enabled: !root.busy;
                 clicked => { root.refresh(); }
+            }
+            PillButton {
+                text: "设置…";
+                enabled: !root.busy;
+                clicked => { root.open-settings(); }
             }
             Rectangle { horizontal-stretch: 1; }
         }

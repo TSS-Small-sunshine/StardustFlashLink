@@ -46,6 +46,31 @@ impl From<Channel> for UpdateChannel {
     }
 }
 
+impl UpdateChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UpdateChannel::Snapshot => "snapshot",
+            UpdateChannel::Preview => "preview",
+            UpdateChannel::Rc => "rc",
+            UpdateChannel::Release => "release",
+        }
+    }
+
+    pub fn label_cn(self) -> &'static str {
+        match self {
+            UpdateChannel::Snapshot => "快照版",
+            UpdateChannel::Preview => "预览版",
+            UpdateChannel::Rc => "候选版",
+            UpdateChannel::Release => "正式版",
+        }
+    }
+
+    /// 是否预发布 —— **自动更新的判据**（正式用户收不到预览版 ✓）
+    pub fn is_prerelease(self) -> bool {
+        !matches!(self, UpdateChannel::Release)
+    }
+}
+
 /// 应用配置（字段名 = 2.x `config.json` 的键名 ✓）。
 ///
 /// `#[serde(default)]`（**结构级**）是关键：任何缺失字段都退回 [`Config::default`]，

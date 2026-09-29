@@ -127,3 +127,114 @@ export component LogLine inherits Text {
     font-size: 12px;
     wrap: word-wrap;
 }
+
+// 表单行：左边标签，右边一个输入框（玻璃底 ✓）
+export component FormRow inherits Rectangle {
+    in property <string> label: "";
+    in property <string> hint: "";
+    in-out property <string> value: "";
+    in property <bool> secret: false;   // 密码框：用 password 类型输入 ✓
+
+    height: hint == "" ? 48px : 64px;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 2px;
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            Text {
+                text: root.label;
+                width: 132px;
+                font-size: 13px;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 34px;
+                border-radius: 10px;
+                background: Theme.card-bg;
+                border-width: 1px;
+                border-color: Theme.card-stroke;
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    input := TextInput {
+                        horizontal-stretch: 1;
+                        text <=> root.value;
+                        single-line: true;
+                        input-type: root.secret ? password : text;
+                        font-size: 14px;
+                        color: Theme.text-primary;
+                        vertical-alignment: center;
+                        edited => { root.value = self.text; }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            visible: root.hint != "";
+            padding-left: 134px;
+            Text {
+                text: root.hint;
+                font-size: 11px;
+                color: Theme.text-dim;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// 开关（自绘：更贴品牌，也比 std-widgets 小 ✓）
+export component ToggleSwitch inherits Rectangle {
+    in property <string> label: "";
+    in-out property <bool> checked: false;
+    callback toggled();
+
+    height: 40px;
+    background: transparent;
+
+    HorizontalLayout {
+        spacing: Theme.gap-sm;
+        Text {
+            text: root.label;
+            width: 132px;
+            font-size: 13px;
+            color: Theme.text-muted;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 52px;
+            height: 28px;
+            border-radius: 14px;
+            background: root.checked ? Theme.aurora-end : Theme.card-bg;
+            border-width: 1px;
+            border-color: root.checked ? transparent : Theme.card-stroke;
+
+            Rectangle {
+                x: root.checked ? 26px : 2px;
+                y: 2px;
+                width: 22px;
+                height: 22px;
+                border-radius: 11px;
+                background: #ffffff;
+                animate x { duration: 120ms; easing: ease-out; }
+            }
+        }
+        Text {
+            text: root.checked ? "已开启" : "已关闭";
+            font-size: 12px;
+            color: root.checked ? Theme.ok : Theme.text-dim;
+            vertical-alignment: center;
+        }
+        Rectangle { horizontal-stretch: 1; }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}

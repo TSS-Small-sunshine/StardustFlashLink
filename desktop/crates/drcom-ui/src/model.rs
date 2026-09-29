@@ -1,7 +1,10 @@
 //! 界面与核心之间的一层「视图模型」：**界面不读文件、不碰网络**，只显示这里的字符串 ✓。
 //! 好处：Slint 之外的逻辑全部能在单测里验证（`cargo test` 不弹窗口也能跑 ✓）。
 
-use drcom_core::{config::Config, net::PlainHttp, platform, secret, session, Status};
+use drcom_core::{
+    config::Config, net::PlainHttp, password, platform, secret, session, settings::SettingsForm,
+    Status,
+};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(12);
@@ -200,7 +203,160 @@ pub fn run_check() -> (String, String) {
     )
 }
 
-/// 「运行自检」：核心自检 + 路径可写性（与 CLI 的 `selfcheck` 同一套判据 ✓）。
+/// 设置窗口收集到的原始输入（全是界面上的字符串/开关 ✓，解析与校验在下面 ✓）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FormInput {
+    pub host: String,
+    pub port_text: String,
+    pub account: String,
+    pub suffix: String,
+    pub interval_text: String,
+    pub wait_text: String,
+    pub guard_enabled: bool,
+    pub guard_ssids: String,
+    pub guard_subnets: String,
+    pub auto_update: bool,
+    pub password: String,
+}
+
+impl FormInput {
+    /// 从现有配置生成默认输入（**密码留空** ✓）
+    pub fn from_config(cfg: &Config) -> FormInput {
+        FormInput {
+            host: cfg.host.clone(),
+            port_text: cfg.port.to_string(),
+            account: cfg.account.clone(),
+            suffix: cfg.suffix.clone(),
+            interval_text: cfg.auto_check_interval_min.to_string(),
+            wait_text: cfg.network_wait_timeout_sec.to_string(),
+            guard_enabled: cfg.network_guard_enabled,
+            guard_ssids: cfg.guard_allowed_ssids.clone(),
+            guard_subnets: cfg.guard_allowed_subnets.clone(),
+            auto_update: cfg.auto_update_enabled,
+            password: String::new(),
+        }
+    }
+
+    /// 变成可保存的表单：数字字段解析失败就**回落到原配置的值**（不静默改成 0 ✗）
+    pub fn to_form(&self, base: &Config) -> SettingsForm {
+        let mut form = SettingsForm::from_config(base);
+        form.host = self.host.clone();
+        form.port = self.port_text.trim().parse::<u16>().unwrap_or(base.port);
+        form.account = self.account.clone();
+        form.suffix = self.suffix.clone();
+        form.interval_min = self
+            .interval_text
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(base.auto_check_interval_min);
+        form.wait_timeout_sec = self
+            .wait_text
+            .trim()
+            .parse::<u32>()
+            .unwrap_or(base.network_wait_timeout_sec);
+        form.guard_enabled = self.guard_enabled;
+        form.guard_ssids = self.guard_ssids.clone();
+        form.guard_subnets = self.guard_subnets.clone();
+        form.auto_update_enabled = self.auto_update;
+        form.password = Some(self.password.clone()); // 空串 = 不修改 ✓（由 SettingsForm 判定 ✓）
+        form
+    }
+}
+
+/// 设置窗口要显示的一屏数据。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsView {
+    pub input: FormInput,
+    pub interval_choices: Vec<String>,
+    pub channel_label: String,
+    pub password_hint: String,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// 「测试连接」：用**表单里的值**跑一次检查（**不保存** ✓）。
+pub fn settings_test(input: &FormInput) -> (String, String) {
+    let config_path = platform::config_path();
+    let base = Config::load(&config_path).unwrap_or_default();
+    let form = input.to_form(&base);
+    let errors = form.validate(&base);
+    if !errors.is_empty() {
+        return (
+            "danger".to_string(),
+            format!("配置有问题（已阻止保存）：\n  - {}", errors.join("\n  - ")),
+        );
+    }
+    let cfg = form.to_config(&base);
+    let typed_password = form.new_password().map(|v| v.to_string());
+    let password = match &typed_password {
+        Some(value) => value.clone(),
+        None => password::read(),
+    };
+    if !cfg.account_configured() {
+        return ("warn".to_string(), "账号还没填 —— 先填上学号再测 ✓".to_string());
+    }
+    if password.is_empty() {
+        return ("warn".to_string(), "还没有密码：在「密码」里填一个（或先保存）✓".to_string());
+    }
+    let probe = drcom_core::probe::snapshot();
+    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
+    if !verdict.allowed {
+        return (
+            "warn".to_string(),
+            format!(
+                "网络位置守卫会拦下这次检查：{}\n（测试用的是表单里的白名单，**尚未保存** ✓）",
+                verdict.reason
+            ),
+        );
+    }
+    let report = session::check_once(&cfg, &password, &PlainHttp, TIMEOUT);
+    let kind = if report.outcome.is_ok() { "ok" } else { "danger" };
+    (
+        kind.to_string(),
+        format!("{}（测试用的是表单里的值，**尚未保存** ✓）", report.outcome.summary_cn()),
+    )
+}
+
+/// 读配置 → 设置窗口的显示数据 ✓（只读 ✓）
+pub fn settings_view() -> SettingsView {
+    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    let input = FormInput::from_config(&cfg);
+    let form = input.to_form(&cfg);
+    let has_password = drcom_core::password::is_set();
+    SettingsView {
+        interval_choices: drcom_core::settings::interval_choices()
+            .iter()
+            .map(|v| v.to_string())
+            .collect(),
+        channel_label: format!(
+            "{} · {}",
+            cfg.update_channel.as_str(),
+            cfg.update_channel.label_cn()
+        ),
+        password_hint: if has_password {
+            "已设置（留空 = 不修改）".to_string()
+        } else {
+            "还没设置（填一个并保存即可）".to_string()
+        },
+        errors: form.validate(&cfg),
+        warnings: form.warnings(&cfg),
+        input,
+    }
+}
+
+/// 保存设置（界面点「保存」）→（颜色, 文案）✓
+pub fn settings_save(input: &FormInput) -> (String, String) {
+    let config_path = platform::config_path();
+    let base = Config::load(&config_path).unwrap_or_default();
+    let form = input.to_form(&base);
+    match form.save_to(&base, &config_path, &drcom_core::password::path()) {
+        Ok(()) => (
+            "ok".to_string(),
+            "已保存 ✓（守护进程与界面都会立刻用新配置；改密码不需要重启服务）".to_string(),
+        ),
+        Err(e) => ("danger".to_string(), format!("保存失败：{}", e)),
+    }
+}
 pub fn run_selfcheck() -> (String, String) {
     let version = drcom_core::app_version_string();
     let version_ok = drcom_core::channel::Version::parse(&version).is_some();
@@ -303,12 +459,61 @@ mod tests {
     }
 
     #[test]
-    fn password_reader_skips_comments() {
-        // 直接测「同一套解析规则」：注释行/空行都不算密码 ✓
-        let parsed = ["# 注释", "", "  ", "真实密码"].iter().map(|l| l.trim())
-            .find(|l| !l.is_empty() && !l.starts_with('#'))
-            .unwrap_or("");
-        assert_eq!(parsed, "真实密码");
+    fn form_input_round_trips_and_falls_back_on_bad_numbers() {
+        let mut cfg = Config::default();
+        cfg.host = "172.16.80.3".to_string();
+        cfg.account = "2023001234".to_string();
+        cfg.suffix = "@yd".to_string();
+        let input = FormInput::from_config(&cfg);
+        assert_eq!(input.password, "", "密码默认空 = 不修改 ✓");
+        let form = input.to_form(&cfg);
+        assert_eq!(form.host, cfg.host);
+        assert_eq!(form.interval_min, cfg.auto_check_interval_min);
+        assert!(form.new_password().is_none(), "空密码 = 不修改 ✓");
+
+        // 数字框乱填 → **回落到原值**（不能静默变 0 ✗）
+        let mut bad = input.clone();
+        bad.port_text = "abc".to_string();
+        bad.interval_text = String::new();
+        bad.wait_text = "-5".to_string();
+        let form = bad.to_form(&cfg);
+        assert_eq!(form.port, cfg.port, "解析失败要保留原值 ✓");
+        assert_eq!(form.interval_min, cfg.auto_check_interval_min);
+        assert_eq!(form.wait_timeout_sec, cfg.network_wait_timeout_sec);
+
+        // 给了密码 → 会被写 ✓
+        let mut with_password = input.clone();
+        with_password.password = "pw".to_string();
+        assert_eq!(with_password.to_form(&cfg).new_password(), Some("pw"));
+    }
+
+    #[test]
+    fn settings_view_has_choices_and_readable_hints() {
+        let view = settings_view();
+        assert!(!view.interval_choices.is_empty());
+        assert!(view.interval_choices.contains(&"30".to_string()), "{:?}", view.interval_choices);
+        assert!(!view.channel_label.is_empty());
+        assert!(view.password_hint.contains("密码") || view.password_hint.contains("设置"));
+        assert!(view.errors.len() < 5, "默认配置不该一堆错：{:?}", view.errors);
+    }
+
+    #[test]
+    fn settings_test_refuses_incomplete_input_without_touching_network() {
+        // 账号为空 → 直接提示（**不会发任何请求** ✓）
+        let mut input = FormInput::default();
+        input.host = "172.16.80.3".to_string();
+        input.interval_text = "30".to_string();
+        input.wait_text = "60".to_string();
+        let (kind, text) = settings_test(&input);
+        assert_eq!(kind, "warn", "{}", text);
+        assert!(text.contains("账号"), "{}", text);
+
+        // 非法后缀 → danger，且说明「已阻止保存」✓
+        input.account = "2023001234".to_string();
+        input.suffix = "@xx".to_string();
+        let (kind, text) = settings_test(&input);
+        assert_eq!(kind, "danger");
+        assert!(text.contains("配置有问题"), "{}", text);
     }
 }
 

@@ -3,4 +3,5 @@ fn main() {
     slint_build::compile("ui/main.slint").expect("Slint 界面编译失败");
     println!("cargo:rerun-if-changed=ui/main.slint");
     println!("cargo:rerun-if-changed=ui/theme.slint");
+    println!("cargo:rerun-if-changed=ui/settings.slint");
 }
