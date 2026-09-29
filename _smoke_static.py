@@ -175,7 +175,8 @@ check("v2.0.4.5 run_once 改为非阻塞抢锁", "_RUN_LOCK.acquire(blocking=Fal
 check("v2.0.4.5 不再先持锁再判 login_in_progress（死逻辑已除）", "with _RUN_LOCK:" not in _proto_code)
 check("v2.0.4.5 手工抢到的锁会被释放", "_RUN_LOCK.release()" in _src_proto)
 check("v2.0.4.5 config 写盘用唯一 tmp 名", '"{}.{}.tmp"' in src_svc and "CONFIG_FILE, os.getpid()" in src_svc)
-check("v2.0.4.5 password 写盘用唯一 tmp 名", "PASSWORD_FILE, os.getpid()" in src_svc)
+check("v2.0.4.5 password 写盘用唯一 tmp 名",
+      "os.getpid()" in src_svc and "os.replace(tmp, path)" in src_svc)
 check("v2.0.4.5 installer 不再用弃用的 IsTaskSelected",
       "WizardIsTaskSelected('desktopicon')" in _iss_src
       and "if IsTaskSelected('desktopicon')" not in _iss_src)
@@ -440,8 +441,9 @@ check("v2.0.9.0 五个接口 + 配置页卡片在位",
 _cfg0 = {"host": "1.2.3.4", "port": 80, "auto_check_interval_min": 30, "account": "2023",
          "network_guard_enabled": False, "guard_allowed_ssids": "", "guard_allowed_subnets": ""}
 _snap = _pf.snapshot(_cfg0)
-check("v2.0.9.0 快照只含位置相关字段（账号等不进方案）",
-      "account" not in _snap and set(_snap) == set(_pf.PROFILE_KEYS), str(sorted(_snap)))
+check("v2.0.9.0 / v2.1.1.0 快照含位置相关字段（v2.1.1.0 起账号与后缀也在内）",
+      "account" in _snap and set(_snap) <= set(_pf.PROFILE_KEYS),
+      str(sorted(_snap)))
 _profs, _errs = _pf.upsert({}, "家里",
                            {"network_guard_enabled": True, "guard_allowed_ssids": "Home-WiFi"},
                            "Home-WiFi")
@@ -450,8 +452,8 @@ check("v2.0.9.0 新建方案 + 记下自动匹配 Wi-Fi",
       and _profs["家里"]["match_ssids"] == ["Home-WiFi"], str(_errs))
 check("v2.0.9.0 方案名归一化 / 非法名被拒",
       _pf.normalize_name("  教  室 ") == "教 室" and _pf.upsert({}, "a/b", {})[1] != [])
-check("v2.0.9.0 未知字段被拒（防止把账号塞进方案）",
-      _pf.validate_values({"account": "2023"}) != [])
+check("v2.0.9.0 未知字段被拒（**密码绝不许塞进方案**）",
+      _pf.validate_values({"password": "x"}) != [] and _pf.validate_values({"账号": "x"}) != [])
 _merged, _errs2 = _pf.apply_to_config(_cfg0, _profs, "家里")
 check("v2.0.9.0 应用方案：覆盖位置字段 + 保留账号 + 不改原对象",
       not _errs2 and _merged["guard_allowed_ssids"] == "Home-WiFi"
@@ -1390,6 +1392,49 @@ check("v2.1.1.0 协议层提供 known_ssids / visible_ssids（读不到回空列
       and callable(getattr(_proto, "visible_ssids", None))
       and isinstance(_proto.known_ssids(), list)
       and isinstance(_proto.visible_ssids(), list))
+
+# ---- v2.1.1.0：多网络多账号（账号 + 后缀进方案；密码仍然不进配置）----
+_mp_cfg = {"host": "172.16.80.3", "port": 80, "account": "2023000001", "suffix": "",
+           "auto_check_interval_min": 30, "network_guard_enabled": False,
+           "guard_allowed_ssids": "", "guard_allowed_subnets": "",
+           "profiles": {}, "active_profile": "", "profiles_auto_switch": False}
+_mp_profiles, _mp_err = _pf.upsert({}, "宿舍", _pf.snapshot(_mp_cfg))
+check("v2.1.1.0 方案里现在**带**账号与后缀（多网络多账号的前提）",
+      not _mp_err and {"account", "suffix"} <= set(_mp_profiles["宿舍"]["values"]),
+      repr(_mp_err))
+_mp_new, _mp_new_err = _pf.upsert({}, "教学楼", {"host": "172.16.80.3", "port": 80,
+                                                 "account": "2023000002", "suffix": "@yd"})
+check("v2.1.1.0 老方案（没有账号/后缀键）切换后**照旧不动**（向后兼容）",
+      not _mp_new_err
+      and _pf.apply_to_config(_mp_cfg, _pf.upsert({}, "老方案", {"port": 80})[0],
+                              "老方案")[0].get("account") == "2023000001")
+_mp_merged, _mp_merge_err = _pf.apply_to_config(
+    _mp_cfg, _mp_new, "教学楼", validate_config=lambda c: [])
+check("v2.1.1.0 切到「教学楼」→ 账号与后缀**一起换**（宿舍/校内切换的核心）",
+      not _mp_merge_err
+      and _mp_merged.get("account") == "2023000002"
+      and _mp_merged.get("suffix") == "@yd"
+      and _mp_merged.get("active_profile") == "教学楼",
+      repr((_mp_merge_err, _mp_merged.get("account"), _mp_merged.get("suffix"))))
+_mp_saved_pf = getattr(svc, "_profiles_mod", None)
+_mp_saved_load = getattr(svc, "_load_config", None)
+svc._profiles_mod = _pf
+try:
+    check("v2.1.1.0 密码文件可按方案区分（没方案名 / 名字不合法 → 默认文件）",
+          svc.password_file_for("宿舍").endswith("password.宿舍.txt")
+          and svc.password_file_for("") == svc.PASSWORD_FILE
+          and svc.password_file_for("a/b") == svc.PASSWORD_FILE,
+          repr((svc.password_file_for("宿舍"), svc.PASSWORD_FILE)))
+    svc._load_config = lambda: {"active_profile": "宿舍"}
+    check("v2.1.1.0 生效文件优先级：方案专属文件不存在时回退默认",
+          svc.active_password_file() == svc.PASSWORD_FILE,
+          repr(svc.active_password_file()))
+    check("v2.1.1.0 结构上保证**密码永不进配置**（PROFILE_KEYS 里没有密码字段）",
+          all("password" not in k for k in _pf.PROFILE_KEYS))
+finally:
+    svc._profiles_mod = _mp_saved_pf
+    if _mp_saved_load is not None:
+        svc._load_config = _mp_saved_load
 
 # ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
 # P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的

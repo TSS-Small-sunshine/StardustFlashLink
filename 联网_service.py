@@ -186,22 +186,55 @@ def _is_password_hint(line):
     return any(marker in line for marker in _PASSWORD_HINT_MARKERS)
 
 
-def _load_password_from_disk():
-    """从 password.txt 读入 _PWD_VALUE。文件不存在或内容全是模板提示 → None。
+# —— v2.1.1.0：按方案用不同的密码（多网络多账号）——
+# 规则：
+#   - 默认仍是 `password.txt` ✓（老用户零变化 ✓）
+#   - 当前方案若存在 `password.<方案名>.txt`，**优先用它** ✓
+#   - 界面上保存密码时写进「当前实际生效的那个文件」✓（不再让用户选 ✗）
+# 密码**永远不会**被写进 config.json ✗ —— 配置文件会被导出、会进诊断包 ✓。
+def password_file_for(profile_name):
+    """给定方案名 → 它专属的密码文件路径（没方案名 → 默认 `password.txt` ✓）。"""
+    name = ""
+    try:
+        mod = globals().get("_profiles_mod")
+        if mod is not None and profile_name:
+            name = mod.normalize_name(profile_name) or ""
+    except Exception:  # noqa: BLE001 —— 方案名不合法就退回默认文件 ✓
+        name = ""
+    if not name:
+        return PASSWORD_FILE
+    return os.path.join(BASE_DIR, "password.{}.txt".format(name))
 
-    规则（v2.0.4.0）：
+
+def active_password_file():
+    """当前**实际生效**的密码文件：方案专属文件存在就用它，否则 `password.txt` ✓。"""
+    try:
+        cfg = _load_config() or {}
+    except Exception:  # noqa: BLE001 —— 配置还没就绪时一律退回默认 ✓
+        cfg = {}
+    candidate = password_file_for(cfg.get("active_profile") or "")
+    if candidate != PASSWORD_FILE and os.path.isfile(candidate):
+        return candidate
+    return PASSWORD_FILE
+
+
+def _load_password_from_disk():
+    """从「当前生效的密码文件」读入 _PWD_VALUE。文件不存在或内容全是模板提示 → None。
+
+    规则（v2.0.4.0；v2.1.1.0 起文件可按方案不同 ✓）：
       - 空行        → 跳过
       - 模板提示行  → 跳过（见 _is_password_hint）
       - 其余任何行  → 视为密码原文（**包括以 `#` 开头的密码**）
       - 用 utf-8-sig 读，容忍手工编辑时留下的 BOM（否则首字符会带 \\ufeff）
     """
     global _PWD_VALUE
+    path = active_password_file()
     with PWD_LOCK:
-        if not os.path.isfile(PASSWORD_FILE):
+        if not os.path.isfile(path):
             _PWD_VALUE = None
             return None
         try:
-            with open(PASSWORD_FILE, "r", encoding="utf-8-sig") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 line = ""
                 for raw in f:
                     s = raw.strip()
@@ -210,7 +243,7 @@ def _load_password_from_disk():
                     line = s
                     break
         except (OSError, UnicodeDecodeError) as exc:
-            logger.error("读取 password.txt 失败: %s", exc)
+            logger.error("读取 %s 失败: %s", os.path.basename(path), exc)
             _PWD_VALUE = None
             return None
         pwd = line.strip()
@@ -224,14 +257,15 @@ def _get_password():
 
 
 def _save_password_to_disk(password):
-    """写入 password.txt（原子写：唯一 tmp → replace，v2.0.6.2 起 tmp 名带 pid）。"""
+    """写入**当前生效的密码文件**（原子写：唯一 tmp → replace，v2.0.6.2 起 tmp 名带 pid）。"""
     global _PWD_VALUE
     if not isinstance(password, str) or len(password) < 1:
         raise ValueError("password 必须是非空字符串")
-    tmp = "{}.{}.tmp".format(PASSWORD_FILE, os.getpid())
+    path = active_password_file()
+    tmp = "{}.{}.tmp".format(path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(password.rstrip("\r\n") + "\n")
-    os.replace(tmp, PASSWORD_FILE)
+    os.replace(tmp, path)
     with PWD_LOCK:
         _PWD_VALUE = password
 
