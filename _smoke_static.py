@@ -175,7 +175,8 @@ check("v2.0.4.5 run_once 改为非阻塞抢锁", "_RUN_LOCK.acquire(blocking=Fal
 check("v2.0.4.5 不再先持锁再判 login_in_progress（死逻辑已除）", "with _RUN_LOCK:" not in _proto_code)
 check("v2.0.4.5 手工抢到的锁会被释放", "_RUN_LOCK.release()" in _src_proto)
 check("v2.0.4.5 config 写盘用唯一 tmp 名", '"{}.{}.tmp"' in src_svc and "CONFIG_FILE, os.getpid()" in src_svc)
-check("v2.0.4.5 password 写盘用唯一 tmp 名", "PASSWORD_FILE, os.getpid()" in src_svc)
+check("v2.0.4.5 password 写盘用唯一 tmp 名",
+      "os.getpid()" in src_svc and "os.replace(tmp, path)" in src_svc)
 check("v2.0.4.5 installer 不再用弃用的 IsTaskSelected",
       "WizardIsTaskSelected('desktopicon')" in _iss_src
       and "if IsTaskSelected('desktopicon')" not in _iss_src)
@@ -440,8 +441,9 @@ check("v2.0.9.0 五个接口 + 配置页卡片在位",
 _cfg0 = {"host": "1.2.3.4", "port": 80, "auto_check_interval_min": 30, "account": "2023",
          "network_guard_enabled": False, "guard_allowed_ssids": "", "guard_allowed_subnets": ""}
 _snap = _pf.snapshot(_cfg0)
-check("v2.0.9.0 快照只含位置相关字段（账号等不进方案）",
-      "account" not in _snap and set(_snap) == set(_pf.PROFILE_KEYS), str(sorted(_snap)))
+check("v2.0.9.0 / v2.1.1.0 快照含位置相关字段（v2.1.1.0 起账号与后缀也在内）",
+      "account" in _snap and set(_snap) <= set(_pf.PROFILE_KEYS),
+      str(sorted(_snap)))
 _profs, _errs = _pf.upsert({}, "家里",
                            {"network_guard_enabled": True, "guard_allowed_ssids": "Home-WiFi"},
                            "Home-WiFi")
@@ -450,8 +452,8 @@ check("v2.0.9.0 新建方案 + 记下自动匹配 Wi-Fi",
       and _profs["家里"]["match_ssids"] == ["Home-WiFi"], str(_errs))
 check("v2.0.9.0 方案名归一化 / 非法名被拒",
       _pf.normalize_name("  教  室 ") == "教 室" and _pf.upsert({}, "a/b", {})[1] != [])
-check("v2.0.9.0 未知字段被拒（防止把账号塞进方案）",
-      _pf.validate_values({"account": "2023"}) != [])
+check("v2.0.9.0 未知字段被拒（**密码绝不许塞进方案**）",
+      _pf.validate_values({"password": "x"}) != [] and _pf.validate_values({"账号": "x"}) != [])
 _merged, _errs2 = _pf.apply_to_config(_cfg0, _profs, "家里")
 check("v2.0.9.0 应用方案：覆盖位置字段 + 保留账号 + 不改原对象",
       not _errs2 and _merged["guard_allowed_ssids"] == "Home-WiFi"
@@ -1338,6 +1340,155 @@ check("v2.0.14.0 周期自检异常后线程仍活着（不再静默死掉）",
       not _th14.is_alive() and len(_svc14_calls) >= 2 and any("周期自检循环异常" in l for l in _boom_log.lines),
       repr((_th14.is_alive(), len(_svc14_calls), _boom_log.lines[:1])))
 
+# ---- v2.1.1.0：网络变化即触发（治「刚连上 Wi-Fi 要干等到下一个周期才登录」）----
+# 老行为：run_periodic 一口气 wait(wait_sec)（最长 60 分钟），网络早就通了也不登 ✗
+_w1 = svc.NetworkWatcher()
+check("v2.1.1.0 网络监视：拿到地址才算「刚连上网」",
+      _w1.observe_address("") == (False, "")
+      and _w1.observe_address("172.16.59.11")[0] is True
+      and _w1.observe_address("172.16.59.11") == (False, ""))
+_w2 = svc.NetworkWatcher()
+_w2.observe_address("10.0.0.5")
+check("v2.1.1.0 网络监视：换网立刻检查，断网不折腾",
+      _w2.observe_address("172.16.30.7")[0] is True
+      and _w2.observe_address("") == (False, "")
+      and _w2.observe_address("172.16.30.7")[0] is True)
+_w3 = svc.NetworkWatcher()
+check("v2.1.1.0 网络监视：Wi-Fi 名变了才算「换场景」",
+      _w3.observe_ssid(None) == (False, "")
+      and _w3.observe_ssid("Campus-WiFi") == (False, "")
+      and _w3.observe_ssid("Dorm-WiFi")[0] is True
+      and _w3.observe_ssid("Dorm-WiFi") == (False, "")
+      and "Dorm-WiFi" in _w3.observe_ssid("Campus-WiFi")[1])
+check("v2.1.1.0 主用地址探测：UDP connect 即刻返回（不发包 / 不起进程）",
+      _proto.primary_local_ip("127.0.0.1", 80) == "127.0.0.1"
+      and _proto.primary_local_ip("127.0.0.1") == "127.0.0.1")
+check("v2.1.1.0 采样节拍：便宜通道秒级、贵通道明显更慢",
+      1 <= svc.NETWATCH_TICK_SEC <= 5
+      and svc.NETWATCH_SSID_EVERY_TICKS >= 2
+      and svc.NETWATCH_TICK_SEC * svc.NETWATCH_SSID_EVERY_TICKS <= 120,
+      repr((svc.NETWATCH_TICK_SEC, svc.NETWATCH_SSID_EVERY_TICKS)))
+check("v2.1.1.0 状态里留了「为什么突然查了一次」",
+      "last_net_change_at" in svc.STATE and "last_net_change_why" in svc.STATE)
+
+# ---- v2.1.1.0：Wi-Fi 名清单（配置页「当前 SSID + 点一下就填」）----
+check("v2.1.1.0 Wi-Fi 清单：`标签 : 名字` 取右半边（中英文 netsh 都能认）",
+      _proto._parse_label_values(
+          "配置文件信息\n-------------\n    所有用户配置文件 : Campus-WiFi\n"
+          "    All User Profile     : Dorm-WiFi\n    所有用户配置文件 : Campus-WiFi\n"
+      ) == ["Campus-WiFi", "Dorm-WiFi"])
+check("v2.1.1.0 Wi-Fi 清单：空值 / 分隔线不混进来，且有上限",
+      _proto._parse_label_values("   :   \n----\n: x\n a : b\n") == ["x", "b"]
+      and _proto.MAX_SSID_LIST >= 10)
+check("v2.1.1.0 /api/wifi 端点与前端挂钩都在位",
+      "def api_get_wifi" in src_web
+      and '"/api/wifi"' in src_web
+      and "wifi: getJson" in src_web
+      and "id=\"ssid-now\"" in src_web
+      and "id=\"ssid-chips\"" in src_web
+      and "function addSsidToGuard" in src_web)
+check("v2.1.1.0 协议层提供 known_ssids / visible_ssids（读不到回空列表，不抛异常）",
+      callable(getattr(_proto, "known_ssids", None))
+      and callable(getattr(_proto, "visible_ssids", None))
+      and isinstance(_proto.known_ssids(), list)
+      and isinstance(_proto.visible_ssids(), list))
+
+# ---- v2.1.1.0：多网络多账号（账号 + 后缀进方案；密码仍然不进配置）----
+_mp_cfg = {"host": "172.16.80.3", "port": 80, "account": "2023000001", "suffix": "",
+           "auto_check_interval_min": 30, "network_guard_enabled": False,
+           "guard_allowed_ssids": "", "guard_allowed_subnets": "",
+           "profiles": {}, "active_profile": "", "profiles_auto_switch": False}
+_mp_profiles, _mp_err = _pf.upsert({}, "宿舍", _pf.snapshot(_mp_cfg))
+check("v2.1.1.0 方案里现在**带**账号与后缀（多网络多账号的前提）",
+      not _mp_err and {"account", "suffix"} <= set(_mp_profiles["宿舍"]["values"]),
+      repr(_mp_err))
+_mp_new, _mp_new_err = _pf.upsert({}, "教学楼", {"host": "172.16.80.3", "port": 80,
+                                                 "account": "2023000002", "suffix": "@yd"})
+check("v2.1.1.0 老方案（没有账号/后缀键）切换后**照旧不动**（向后兼容）",
+      not _mp_new_err
+      and _pf.apply_to_config(_mp_cfg, _pf.upsert({}, "老方案", {"port": 80})[0],
+                              "老方案")[0].get("account") == "2023000001")
+_mp_merged, _mp_merge_err = _pf.apply_to_config(
+    _mp_cfg, _mp_new, "教学楼", validate_config=lambda c: [])
+check("v2.1.1.0 切到「教学楼」→ 账号与后缀**一起换**（宿舍/校内切换的核心）",
+      not _mp_merge_err
+      and _mp_merged.get("account") == "2023000002"
+      and _mp_merged.get("suffix") == "@yd"
+      and _mp_merged.get("active_profile") == "教学楼",
+      repr((_mp_merge_err, _mp_merged.get("account"), _mp_merged.get("suffix"))))
+_mp_saved_pf = getattr(svc, "_profiles_mod", None)
+_mp_saved_load = getattr(svc, "_load_config", None)
+svc._profiles_mod = _pf
+try:
+    check("v2.1.1.0 密码文件可按方案区分（没方案名 / 名字不合法 → 默认文件）",
+          svc.password_file_for("宿舍").endswith("password.宿舍.txt")
+          and svc.password_file_for("") == svc.PASSWORD_FILE
+          and svc.password_file_for("a/b") == svc.PASSWORD_FILE,
+          repr((svc.password_file_for("宿舍"), svc.PASSWORD_FILE)))
+    svc._load_config = lambda: {"active_profile": "宿舍"}
+    check("v2.1.1.0 生效文件优先级：方案专属文件不存在时回退默认",
+          svc.active_password_file() == svc.PASSWORD_FILE,
+          repr(svc.active_password_file()))
+    check("v2.1.1.0 结构上保证**密码永不进配置**（PROFILE_KEYS 里没有密码字段）",
+          all("password" not in k for k in _pf.PROFILE_KEYS))
+finally:
+    svc._profiles_mod = _mp_saved_pf
+    if _mp_saved_load is not None:
+        svc._load_config = _mp_saved_load
+
+# ---- v2.1.1.0：安全冗余（新功能不许把既有防护漏掉）----
+import web_api as _web_api_probe  # noqa: E402
+
+_sec_cfg = {"account": "2023000001", "host": "172.16.80.3", "port": 80,
+            "profiles": {"宿舍": {"values": {"account": "2023999999", "suffix": "@yd"}},
+                         "教学楼": {"values": {"account": "2023000001", "suffix": ""}}},
+            "suffix": ""}
+check("v2.1.1.0 脱敏收集：顶层 + 每个方案里的账号都会被列出来（去重）",
+      _web_api_probe._profile_accounts(_sec_cfg) == ["2023000001", "2023999999"],
+      repr(_web_api_probe._profile_accounts(_sec_cfg)))
+_masked = _web_api_probe._mask_cfg_accounts(_sec_cfg, _web_api_probe._profile_accounts(_sec_cfg))
+check("v2.1.1.0 诊断包配置：**方案里的账号也打码**（多账号一起脱敏）",
+      "2023999999" not in str(_masked) and "2023000001" not in str(_masked)
+      and "2023******" in str(_masked),
+      str(_masked.get("profiles")))
+check("v2.1.1.0 脱敏是深拷贝：**不污染内存里的实时配置**",
+      _sec_cfg["profiles"]["宿舍"]["values"]["account"] == "2023999999"
+      and _sec_cfg["account"] == "2023000001")
+check("v2.1.1.0 长的账号先替换（短账号不会把长账号截一半）",
+      _web_api_probe._mask_every_account("A=2023000001 B=202300000123",
+                                         ["2023000001", "202300000123"]).count("*") > 0
+      and "202300000123" not in _web_api_probe._mask_every_account(
+          "x 202300000123", ["2023000001", "202300000123"]))
+_sec_ignore = pathlib.Path(".gitignore").read_text(encoding="utf-8")
+check("v2.1.1.0 每个方案的密码文件都被 .gitignore 覆盖（一个都不能入库）",
+      "password.txt" in _sec_ignore and "password.*.txt" in _sec_ignore)
+_sec_saved = {k: getattr(_web_api_probe, k, None)
+              for k in ("_load_config", "_get_password", "_snapshot_state")}
+_web_api_probe._load_config = lambda: dict(_sec_cfg)
+_web_api_probe._get_password = lambda: "#Fake-Pwd-0000#"
+_web_api_probe._snapshot_state = lambda: {}
+try:
+    _sec_zip = _web_api_probe._build_diagnostics_zip()
+finally:
+    for _k, _v in _sec_saved.items():
+        if _v is not None:
+            setattr(_web_api_probe, _k, _v)
+with zipfile.ZipFile(io.BytesIO(_sec_zip)) as _zf:
+    _sec_names = _zf.namelist()
+    _sec_cfg_text = _zf.read("config.json").decode("utf-8")
+check("v2.1.1.0 诊断包里**没有任何密码文件**，密码原文也不在包内",
+      all("password" not in n for n in _sec_names)
+      and "#Fake-Pwd-0000#" not in _sec_zip.decode("utf-8", "replace"),
+      repr(_sec_names))
+check("v2.1.1.0 诊断包 config.json：两个账号都已脱敏",
+      "2023000001" not in _sec_cfg_text and "2023999999" not in _sec_cfg_text)
+check("v2.1.1.0 配置页：方案卡片显示账号、匹配名可一键用当前 Wi-Fi",
+      "profile-use-current-ssid" in src_web
+      and "var lastWifi = null;" in src_web
+      and "cur.values.account" in src_web
+      and "账号与后缀会一起切过来" in src_web
+      and "账号密码不受影响" not in src_web)
+
 # ---- v2.1.0.0（2.1 线开线）：P7 技术债 ----
 # P7-2（隐私，优先）：登录是 **GET**，密码就在 URL 的 query 里 —— 任何把 URL 带出来的
 # 异常（HTTPError / URLError 包装 / socket 层错误）都会顺手把密码写进日志 ✗。
@@ -1551,7 +1702,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.0.0", version.VERSION == "2.1.0.0", version.VERSION)
+check("版本 = 2.1.1.0", version.VERSION == "2.1.1.0", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

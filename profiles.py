@@ -17,11 +17,19 @@
 import re
 
 # 方案里允许出现的键（顺序 = 界面展示顺序）
-PROFILE_KEYS = ("host", "port", "auto_check_interval_min",
+#
+# v2.1.1.0：**账号与后缀**进方案了 ✓ —— 这是「多网络多账号」的关键：
+#   宿舍用移动账号 + `@yd`、教学楼用校园账号 + 无尾缀，走到哪自动切到哪 ✓。
+# ⚠️ 密码**仍然不进**配置 ✗：它只在 `password.txt`（或可选的 `password.<方案名>.txt`）里 ✓，
+#   这是 v2.0.9.0 定下的隐私口径，没有放松 ✓。
+# 兼容性：老方案里没有这两个键 → 切换时**不会**动它们 ✓（apply_to_config 只覆盖方案里有的键 ✓）。
+PROFILE_KEYS = ("host", "port", "account", "suffix", "auto_check_interval_min",
                 "network_guard_enabled", "guard_allowed_ssids", "guard_allowed_subnets")
 PROFILE_LABELS = {
     "host": "认证网关",
     "port": "网关端口",
+    "account": "账号",
+    "suffix": "账号后缀（校内公共场合留空）",
     "auto_check_interval_min": "检查间隔",
     "network_guard_enabled": "网络位置守卫",
     "guard_allowed_ssids": "允许的 Wi-Fi 名",
@@ -86,6 +94,10 @@ def validate_values(values):
             errors.append("方案里不认识的字段：{}（只允许 {}）".format(k, "、".join(PROFILE_KEYS)))
     if "host" in values and not isinstance(values["host"], str):
         errors.append("host 必须是字符串")
+    # v2.1.1.0：账号与后缀进方案（后缀允许空串 = 校内直连 ✓）
+    for key in ("account", "suffix"):
+        if key in values and not isinstance(values[key], str):
+            errors.append("{} 必须是字符串".format(key))
     if "port" in values:
         try:
             port = int(values["port"])

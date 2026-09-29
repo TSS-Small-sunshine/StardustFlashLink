@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.0.0)
+REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.1.0)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
 REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
 REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。

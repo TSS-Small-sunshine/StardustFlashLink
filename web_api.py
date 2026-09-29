@@ -235,6 +235,49 @@ def _read_json_body(handler):
         raise ValueError("请求体不是合法 JSON")
 
 
+def _protocol():
+    """拿协议模块：优先用注入的 ✓，没有就同目录直接导入 ✓ —— **绝不抛异常** ✗。"""
+    mod = globals().get("_protocol_mod")
+    if mod is not None:
+        return mod
+    try:
+        import protocol as fallback       # 同目录，导入安全 ✓（单测 / 预览也用得上 ✓）
+        return fallback
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def api_get_wifi():
+    """GET /api/wifi — 当前 / 已保存 / 附近可见的 Wi-Fi 名（v2.1.1.0）。
+
+    给配置页用：把当前 SSID 显示出来 ✓，并把能选的名字列出来让人**点一下就填** ✓
+    （守卫白名单 / 方案匹配名，手打差一个字母就永远不命中 ✗）。
+    读不到就回空列表 —— **绝不 500** ✗。
+    """
+    empty = {"ok": True, "current": "", "known": [], "visible": []}
+    mod = _protocol()
+    if mod is None:
+        return {"ok": False, "error": "协议模块不可用", "current": "", "known": [], "visible": []}
+    try:
+        current = mod.get_current_ssid() or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("读当前 Wi-Fi 名失败: %s", exc)
+        current = ""
+    known, visible = [], []
+    for key, func in (("known", mod.known_ssids), ("visible", mod.visible_ssids)):
+        try:
+            values = func() or []
+        except Exception as exc:  # noqa: BLE001 —— 单项失败不影响其它两栏 ✓
+            logger.exception("读 %s Wi-Fi 列表失败: %s", key, exc)
+            values = []
+        if key == "known":
+            known = values
+        else:
+            visible = values
+    empty.update({"current": current, "known": known, "visible": visible})
+    return empty
+
+
 def api_get_profiles():
     """GET /api/profiles — 配置方案列表（方案 = 位置相关字段的快照）。"""
     mod = globals().get("_profiles_mod")
@@ -716,10 +759,64 @@ def _mask_account(text, account):
     return text.replace(account, keep + "*" * max(4, len(account) - len(keep)))
 
 
-def _desensitize(text, account="", password=""):
-    """诊断包 / 日志展示前的脱敏（v2.0.12.0）。
+def _profile_accounts(cfg):
+    """收集配置里的**所有**账号：顶层 + 每个方案里存的（v2.1.1.0 多网络多账号 ✓）。
 
-    - 账号 → 「前 4 位 + ******」✓
+    为什么要单独收集（安全冗余 ✓）：方案里可能存着**跟顶层不一样**的账号 ——
+    只按顶层那一个做替换的话，方案里的账号会**原样进诊断包** ✗。
+    """
+    out = []
+    top = str((cfg or {}).get("account") or "").strip()
+    if top:
+        out.append(top)
+    profiles = (cfg or {}).get("profiles") or {}
+    if isinstance(profiles, dict):
+        for entry in profiles.values():
+            values = entry.get("values") if isinstance(entry, dict) else None
+            account = str((values or {}).get("account") or "").strip()
+            if account and account not in out:
+                out.append(account)
+    return out
+
+
+def _mask_every_account(text, accounts):
+    """把文本里出现的**每一个**账号都打码 ✓（**长的先替** ✗ —— 否则短账号会把长账号截一半 ✗）。"""
+    if not text:
+        return text
+    for account in sorted([str(a) for a in (accounts or []) if a], key=len, reverse=True):
+        text = _mask_account(text, account)
+    return text
+
+
+def _mask_cfg_accounts(cfg, accounts):
+    """诊断包专用：**深拷贝**配置并把所有账号打码（顶层 + 每个方案 ✓）。
+
+    必须是深拷贝 ✗ —— 直接改 `cfg` 会把内存里的实时配置也改坏 ✓（老代码只改了自己那份副本的顶层字段 ✓）。
+    """
+    out = dict(cfg or {})
+    if out.get("account"):
+        out["account"] = _mask_every_account(str(out["account"]), accounts)
+    profiles = out.get("profiles")
+    if isinstance(profiles, dict):
+        masked_profiles = {}
+        for name, entry in profiles.items():
+            if isinstance(entry, dict):
+                entry = dict(entry)
+                values = entry.get("values")
+                if isinstance(values, dict):
+                    values = dict(values)
+                    if values.get("account"):
+                        values["account"] = _mask_every_account(str(values["account"]), accounts)
+                    entry["values"] = values
+            masked_profiles[name] = entry
+        out["profiles"] = masked_profiles
+    return out
+
+
+def _desensitize(text, account="", password="", accounts=None):
+    """诊断包 / 日志展示前的脱敏（v2.0.12.0；v2.1.1.0 支持多账号 ✓）。
+
+    - 账号 → 「前 4 位 + ******」✓ —— `accounts` 里的**每一个**都替换 ✓
     - 密码 → `***`（正常情况下日志里不该有；这是**兜底**，且它永远不会被写进包 ✓）
     - MAC → 前 4 位 + `********` ✓
     - **IP 保留**：校园网内网地址（172.16.x.x 那类网关）是排障必需 ——
@@ -727,8 +824,8 @@ def _desensitize(text, account="", password=""):
     """
     if not text:
         return text
-    if account:
-        text = _mask_account(text, account)
+    every = [account] + list(accounts or [])
+    text = _mask_every_account(text, every)
     if password:
         text = text.replace(password, "***")
     return _MAC_RE.sub(lambda m: m.group(0)[:4] + "*" * (len(m.group(0)) - 4), text)
@@ -805,6 +902,9 @@ def _build_diagnostics_zip():
     except Exception:  # noqa: BLE001
         cfg = {}
     account = str(cfg.get("account") or "")
+    # v2.1.1.0（安全冗余 ✓）：方案里可能存着**别的**账号（多网络多账号 ✓）——
+    # 全部收集起来一起脱敏，免得方案里的账号原样进包 ✗。
+    accounts = _profile_accounts(cfg)
     password = ""
     try:
         password = _get_password() or ""   # 只为「万一被记进日志」兜底；它本身永不出现在包里
@@ -814,9 +914,7 @@ def _build_diagnostics_zip():
         snap = _snapshot_state()
     except Exception:  # noqa: BLE001
         snap = {}
-    masked_cfg = dict(cfg)
-    if account:
-        masked_cfg["account"] = _mask_account(account, account)
+    masked_cfg = _mask_cfg_accounts(cfg, accounts)
     summary = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "version": VERSION,
@@ -847,7 +945,7 @@ def _build_diagnostics_zip():
         zf.writestr("config.json", json.dumps(masked_cfg, ensure_ascii=False, indent=2))
         for name, path in _log_paths()[:DIAGNOSTIC_MAX_FILES]:
             zf.writestr("logs/{}".format(name),
-                        _desensitize(_diagnostic_read(path), account, password))
+                        _desensitize(_diagnostic_read(path), account, password, accounts))
     return buf.getvalue()
 
 
@@ -1141,6 +1239,10 @@ class _Handler(BaseHTTPRequestHandler):
                     except (TypeError, ValueError, IndexError):
                         _days = 7
                 _send_json(self, 200, api_get_metrics(_days))
+                return
+            # —— Wi-Fi 名清单（v2.1.1.0）：当前 SSID + 可点选的名字 ✓ ——
+            if path == "/api/wifi":
+                _send_json(self, 200, api_get_wifi())
                 return
             # —— 配置方案（v2.0.9.0 / B5）——
             if path == "/api/profiles":
@@ -1715,6 +1817,14 @@ a:hover { color: var(--accent-hover); }
 }
 .field input.is-invalid, .field select.is-invalid { border-color: var(--err); box-shadow: 0 0 0 4px var(--err-fill); }
 .field input[type=number].cfg-lg, .field input[type=text].cfg-lg { padding: 13px 15px; font-size: 15px; }
+/* v2.1.1.0：Wi-Fi 名「点一下就填」——当前 SSID 一行 + 可点选的名字 */
+.ssid-bar { display: flex; align-items: center; gap: 10px; margin: 8px 0 2px; flex-wrap: wrap; font-size: 13px; }
+.ssid-bar b { font-weight: 600; }
+.ssid-bar button, .ssid-chips button { border: 1px solid rgba(127,127,127,.35); background: transparent;
+  color: inherit; border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.ssid-bar button:hover, .ssid-chips button:hover { border-color: rgba(127,127,127,.75); }
+.ssid-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.ssid-chips .ssid-hint { font-size: 12px; opacity: .6; }
 .hint { font-size: 12.5px; color: var(--text-3); margin-top: 6px; line-height: 1.45; }
 .err { font-size: 12.5px; color: var(--err); margin-top: 6px; }
 .err:empty { display: none; }
@@ -2112,6 +2222,10 @@ code.path {
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <input type="text" id="profile-new-name" class="cfg-lg" style="flex:1 1 150px;" placeholder="方案名（例如 家里）" autocomplete="off" spellcheck="false" maxlength="24">
           <input type="text" id="profile-match-ssids" class="cfg-lg" style="flex:2 1 220px;" placeholder="自动匹配的 Wi-Fi 名（可选，逗号分隔）" autocomplete="off" spellcheck="false">
+        <!-- v2.1.1.0：当前 Wi-Fi 名一键填进「自动匹配」（不用手打，少一个字母就白配） -->
+        <div class="ssid-chips" style="margin:0;">
+          <button type="button" id="profile-use-current-ssid">用当前 Wi-Fi</button>
+        </div>
           <button class="btn" id="btn-profile-save" type="button">用当前配置保存</button>
         </div>
         <div class="hint">填了「自动匹配的 Wi-Fi 名」= <b>自动方案</b>：打开下面的自动切换后，一连上这个 Wi-Fi 就自动切过去。</div>
@@ -2224,6 +2338,12 @@ code.path {
         <label for="cfg-guard-ssids">允许的 Wi-Fi 名称（SSID）</label>
         <input type="text" id="cfg-guard-ssids" class="cfg-lg" placeholder="例如 Campus-WiFi,Dorm-WiFi" autocomplete="off">
         <div class="hint">逗号分隔（中英文逗号都认）；留空 = 不按 Wi-Fi 判断</div>
+        <!-- v2.1.1.0：当前 Wi-Fi 直接显示 + 候选名字点一下就填（省得手打、差一个字母就白配） -->
+        <div class="ssid-bar">
+          <span>当前 Wi-Fi：<b id="ssid-now">读取中…</b></span>
+          <button type="button" id="ssid-refresh">重新读取</button>
+        </div>
+        <div class="ssid-chips" id="ssid-chips"></div>
       </div>
       <div class="field">
         <label for="cfg-guard-subnets">允许的网段（CIDR）</label>
@@ -2621,9 +2741,14 @@ code.path {
     return fetch(url, opt).then(function (r) { return r.json(); });
   }
 
+  /* v2.1.1.0：最近一次 /api/wifi 的结果（给「用当前 Wi-Fi」这类按钮复用） */
+  var lastWifi = null;
+
   var API = {
     status: getJson.bind(null, '/api/status'),
     config: getJson.bind(null, '/api/config'),
+    /* v2.1.1.0：当前 SSID + 已保存 / 可见的 Wi-Fi 名（给「点一下就填」用） */
+    wifi: getJson.bind(null, '/api/wifi'),
     about: getJson.bind(null, '/api/about'),
     logPath: getJson.bind(null, '/api/log_file_path'),
     logTail: function (offset, max, level) {
@@ -2907,12 +3032,64 @@ code.path {
       $('cfg-guard-enabled').checked = !!c.network_guard_enabled;
       $('cfg-guard-ssids').value = c.guard_allowed_ssids || '';
       $('cfg-guard-subnets').value = c.guard_allowed_subnets || '';
+      loadWifi();                                   /* v2.1.1.0：顺便把当前 SSID 与候选名字读出来 */
       setPwdBadge(c.password_status);
       clearErrors();
       text($('config-state'), '已从服务端读取，修改后点击保存');
     }).catch(function () {
       toast('读取配置失败，请稍后重试', 'error');
     });
+  }
+
+  /* v2.1.1.0：Wi-Fi 名「读出来 + 点一下就填」。
+     背景：白名单与方案匹配名以前只能手打 —— 差一个字母就永远不命中，
+     而用户完全不知道为什么守卫不生效。现在把当前 SSID 显示出来，
+     并把「保存过的 / 附近可见的」名字做成可点的药丸，点一下就追加进输入框。 */
+  function loadWifi() {
+    var now = $('ssid-now');
+    var chips = $('ssid-chips');
+    if (!now || !chips) return;
+    if (!now.dataset.bound) {                     /* 刷新按钮只绑一次 */
+      var btn = $('ssid-refresh');
+      if (btn) btn.addEventListener('click', loadWifi);
+      now.dataset.bound = '1';
+    }
+    now.textContent = '读取中…';
+    chips.textContent = '';
+    API.wifi().then(function (w) {
+      if (!w || w.ok === false) { now.textContent = '读不到'; return; }
+      lastWifi = w;
+      now.textContent = w.current ? w.current : '读不到（有线 / 没连 Wi-Fi）';
+      var names = [];
+      (w.known || []).forEach(function (n) { if (n && names.indexOf(n) < 0) names.push(n); });
+      (w.visible || []).forEach(function (n) { if (n && names.indexOf(n) < 0) names.push(n); });
+      if (!names.length) {
+        var hint = document.createElement('span');
+        hint.className = 'ssid-hint';
+        hint.textContent = '没读到可选的 Wi-Fi 名，直接手填也行';
+        chips.appendChild(hint);
+        return;
+      }
+      names.forEach(function (name) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = name;
+        btn.addEventListener('click', function () { addSsidToGuard(name); });
+        chips.appendChild(btn);
+      });
+    }).catch(function () { now.textContent = '读不到'; });
+  }
+
+  /* 把一个 SSID 追加进「允许的 Wi-Fi 名称」输入框（去重，中英文逗号都用） */
+  function addSsidToGuard(name) {
+    var box = $('cfg-guard-ssids');
+    if (!box) return;
+    var parts = box.value.replace(/，/g, ',').split(',').map(function (s) { return s.trim(); })
+      .filter(function (s) { return s; });
+    if (parts.indexOf(name) >= 0) { toast('“' + name + '”已经在里面了', 'ok'); return; }
+    parts.push(name);
+    box.value = parts.join(',');
+    toast('已加入：' + name, 'ok');
   }
 
   function collectConfig() {
@@ -3652,7 +3829,11 @@ code.path {
       items.forEach(function (it) {
         var opt = document.createElement('option');
         opt.value = it.name;
-        opt.textContent = it.name + (it.active ? '（当前）' : '') + (it.auto ? ' · 自动' : '');
+        /* v2.1.1.0：方案里现在带账号与后缀（多网络多账号）→ 列表里就能看出用的是哪个 */
+        var acc = (it.values && it.values.account) ? String(it.values.account) : '';
+        var suf = (it.values && it.values.suffix) ? String(it.values.suffix) : '';
+        opt.textContent = it.name + (it.active ? '（当前）' : '') + (it.auto ? ' · 自动' : '')
+          + (acc ? (' · ' + acc + suf) : '');
         sel.appendChild(opt);
       });
     }
@@ -3665,9 +3846,11 @@ code.path {
     }
     text($('profile-hint'), cur
       ? ('当前方案：' + cur.name + ' —— ' + cur.desc
+         + ((cur.values && cur.values.account)
+            ? (' · 账号 ' + cur.values.account + (cur.values.suffix || '')) : '')
          + (cur.match_ssids.length ? (' · 自动匹配 ' + cur.match_ssids.join('、')) : ' · 手动方案'))
       : (items.length
-         ? '在列表里选一个方案，点「应用选中方案」即可切换（账号密码不受影响）。'
+         ? '在列表里选一个方案，点「应用选中方案」即可切换 —— 账号与后缀会一起切过来。'
          : '还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。'));
     var auto = $('profile-auto-switch');
     if (auto) auto.checked = !!(p && p.auto_switch);
@@ -3696,6 +3879,22 @@ code.path {
     var applyBtn = $('btn-profile-apply');
     var delBtn = $('btn-profile-delete');
     var autoBox = $('profile-auto-switch');
+    var useCurSsidBtn = $('profile-use-current-ssid');
+    if (useCurSsidBtn) useCurSsidBtn.addEventListener('click', function () {
+      var box = $('profile-match-ssids');
+      if (!box) return;
+      var current = (lastWifi && lastWifi.current) ? String(lastWifi.current) : '';
+      if (!current) {
+        text($('err-profile'), '读不到当前 Wi-Fi 名（有线 / 没连 Wi-Fi 时是正常的）');
+        return;
+      }
+      var parts = box.value.replace(/，/g, ',').split(',').map(function (s) { return s.trim(); })
+        .filter(function (s) { return s; });
+      if (parts.indexOf(current) < 0) parts.push(current);
+      box.value = parts.join(',');
+      text($('err-profile'), '');
+      toast('已加入匹配：' + current, 'success', 2000);
+    });
     if (saveBtn) saveBtn.addEventListener('click', function () {
       var nameEl = $('profile-new-name'), matchEl = $('profile-match-ssids');
       var name = nameEl ? nameEl.value : '';

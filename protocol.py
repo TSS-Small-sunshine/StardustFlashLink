@@ -149,6 +149,26 @@ def wait_network(host, port, timeout):
     return False
 
 
+def primary_local_ip(host, port=80):
+    """本机在「通往 host」这条路上用的源 IP（**UDP connect，不发包、不起进程** ✓）。
+
+    为什么要它（v2.1.1.0）：网络变化监视每 5 秒看一次「地址变没变」✓ ——
+    这时候**绝不能**去跑 `ipconfig`（一次几十毫秒、还要起进程 ✗），
+    UDP connect 只让内核选一下路由，微秒级 ✓。
+
+    拿不到（没有默认路由等）→ 返回空串 "" ✓。
+    """
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect((host, int(port)))
+            return sock.getsockname()[0]
+        finally:
+            sock.close()
+    except OSError:
+        return ""
+
+
 def discover_network(host):
     """获取本机在校园网段的 IP 和 MAC，用于登录表单。
 
@@ -338,23 +358,9 @@ def _split_csv(value):
 
 def get_current_ssid():
     """当前无线 SSID；读不到（有线 / 无 WLAN 网卡 / 非 Windows）返回 None。"""
-    try:
-        proc = subprocess.run(
-            ["netsh", "wlan", "show", "interfaces"],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+    text = _netsh_text(["wlan", "show", "interfaces"])
+    if not text:
         return None
-    raw = proc.stdout or b""
-    text = None
-    for enc in ("utf-8", "gbk"):          # 中文 Windows 的 netsh 输出是 GBK
-        try:
-            text = raw.decode(enc)
-            break
-        except UnicodeDecodeError:
-            continue
-    if text is None:
-        text = raw.decode("utf-8", errors="replace")
     for line in text.splitlines():
         if "BSSID" in line:               # BSSID 行里也含 "SSID"，必须先排除
             continue
@@ -383,6 +389,74 @@ def get_local_ips():
     except OSError:
         pass
     return [ip for ip in ips if ip and not ip.startswith("127.")]
+
+
+# ============================================================
+# Wi-Fi 名清单（v2.1.1.0：配置页「点一下就填」）
+#
+# 为什么要它：守卫白名单 / 方案匹配名都得**手打** SSID ✗ ——
+#   差一个字母就永远不命中（而且用户完全看不出来为什么守卫不生效 ✗）。
+# 这里把「本机保存过的」和「附近能看到的」名字列出来，界面直接点选 ✓。
+# 解析只看 `标签 : 名字` 的右半边 → 中英文系统的 netsh 输出都能认 ✓。
+# ============================================================
+MAX_SSID_LIST = 40          # 列表上限：某些环境能刷出几百条，会把界面撑爆 ✗
+
+
+def _netsh_text(args):
+    """跑一条 netsh 并返回文本（**中英文 Windows 的编码都兼容** ✓）；失败 → None ✓。"""
+    try:
+        proc = subprocess.run(
+            ["netsh"] + list(args),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    raw = proc.stdout or b""
+    for enc in ("utf-8", "gbk"):          # 中文 Windows 的 netsh 输出是 GBK
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _parse_label_values(text):
+    """把 `标签 : 名字` 的**右半边**收集成列表 ✓（语言无关 ✓，去重、限量 ✓）。"""
+    out = []
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        name = line.split(":", 1)[1].strip()
+        if not name or name.startswith("-"):
+            continue
+        if name not in out:
+            out.append(name)
+    return out[:MAX_SSID_LIST]
+
+
+def known_ssids():
+    """本机**保存过**的 Wi-Fi 名（`netsh wlan show profiles`）→ 列表 ✓。"""
+    text = _netsh_text(["wlan", "show", "profiles"])
+    return _parse_label_values(text) if text else []
+
+
+def visible_ssids():
+    """附近**当前可见**的 Wi-Fi 名（`netsh wlan show networks`）→ 列表 ✓。
+
+    只认 `SSID n : 名字` 开头的行 —— `BSSID n :` 那些（MAC 地址）会被排除 ✓。
+    """
+    text = _netsh_text(["wlan", "show", "networks"])
+    if not text:
+        return []
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.upper().startswith("SSID ") or ":" not in stripped:
+            continue
+        name = stripped.split(":", 1)[1].strip()
+        if name and name not in out:
+            out.append(name)
+    return out[:MAX_SSID_LIST]
 
 
 def guard_allows(cfg, ssid, ips):

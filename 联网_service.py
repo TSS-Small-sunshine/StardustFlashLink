@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.0.0）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.1.0）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -114,6 +114,10 @@ except OSError as exc:
 # ============================================================
 STATE = {
     "service_started_at": None,
+    # v2.1.1.0：最近一次「网络变化触发的检查」（没触发过就是 None ✓）
+    # 为什么留着它：用户看到日志里突然多了一次登录时，能回答「为什么」✓
+    "last_net_change_at": None,
+    "last_net_change_why": None,
     "network_reachable": None,
     "online": None,
     "last_login_at": None,
@@ -182,22 +186,55 @@ def _is_password_hint(line):
     return any(marker in line for marker in _PASSWORD_HINT_MARKERS)
 
 
-def _load_password_from_disk():
-    """从 password.txt 读入 _PWD_VALUE。文件不存在或内容全是模板提示 → None。
+# —— v2.1.1.0：按方案用不同的密码（多网络多账号）——
+# 规则：
+#   - 默认仍是 `password.txt` ✓（老用户零变化 ✓）
+#   - 当前方案若存在 `password.<方案名>.txt`，**优先用它** ✓
+#   - 界面上保存密码时写进「当前实际生效的那个文件」✓（不再让用户选 ✗）
+# 密码**永远不会**被写进 config.json ✗ —— 配置文件会被导出、会进诊断包 ✓。
+def password_file_for(profile_name):
+    """给定方案名 → 它专属的密码文件路径（没方案名 → 默认 `password.txt` ✓）。"""
+    name = ""
+    try:
+        mod = globals().get("_profiles_mod")
+        if mod is not None and profile_name:
+            name = mod.normalize_name(profile_name) or ""
+    except Exception:  # noqa: BLE001 —— 方案名不合法就退回默认文件 ✓
+        name = ""
+    if not name:
+        return PASSWORD_FILE
+    return os.path.join(BASE_DIR, "password.{}.txt".format(name))
 
-    规则（v2.0.4.0）：
+
+def active_password_file():
+    """当前**实际生效**的密码文件：方案专属文件存在就用它，否则 `password.txt` ✓。"""
+    try:
+        cfg = _load_config() or {}
+    except Exception:  # noqa: BLE001 —— 配置还没就绪时一律退回默认 ✓
+        cfg = {}
+    candidate = password_file_for(cfg.get("active_profile") or "")
+    if candidate != PASSWORD_FILE and os.path.isfile(candidate):
+        return candidate
+    return PASSWORD_FILE
+
+
+def _load_password_from_disk():
+    """从「当前生效的密码文件」读入 _PWD_VALUE。文件不存在或内容全是模板提示 → None。
+
+    规则（v2.0.4.0；v2.1.1.0 起文件可按方案不同 ✓）：
       - 空行        → 跳过
       - 模板提示行  → 跳过（见 _is_password_hint）
       - 其余任何行  → 视为密码原文（**包括以 `#` 开头的密码**）
       - 用 utf-8-sig 读，容忍手工编辑时留下的 BOM（否则首字符会带 \\ufeff）
     """
     global _PWD_VALUE
+    path = active_password_file()
     with PWD_LOCK:
-        if not os.path.isfile(PASSWORD_FILE):
+        if not os.path.isfile(path):
             _PWD_VALUE = None
             return None
         try:
-            with open(PASSWORD_FILE, "r", encoding="utf-8-sig") as f:
+            with open(path, "r", encoding="utf-8-sig") as f:
                 line = ""
                 for raw in f:
                     s = raw.strip()
@@ -206,7 +243,7 @@ def _load_password_from_disk():
                     line = s
                     break
         except (OSError, UnicodeDecodeError) as exc:
-            logger.error("读取 password.txt 失败: %s", exc)
+            logger.error("读取 %s 失败: %s", os.path.basename(path), exc)
             _PWD_VALUE = None
             return None
         pwd = line.strip()
@@ -220,14 +257,15 @@ def _get_password():
 
 
 def _save_password_to_disk(password):
-    """写入 password.txt（原子写：唯一 tmp → replace，v2.0.6.2 起 tmp 名带 pid）。"""
+    """写入**当前生效的密码文件**（原子写：唯一 tmp → replace，v2.0.6.2 起 tmp 名带 pid）。"""
     global _PWD_VALUE
     if not isinstance(password, str) or len(password) < 1:
         raise ValueError("password 必须是非空字符串")
-    tmp = "{}.{}.tmp".format(PASSWORD_FILE, os.getpid())
+    path = active_password_file()
+    tmp = "{}.{}.tmp".format(path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(password.rstrip("\r\n") + "\n")
-    os.replace(tmp, PASSWORD_FILE)
+    os.replace(tmp, path)
     with PWD_LOCK:
         _PWD_VALUE = password
 
@@ -577,6 +615,51 @@ def _startup_trigger():
 # v2.0.14.0（P3-2）：周期自检循环体抛异常后的冷却时间（测试里会临时调小）
 PERIODIC_ERROR_BACKOFF_SEC = 60
 
+# —— v2.1.1.0：网络变化即触发（治「刚连上 Wi-Fi 要干等到下个周期才登录」）——
+# 老行为：`STOP_EVENT.wait(wait_sec)` 一口气睡完整个间隔（最长 60 分钟）✗ ——
+#   开机 / 睡醒 / 走到另一个 Wi-Fi 之后，哪怕网络早就通了，也要等下一个周期才登录 ✗
+#   （用户感知：「Wi-Fi 连上了它却半天不登」）。
+# 新行为：把长等待**拆成小步**，边走边看：
+#   - 每跳（5 秒）做一次**不起进程**的探测：主用地址变没变（protocol.primary_local_ip ✓）
+#   - 每 12 跳（约 1 分钟）才做一次要起进程的 Wi-Fi 名探测（protocol.get_current_ssid ✓）
+#   - 地址变了 / Wi-Fi 名变了 → **立刻**检查（不退避语义、不动周期 ✓）
+NETWATCH_TICK_SEC = 5
+NETWATCH_SSID_EVERY_TICKS = 12
+
+
+class NetworkWatcher:
+    """记住上次看到的「地址 / Wi-Fi 名」，判断要不要提前检查 ✓。
+
+    纯逻辑（不碰网络、不碰文件）→ 好测 ✓；真探测由调用方喂进来 ✓。
+    """
+
+    def __init__(self):
+        self.address = None
+        self.ssid = None
+
+    def observe_address(self, address):
+        """看主用地址变没变 → `(要立刻检查吗, 原因说明)` ✓。"""
+        previous = self.address
+        if previous == address:
+            return False, ""
+        self.address = address
+        # 只有「拿到了地址」才算刚连上网 ✓；断网（变成空）不折腾（真查也会被守卫拦住 ✓）
+        if address and address != previous:
+            return True, "本机地址 {} → {}".format(previous or "（无）", address)
+        return False, ""
+
+    def observe_ssid(self, ssid):
+        """看 Wi-Fi 名变没变（= 换场景 ✓）→ `(要立刻检查吗, 原因说明)` ✓。"""
+        if not ssid:
+            return False, ""            # 读不到名字就不乱判 ✓（与守卫的 fail-open 同口径 ✓）
+        previous = self.ssid
+        if previous == ssid:
+            return False, ""
+        self.ssid = ssid
+        if previous is None:
+            return False, ""            # 第一次探到名字不算「换场景」✓（启动那次已经查过 ✓）
+        return True, "Wi-Fi {} → {}".format(previous, ssid)
+
 
 def run_periodic():
     """周期自检：尊重 auto_check_enabled 与 BACKOFF.until。
@@ -626,8 +709,41 @@ def run_periodic():
                     datetime.now() + timedelta(seconds=wait_sec)
                 ).isoformat(timespec="seconds")
 
-            # 中断等待
-            if STOP_EVENT.wait(wait_sec):
+            # —— v2.1.1.0：长等待拆成小步，边走边看网络变化 ✓ ——
+            # （原来是 STOP_EVENT.wait(wait_sec) 一口气睡完，最长 60 分钟 ✗）
+            watcher = NetworkWatcher()
+            watcher.address = _protocol_mod.primary_local_ip(cfg["host"], cfg.get("port", 80))
+            remaining = float(wait_sec)
+            tick_index = 0
+            net_change = ""
+            while remaining > 0 and not STOP_EVENT.is_set():
+                step = min(NETWATCH_TICK_SEC, remaining)
+                if STOP_EVENT.wait(step):
+                    return
+                remaining -= step
+                tick_index += 1
+
+                changed, why = watcher.observe_address(
+                    _protocol_mod.primary_local_ip(cfg["host"], cfg.get("port", 80))
+                )
+                # Wi-Fi 名探测要起进程（netsh / nmcli），别每 5 秒都来一次 ✗
+                if not changed and tick_index % NETWATCH_SSID_EVERY_TICKS == 0:
+                    changed, why = watcher.observe_ssid(_protocol_mod.get_current_ssid())
+                if changed:
+                    net_change = why
+                    break
+
+            if net_change:
+                logger.info("网络变化（%s）→ 立刻检查，不等下一个周期", net_change)
+                _set_state(
+                    last_net_change_at=datetime.now().isoformat(timespec="seconds"),
+                    last_net_change_why=net_change,
+                )
+                # reason 带 netwatch 前缀：日志里一眼能看出这次是「变化触发的」✓
+                run_once("netwatch")
+                continue
+
+            if STOP_EVENT.is_set():
                 return
 
             run_once("periodic")
