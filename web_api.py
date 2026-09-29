@@ -1565,6 +1565,18 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 :root {
   color-scheme: light;
 
+  /* —— 字体（三轮：统一到 MiSans）——
+     小米 MiSans 已装就直接用（Windows 上双击 MiSans-Regular.otf 安装即可，本机已装）；
+     没装就退回系统字体栈 —— 绝不出现缺字方框，也不挑系统 / 语言。
+     为什么不做「内嵌字体文件」：仓库约定「前端全部内联、无 CDN、无新增静态文件」
+     （AGENTS.md §3），而 MiSans-Regular.otf 单文件 6.5 MB，塞进仓库不划算。 */
+  --font-ui: "MiSans", "MiSans VF", "MiSans Regular", "MiSans Normal",
+             -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
+             "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  /* 日志 / 代码 / 倒计时也统一走 MiSans（用户要求「所有字体统一成 MiSans」）；
+     数字对齐改靠 tabular-nums，不再依赖等宽字体族 */
+  --font-mono: var(--font-ui);
+
   /* —— 画布与背景光晕 —— */
   --bg: #f5f5f7;
   --glow-a: rgba(0, 122, 255, 0.16);
@@ -1754,8 +1766,7 @@ body {
   min-height: 100vh;
   background-color: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text",
-               "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-ui);
   font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -1815,7 +1826,7 @@ h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.02em; color: var(--
 a { color: var(--accent); text-decoration: none; }
 a:hover { color: var(--accent-hover); }
 .mono, code, pre, .log-box, .update-modal-log, .changelog-body {
-  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 .muted { color: var(--text-2); }
@@ -2066,17 +2077,16 @@ a:hover { color: var(--accent-hover); }
 /* --- v2.1.2.0：表单类折叠（配置页「新建 / 覆盖方案」等）与两列表单 --- */
 .fold-body { margin-top: 12px; }
 /* --- v2.1.2.0：横向表单行 —— 宽屏把若干字段排成一行，别再纵向堆成一条长表 ---
-   （三轮：账号/运营商/密码/确认 一行四列；端口卡一行三列。
-     auto-fit 会在宽屏挤出第 5、6 条空轨，所以用显式列数 + 媒体查询递减。） */
+   （三轮收敛：只剩一行三列 —— 配置页「网络与服务端口」、关于页「升级设置」。
+     账号密码那些字段在状态页右栏（约 430px 宽）里竖排，所以不需要四列版。）
+     为什么不用 auto-fit：它在宽屏会挤出第 5、6 条空轨，用显式列数 + 媒体查询递减更可控。 */
 .pw-row { display: grid; gap: 0 18px; }
 .pw-row > .field { margin-bottom: 16px; min-width: 0; }
 .pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.pw-row-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 /* 行内每格只有 200-350px，不再需要「输入框最长 560px」那条限宽 */
 .pw-row .field > input, .pw-row .field > select { max-width: none; }
-@media (max-width: 1000px) { .pw-row-3, .pw-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 560px) { .pw-row-3, .pw-row-4 { grid-template-columns: minmax(0, 1fr); } }
-.cfg-cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: start; }
+@media (max-width: 1000px) { .pw-row-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .pw-row-3 { grid-template-columns: minmax(0, 1fr); } }
 
 /* --- v2.1.2.0：关于页顶部（真正的「关于」：这是什么 + 哪个版本 + 怎么装的） --- */
 .about-hero { display: flex; gap: 16px; align-items: center; }
@@ -2428,11 +2438,14 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 .about-hero-main { min-width: 0; }
 .about-hero-side { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(112px, auto)); }
 
-/* —— 配置页两栏（二轮）：左「方案 + 网络端口」/ 右「自动化 + 守卫」 —— */
-.cfg-page { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.12fr) minmax(0, 1fr); align-items: start; }
-.cfg-col { display: grid; gap: 14px; align-content: start; min-width: 0; }
-/* 列内用 gap 排版，卡片自己的 margin-bottom 会变成双倍间距 */
-.cfg-col > .card.section, .cfg-col > details { margin-bottom: 0; }
+/* —— 页面两栏布局（配置页与状态页共用）：左主右辅，窄屏塌成一栏 ——
+   用户要的「左右放」= 像配置页那样把**卡片**分两栏，而不是把表单字段排成一行。 */
+.page-cols { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); align-items: start; }
+.page-col { display: grid; gap: 14px; align-content: start; min-width: 0; }
+/* 列内用 gap 排版，卡片自己的 margin-bottom / margin-top 会变成双倍间距 */
+.page-col > .card.section, .page-col > details, .page-col > .card { margin-bottom: 0; }
+.page-col > .status-hero, .page-col > .stat-strip { margin-top: 0; }
+@media (max-width: 980px) { .page-cols { grid-template-columns: minmax(0, 1fr); } }
 
 /* —— 日志页：终端窗口（顶栏一行放标题与实时状态） —— */
 .log-window { padding: 14px 16px 16px; }
@@ -2473,7 +2486,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   .stat-cell { padding: 13px 14px; border-top: 1px solid var(--hairline); }
   .stat-cell:nth-child(-n+2) { border-top: none; }
   .stat-cell:nth-child(odd) { border-left: none; }
-  .cfg-page { grid-template-columns: minmax(0, 1fr); }
+  .page-cols { grid-template-columns: minmax(0, 1fr); }
   .card { padding: 18px; }
 }
 @media (max-width: 480px) {
@@ -2580,6 +2593,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       <button class="update-banner-dismiss" id="update-banner-dismiss" type="button" aria-label="关闭横幅"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.4 17.6 17.6M17.6 6.4 6.4 17.6"/></svg></button>
     </div>
 
+    <!-- v2.1.2.0 三轮：状态页改用与配置页同一套两栏布局（用户：「像配置的那么放」）——
+         左栏「现在通不通（大字状态）+ 日常统计 + 诊断详情」，右栏「账户与登录密码」。
+         以前三块竖着堆成一列，大屏上白掉半屏宽。 -->
+    <div class="page-cols">
+    <div class="page-col">
+
     <!-- v2.1.2.0 二轮：状态与动作挤进同一张卡 —— 原来左边一张空卡、右边一张卡里飘着一个
          巨大按钮，两处都空得慌；现在一左一右，中间没有浪费的空间。 -->
     <article class="card status-hero" id="card-online">
@@ -2599,50 +2618,6 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <p class="hint" id="login-hint">点一下立即触发完整的检查与登录</p>
       </div>
     </article>
-
-    <!-- v2.1.2.0：账户与登录密码搬到主页 —— 最常改的东西不该藏在配置页第二块，
-         就放在「立即登录」下面，登录不顺时顺手就能改账号 / 密码。 -->
-    <div class="card section" id="card-password">
-      <div class="section-head">
-        <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
-        <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
-      </div>
-      <!-- v2.1.2.0 三轮：改「一行四列」（账号 / 运营商 / 密码 / 再次输入）——
-           两列两行在大屏上每格近 500px 宽，输入框里只有几个字，白占半屏高。 -->
-      <div class="pw-row pw-row-4">
-        <div class="field">
-          <label for="cfg-account">账号</label>
-          <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
-          <div class="hint">仅数字，不含运营商后缀</div>
-          <div class="err" id="err-account" role="alert"></div>
-        </div>
-        <div class="field">
-          <label for="cfg-suffix">运营商</label>
-          <select id="cfg-suffix">
-            <option value="">校园用户（无后缀）</option>
-            <option value="@yd">中国移动 @yd</option>
-            <option value="@dx">中国电信 @dx</option>
-            <option value="@lt">中国联通 @lt</option>
-          </select>
-          <div class="hint">不同运营商后缀不同</div>
-        </div>
-        <div class="field">
-          <label for="pwd-new">账户登录密码</label>
-          <input type="password" id="pwd-new" autocomplete="new-password">
-          <div class="hint">至少 1 个字符</div>
-        </div>
-        <div class="field">
-          <label for="pwd-confirm">再次输入密码</label>
-          <input type="password" id="pwd-confirm" autocomplete="new-password">
-          <div class="hint">两次需一致才保存</div>
-          <div class="err" id="err-pwd" role="alert"></div>
-        </div>
-      </div>
-      <div class="field-foot">
-        <span class="hint">保存后立即生效，无需重启服务。</span>
-        <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
-      </div>
-    </div>
 
     <!-- 日常关心的几项：v2.1.2.0 二轮把它们从「5 张卡排成卡墙」改成一条统计条
          （每格一条竖分隔线），同样的信息量，视觉噪音少一半、还能一眼扫完。 -->
@@ -2726,14 +2701,59 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 
       </div>
     </details>
+    </div><!-- /page-col -->
+
+    <!-- 右栏：账户与登录密码。三轮从「立即登录」下面挪进右栏（字段竖排 —— 这里约 430px 宽，
+         排成一行四列会变成窄条）。 -->
+    <div class="page-col">
+      <div class="card section" id="card-password">
+        <div class="section-head">
+          <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
+          <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
+        </div>
+        <div class="field">
+          <label for="cfg-account">账号</label>
+          <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
+          <div class="hint">仅数字（学号 / 工号），不含运营商后缀</div>
+          <div class="err" id="err-account" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-suffix">运营商</label>
+          <select id="cfg-suffix">
+            <option value="">校园用户（无后缀）</option>
+            <option value="@yd">中国移动 @yd</option>
+            <option value="@dx">中国电信 @dx</option>
+            <option value="@lt">中国联通 @lt</option>
+          </select>
+          <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
+        </div>
+        <div class="field">
+          <label for="pwd-new">账户登录密码</label>
+          <input type="password" id="pwd-new" autocomplete="new-password">
+          <div class="hint">至少 1 个字符</div>
+        </div>
+        <div class="field">
+          <label for="pwd-confirm">再次输入密码</label>
+          <input type="password" id="pwd-confirm" autocomplete="new-password">
+          <div class="hint">两次需一致才保存</div>
+          <div class="err" id="err-pwd" role="alert"></div>
+        </div>
+        <div class="field-foot">
+          <span class="hint">保存后立即生效，无需重启服务。</span>
+          <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
+        </div>
+      </div>
+    </div><!-- /page-col -->
+    </div><!-- /page-cols -->
   </section>
 
   <!-- ============ 配置 ============ -->
   <section class="panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config" tabindex="-1">
-    <!-- v2.1.2.0 二轮：配置页改两栏（左：方案 + 网络端口；右：自动化 + 守卫），
-         纵向长度砍掉近一半，不用再「一路滚到底」。 -->
-    <div class="cfg-page">
-    <div class="cfg-col">
+    <!-- v2.1.2.0 二/三轮：配置页两栏（左：方案 + 网络端口；右：自动化 + 守卫），
+         纵向长度砍掉近一半，不用再「一路滚到底」。布局类 .page-cols / .page-col
+         与状态页共用（同一套左右分栏，两个页面观感一致）。 -->
+    <div class="page-cols">
+    <div class="page-col">
 
     <!-- v2.0.9.0 / B5：配置方案（教室 / 宿舍 / 家里） -->
     <div class="card section" id="card-profiles">
@@ -2810,8 +2830,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       </div>
     </div>
 
-    </div><!-- /cfg-col -->
-    <div class="cfg-col">
+    </div><!-- /page-col -->
+    <div class="page-col">
 
     <div class="card section">
       <div class="section-head">
@@ -2887,8 +2907,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     <!-- v2.1.2.0：「Web UI 监听端口」并进了上面的「网络与服务端口」——
          为一个字段占一整张卡，是配置页变长的最大原因之一。 -->
 
-    </div><!-- /cfg-col -->
-    </div><!-- /cfg-page -->
+    </div><!-- /page-col -->
+    </div><!-- /page-cols -->
 
     <!-- 导出 / 导入与保存条放在两栏之外，横跨整宽 -->
     <div class="config-io-row">

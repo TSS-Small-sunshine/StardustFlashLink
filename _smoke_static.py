@@ -1669,12 +1669,30 @@ check("v2.1.2.0 状态页：统计条换了类名，JS 也同步（不然轮询�
       "'stat-value tone-ok'" in _page and "'status-word tone-ok'" in _page
       and "'stat-value mono'" in _page and "cardErr.className = 'stat-cell'" in _page
       and "'stat-value mono tone-muted'" in _page)
-check("v2.1.2.0 配置页：两栏（左 方案 + 网络端口 / 右 自动化 + 守卫），保存条在两栏之外",
-      _pos('class="cfg-page"') >= 0 and _page.count('<div class="cfg-col">') == 2
-      and _pos('class="section-title">配置方案') < _pos('class="section-title">网络与服务端口')
-      < _pos('class="section-title">自动化')
-      and '</div><!-- /cfg-col -->' in _page and '</div><!-- /cfg-page -->' in _page
-      and ".cfg-col > .card.section, .cfg-col > details { margin-bottom: 0; }" in _page)
+check("v2.1.2.0 页面两栏布局：配置页与状态页共用同一套（左主右辅，窄屏塌成一栏）",
+      _page.count('class="page-cols"') == 2 and _page.count('<div class="page-col">') == 4
+      and ".page-cols { display: grid" in _page and ".page-col { display: grid" in _page
+      and ".page-col > .status-hero, .page-col > .stat-strip { margin-top: 0; }" in _page
+      and "@media (max-width: 980px) { .page-cols" in _page
+      and "cfg-page" not in _page and "cfg-col" not in _page)
+check("v2.1.2.0 状态页左右两栏：左「状态 + 统计条 + 诊断详情」/ 右「账户与登录密码」",
+      _pos('id="card-online"') < _pos('class="card stat-strip"')
+      < _pos('id="card-quality"') < _pos('id="card-password"')
+      and _pos('id="card-password"') < _pos('id="panel-config"'),
+      "online@%s strip@%s quality@%s pwd@%s" % (_pos('id="card-online"'),
+          _pos('class="card stat-strip"'), _pos('id="card-quality"'), _pos('id="card-password"')))
+check("v2.1.2.0 状态页右栏的账号密码竖排（右栏约 430px，四列会变窄条）；端口卡与升级设置仍一行三列",
+      'class="pw-row pw-row-4"' not in _page and ".pw-row-4" not in _page
+      and _page.count('class="pw-row pw-row-3"') == 2
+      and ".pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in _page
+      and ".pw-row .field > input, .pw-row .field > select { max-width: none; }" in _page
+      and "pw-grid" not in _page)
+check("v2.1.2.0 字体统一到 MiSans（装了优先用，没装退回系统栈；仓库不加字体文件）",
+      '"MiSans", "MiSans VF", "MiSans Regular", "MiSans Normal"' in _page
+      and "--font-ui:" in _page and "--font-mono: var(--font-ui);" in _page
+      and "font-family: var(--font-ui);" in _page and "font-family: var(--font-mono);" in _page
+      and "font-variant-numeric: tabular-nums;" in _page
+      and "@font-face {" not in _page and "ui-monospace" not in _page)
 check("v2.1.2.0 日志页：改成终端窗口 —— 标题栏 + 实时状态在终端之上（原来压在下面，等于标题栏装脚上）",
       'class="card log-window"' in _page and 'class="log-window-bar"' in _page
       and 'class="log-dots"' in _page
@@ -1839,12 +1857,9 @@ check("v2.1.2.0 升级相关整块搬进「关于 → 更新」（配置页不�
 check("v2.1.2.0 关于页的升级设置自带保存按钮，且跳过配置页校验（新装用户会先来这儿开自动升级）",
       'id="btn-save-update-settings"' in _page
       and "saveConfigFrom(saveUpd, true)" in _page and "saveConfigFrom(saveBtn, false)" in _page)
-check("v2.1.2.0 横向表单行：账号/运营商/密码/确认 一行四列；端口卡与升级设置一行三列",
-      'class="pw-row pw-row-4"' in _page
-      and _page.count('class="pw-row pw-row-3"') == 2
-      and ".pw-row-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }" in _page
-      and ".pw-row .field > input, .pw-row .field > select { max-width: none; }" in _page
-      and "pw-grid" not in _page)
+check("v2.1.2.0 横向表单行：端口卡与关于页升级设置各一行三列（不会再被 auto-fit 挤出空轨）",
+      _page.count('class="pw-row pw-row-3"') == 2
+      and ".pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }" in _page)
 # —— 第二轮打磨（用户：「排版要重新设计」「动效要做」「关于里 Logo 也没打上去」）——
 check("v2.1.2.0 关于页用的是真品牌 Logo（取不到才回退内联星芒）",
       'id="about-logo"' in _page and 'src="/branding/web-logo-64.png"' in _page
