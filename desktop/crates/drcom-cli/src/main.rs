@@ -64,6 +64,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("service") => service_cmd(&args[1..]),
         Some("checksum") => checksum_cmd(&args[1..]),
         Some("package-files") => package_files_cmd(&args[1..]),
+        Some("archive") => archive_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -90,6 +91,7 @@ fn print_help() {
          service install|uninstall|start|stop|restart|status [--dry-run]   注册成常驻服务（Windows 走 NSSM ✓）\n  \
          checksum [文件]             算 SHA-256（不给文件就算自己 ✓）—— 打包校验 / 升级凭据 ✓\n  \
          package-files --out DIR     写出该平台随包分发的说明文件（.desktop / Info.plist / README ✓）\n  \
+         archive --out F.zip DIR...  打包目录成 ZIP（用自带实现 ✓，不需要外部 zip/tar ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -317,6 +319,144 @@ fn login(args: &[String]) -> i32 {
 }
 
 /// `diagnostics [--out FILE] [--days N]`：生成**脱敏**诊断包（ZIP ✓）。
+/// 递归收集目录里的文件 ✓ →（ZIP 条目名 = `<目录名>/<相对路径>`，分隔符统一 `/` ✓）。
+fn collect_files(
+    root: &std::path::Path,
+    prefix: &str,
+    dir: &std::path::Path,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("读目录 {} 失败: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读目录 {} 失败: {}", dir.display(), e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, prefix, &path, out)?;
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| format!("算相对路径失败: {}", e))?;
+        let name = relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        out.push((format!("{}/{}", prefix, name), path));
+    }
+    Ok(())
+}
+
+/// `archive --out <文件.zip> <目录>...`：用**自带的 ZIP 实现**打包 ✓
+/// （CI 里因此不需要外部 `zip`/`tar` ✓，三平台行为一致 ✓；无压缩 = store ✓）。
+fn archive_cmd(args: &[String]) -> i32 {
+    let out_path = match take_opt(args, "--out") {
+        Some(value) => std::path::PathBuf::from(value),
+        None => {
+            eprintln!("用法: archive --out <文件.zip> <目录>...");
+            return 2;
+        }
+    };
+    // 目录 = 除 `--out` 及其取值以外的位置参数 ✓
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    let mut skip_next = false;
+    for arg in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--out" {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        dirs.push(std::path::PathBuf::from(arg));
+    }
+    if dirs.is_empty() {
+        eprintln!("至少要给一个目录 ✓（例：archive --out pkg.zip staging）");
+        return 2;
+    }
+
+    let mut collected: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for dir in &dirs {
+        let prefix = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "package".to_string());
+        if let Err(e) = collect_files(dir, &prefix, dir, &mut collected) {
+            eprintln!("{}", e);
+            return 1;
+        }
+    }
+    if collected.is_empty() {
+        eprintln!("目录里没有文件 ✗（{}）", dirs[0].display());
+        return 1;
+    }
+    collected.sort_by(|a, b| a.0.cmp(&b.0)); // 顺序稳定 → 产物可复现 ✓
+
+    let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(collected.len());
+    for (_, path) in &collected {
+        match std::fs::read(path) {
+            Ok(bytes) => blobs.push(bytes),
+            Err(e) => {
+                eprintln!("读 {} 失败: {}", path.display(), e);
+                return 1;
+            }
+        }
+    }
+    let entries: Vec<drcom_core::zipwriter::ZipEntry<'_>> = collected
+        .iter()
+        .zip(blobs.iter())
+        .map(|((name, _), data)| drcom_core::zipwriter::ZipEntry { name, data })
+        .collect();
+    let bytes = match drcom_core::zipwriter::build(&entries, std::time::SystemTime::now()) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("打包失败: {}", e);
+            return 1;
+        }
+    };
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("创建 {} 失败: {}", parent.display(), e);
+                return 1;
+            }
+        }
+    }
+    if let Err(e) = std::fs::write(&out_path, &bytes) {
+        eprintln!("写 {} 失败: {}", out_path.display(), e);
+        return 1;
+    }
+
+    // 自检：**把刚写出去的文件读回来解析中央目录** ✓（写完就坏要当场发现 ✗）
+    let read_back = std::fs::read(&out_path)
+        .map_err(|e| e.to_string())
+        .ok()
+        .and_then(|raw| drcom_core::zipwriter::entry_names(&raw));
+    match read_back {
+        Some(names) => {
+            println!(
+                "{}  （{} 字节，{} 个条目 ✓ 自检通过）",
+                out_path.display(),
+                bytes.len(),
+                names.len()
+            );
+            for name in &names {
+                println!("  {}", name);
+            }
+            0
+        }
+        None => {
+            eprintln!("写出的 ZIP 自检失败 ✗（中央目录读不回来）");
+            1
+        }
+    }
+}
+
 /// 写一个文件并把名字记下来 ✓。
 fn write_package_file(
     dir: &std::path::Path,
@@ -351,7 +491,12 @@ fn package_files_cmd(args: &[String]) -> i32 {
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|meta| meta.len())
         .unwrap_or(0);
-    let info = drcom_core::package::PackageInfo::current(&exe_name, size);
+    // 交叉编译时，宿主编出来的辅助程序会自报宿主目标 ✗ → 允许显式覆盖 ✓
+    let info = drcom_core::package::PackageInfo::current(&exe_name, size).with_overrides(
+        take_opt(args, "--target").as_deref(),
+        take_opt(args, "--exe").as_deref(),
+        take_opt(args, "--version").as_deref(),
+    );
 
     let mut written: Vec<String> = Vec::new();
     let mut result = write_package_file(
@@ -1000,6 +1145,46 @@ fn suffix_flag_without_value(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_cmd_zips_a_tree_and_self_checks() {
+        let root = std::env::temp_dir().join("drcom-archive-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let staging = root.join("staging");
+        std::fs::create_dir_all(staging.join("sub")).unwrap();
+        std::fs::write(staging.join("README.txt"), b"hello").unwrap();
+        std::fs::write(staging.join("sub/app"), b"binary-ish").unwrap();
+        let zip = root.join("out/pkg.zip");
+
+        assert_eq!(
+            archive_cmd(&["--out".to_string()]),
+            2,
+            "少了目录 → 用法提示 ✓"
+        );
+        assert_eq!(
+            archive_cmd(&[staging.display().to_string()]),
+            2,
+            "少了 --out → 用法提示 ✓"
+        );
+
+        let args = vec![
+            "--out".to_string(),
+            zip.display().to_string(),
+            staging.display().to_string(),
+        ];
+        assert_eq!(archive_cmd(&args), 0, "打包成功 ✓");
+        assert!(zip.is_file(), "产出文件必须存在 ✓");
+        let raw = std::fs::read(&zip).unwrap();
+        assert_eq!(&raw[..2], b"PK", "ZIP 魔数 ✓");
+        let names = drcom_core::zipwriter::entry_names(&raw).expect("写出来必须是合法 ZIP ✓");
+        assert!(names.contains(&"staging/README.txt".to_string()), "{:?}", names);
+        assert!(
+            names.contains(&"staging/sub/app".to_string()),
+            "子目录要用 / 分隔 ✓: {:?}",
+            names
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn package_files_writes_into_a_temp_dir() {

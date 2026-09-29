@@ -33,6 +33,27 @@ impl PackageInfo {
             size_bytes,
         }
     }
+
+    /// 覆盖字段 ✓ —— **交叉编译时必须用** ✓：
+    /// CI 在 x86_64 runner 上给 `linux-aarch64` / `linux-armv7` 打包时，
+    /// 跑的是宿主编出来的辅助程序 ✗，它自报的目标会写成宿主 ✓ → 得显式指定 ✓。
+    pub fn with_overrides(
+        mut self,
+        target: Option<&str>,
+        exe_name: Option<&str>,
+        version: Option<&str>,
+    ) -> PackageInfo {
+        if let Some(value) = target {
+            self.target = value.to_string();
+        }
+        if let Some(value) = exe_name {
+            self.exe_name = value.to_string();
+        }
+        if let Some(value) = version {
+            self.version = value.to_string();
+        }
+        self
+    }
 }
 
 /// 产物名（不含扩展名）：`stardust-flash-link-<版本>-<目标>` ✓
@@ -243,6 +264,26 @@ mod tests {
         assert!(auto.version.starts_with("3.0."), "{}", auto.version);
         assert!(auto.target.contains('-'), "{}", auto.target);
         assert_eq!(auto.size_bytes, 1024);
+    }
+
+    #[test]
+    fn overrides_are_for_cross_builds_and_keep_the_rest() {
+        let info = PackageInfo::current("host-name", 2048).with_overrides(
+            Some("linux-aarch64"),
+            Some("stardust-flash-link"),
+            Some("9.9.9.9-preview.7"),
+        );
+        assert_eq!(info.target, "linux-aarch64");
+        assert_eq!(info.exe_name, "stardust-flash-link");
+        assert_eq!(info.version, "9.9.9.9-preview.7");
+        assert_eq!(info.size_bytes, 2048, "体积不受覆盖影响 ✓");
+        assert_eq!(
+            artifact_base(&info),
+            "stardust-flash-link-9.9.9.9-preview.7-linux-aarch64"
+        );
+        // 不传覆盖 → 原样保留 ✓
+        let same = PackageInfo::current("x", 1).with_overrides(None, None, None);
+        assert_eq!(same.exe_name, "x");
     }
 }
 

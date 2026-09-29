@@ -112,11 +112,58 @@ jobs:
             fi
           done
 
+      - name: 组装安装包（ZIP + SHA256SUMS）—— 全程用我们自己的实现 ✓
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ① 宿主编一个辅助程序：交叉编译的目标二进制在 runner 上跑不了 ✗，
+          #    所以「生成包内文件」和「打 zip」都用宿主这份 ✓
+          cargo build --release -p drcom-cli
+          HOST_BIN="target/release/stardust-flash-link"
+          # 注意：不能写 `[ -f x ] && y` ✗ —— set -e 下条件为假会让脚本直接退出 ✗
+          if [ -f "${HOST_BIN}.exe" ]; then
+            HOST_BIN="${HOST_BIN}.exe"
+          fi
+
+          # ② 目标平台的二进制名（Windows 带 .exe ✓）
+          CLI_NAME="stardust-flash-link"
+          APP_NAME="stardust-flash-link-app"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            CLI_NAME="stardust-flash-link.exe"
+            APP_NAME="stardust-flash-link-app.exe"
+          fi
+
+          # ③ 摆好要装进包的目录 ✓
+          STAGE="pkg/staging"
+          rm -rf pkg dist
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/${CLI_NAME}" "$STAGE/"
+          if [ -f "target/${{ matrix.target }}/release/${APP_NAME}" ]; then
+            cp "target/${{ matrix.target }}/release/${APP_NAME}" "$STAGE/"
+          fi
+
+          # ④ 包内说明文件（.desktop / deb-control / Info.plist / README.txt ✓）
+          #    --target 必须显式给：宿主自报的目标是错的 ✗
+          OUT=$("$HOST_BIN" package-files --out "$STAGE" --target "${{ matrix.label }}" --exe "$CLI_NAME")
+          printf '%s\n' "$OUT"
+          NAME=$(printf '%s\n' "$OUT" | head -1)
+
+          # ⑤ 用**自带 ZIP** 打包 ✓（CI 不需要外部 zip/tar ✓），再算 SHA256SUMS ✓
+          mkdir -p dist
+          "$HOST_BIN" archive --out "dist/${NAME}.zip" "$STAGE"
+          SUM=$("$HOST_BIN" checksum "dist/${NAME}.zip" | awk '{print $1}')
+          printf '%s  %s\n' "$SUM" "${NAME}.zip" > dist/SHA256SUMS
+          echo "--- dist ---"
+          ls -l dist
+          cat dist/SHA256SUMS
+
       - name: 上传产物（预览版：只挂 workflow artifact，不发 Release ✓）
         uses: actions/upload-artifact@v4
         with:
           name: stardust-flash-link-${{ matrix.label }}
           path: |
+            desktop/dist/*
+            desktop/pkg/staging/*
             desktop/target/${{ matrix.target }}/release/stardust-flash-link
             desktop/target/${{ matrix.target }}/release/stardust-flash-link.exe
             desktop/target/${{ matrix.target }}/release/stardust-flash-link-app
