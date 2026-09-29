@@ -1994,14 +1994,7 @@ a:hover { color: var(--accent-hover); }
 .kpi-sub { font-size: 12.5px; color: var(--text-3); }
 .kpi-alert { border-color: rgba(255, 159, 10, 0.45); }
 .kpi-alert-err { border-color: rgba(255, 69, 58, 0.45); }
-/* v2.0.8.0：连接质量小柱图（纯 CSS，不引入图表库） */
-.qbars { display: flex; align-items: flex-end; gap: 10px; height: 68px; margin: 6px 0 4px; }
-.qbar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 3px; min-width: 0; }
-.qbar-fill { border-radius: 4px 4px 2px 2px; min-height: 2px;
-  background: linear-gradient(180deg, rgba(10, 132, 255, 0.85), rgba(10, 132, 255, 0.40));
-  transition: height 0.32s cubic-bezier(0.32, 0.72, 0, 1); }
-.qbar-fill.qfail { background: linear-gradient(180deg, rgba(255, 159, 10, 0.9), rgba(255, 159, 10, 0.4)); }
-.qbar-day { font-size: 10.5px; color: var(--text-3); text-align: center; white-space: nowrap; }
+/* v2.1.2.0 三轮：连接质量柱图那套 CSS 已随板块删除（用户：「没啥用」），不留死代码 */
 .tone-ok { color: var(--ok); }
 .tone-err { color: var(--err); }
 .tone-warn { color: var(--warn); }
@@ -2040,6 +2033,8 @@ a:hover { color: var(--accent-hover); }
   display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
   margin-top: 14px; padding: 0; overflow: hidden;
 }
+/* 诊断指标条（三轮）：4 格 —— 诊断详情不折叠了，直接跟上面那条并排显示 */
+.stat-strip-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .stat-cell { padding: 15px 18px; border-left: 1px solid var(--hairline); min-width: 0; }
 .stat-cell:first-child { border-left: none; }
 .stat-label { font-size: 12px; color: var(--text-2); }
@@ -2068,11 +2063,8 @@ a:hover { color: var(--accent-hover); }
 .diag-hint { font-size: 12px; font-weight: 400; color: var(--text-3); }
 .diag-caret { margin-left: auto; display: inline-flex; color: var(--text-3); transition: transform 0.22s ease; }
 .diag[open] .diag-caret { transform: rotate(180deg); }
-.diag-body {
-  margin-top: 14px;
-  display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr));
-}
-.diag-body > #card-quality { grid-column: 1 / -1; }
+/* v2.1.2.0 三轮：诊断指标不再折叠，原先那两条「诊断区网格」规则随之删除
+   （.diag / .diag-summary / .diag-caret / .fold-body 仍被配置页与关于页的折叠用着，保留） */
 
 /* --- v2.1.2.0：表单类折叠（配置页「新建 / 覆盖方案」等）与两列表单 --- */
 .fold-body { margin-top: 12px; }
@@ -2370,7 +2362,7 @@ code.path {
 
 /* —— 折叠：展开时内容淡入上浮（箭头旋转已有） —— */
 @keyframes foldIn { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
-details[open] > .diag-body, details[open] > .fold-body { animation: foldIn var(--dur-2) var(--ease); }
+details[open] > .fold-body { animation: foldIn var(--dur-2) var(--ease); }
 details.diag > summary:active .diag-caret { transform: scale(0.9); }
 
 /* —— 按钮：悬停抬起 + 按下回弹 + 键盘焦点环 —— */
@@ -2655,52 +2647,37 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 
     <!-- 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏；
          原生 details，零 JS，没有 JS 也能展开。 -->
-    <details class="diag">
-      <summary class="diag-summary">
-        <span>诊断详情</span>
-        <span class="diag-hint">在线率 / 掉线重登 / 平均恢复耗时 / 当前延迟 / 连接质量</span>
-        <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
-      </summary>
-      <div class="diag-body">
-
-      <!-- v2.0.8.0 / B4：连接质量（近 7 天，从日志现算） -->
-      <article class="card kpi" id="card-uptime">
-        <div class="kpi-label">在线率（近 7 天）</div>
-        <div class="kpi-value" id="kpi-uptime">-</div>
-        <div class="kpi-sub" id="kpi-uptime-sub">等待统计</div>
-      </article>
-
-      <article class="card kpi" id="card-relogin">
-        <div class="kpi-label">掉线重登</div>
-        <div class="kpi-value" id="kpi-relogin">-</div>
-        <div class="kpi-sub" id="kpi-relogin-sub">近 7 天</div>
-      </article>
-
-      <article class="card kpi" id="card-recover">
-        <div class="kpi-label">平均恢复耗时</div>
-        <div class="kpi-value small" id="kpi-recover">-</div>
-        <div class="kpi-sub" id="kpi-recover-sub">从开始检查到登录成功</div>
-      </article>
-
-      <article class="card kpi" id="card-latency">
-        <div class="kpi-label">当前延迟</div>
-        <div class="kpi-value" id="kpi-latency">-</div>
-        <div class="kpi-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
-      </article>
-
-    <!-- v2.0.8.0 / B4：近 7 天柱状图（纯 CSS，无图表库） -->
-    <div class="card" id="card-quality">
-      <div class="section-head">
-        <h2 class="section-title">连接质量（近 7 天）</h2>
-        <p class="section-desc" style="margin:0;">数字取自 <span class="mono">logs/campus_login.log</span>：每个检查周期都留下了走向，不再另外存状态文件（重启不清零、升级不丢）。</p>
-        <button class="btn" id="btn-metrics-refresh" type="button">刷新</button>
+    <!-- v2.1.2.0 三轮：诊断指标不再折叠（用户：「直接显示出来」）；
+         同时删掉「连接质量」柱图板块（用户：「没啥用」）——4 项指标改成与「日常」同款统计条，
+         数据来源用一行脚注交代，不再为它单占一张大卡。 -->
+    <div class="card stat-strip stat-strip-4">
+      <div class="stat-cell" id="card-uptime">
+        <div class="stat-label">在线率（近 7 天）</div>
+        <div class="stat-value" id="kpi-uptime">-</div>
+        <div class="stat-sub" id="kpi-uptime-sub">等待统计</div>
       </div>
-      <div class="qbars" id="qbars" aria-label="近 7 天掉线与失败次数柱状图"></div>
-      <div class="kpi-sub" id="quality-note">加载中…</div>
+
+      <div class="stat-cell" id="card-relogin">
+        <div class="stat-label">掉线重登</div>
+        <div class="stat-value" id="kpi-relogin">-</div>
+        <div class="stat-sub" id="kpi-relogin-sub">近 7 天</div>
+      </div>
+
+      <div class="stat-cell" id="card-recover">
+        <div class="stat-label">平均恢复耗时</div>
+        <div class="stat-value" id="kpi-recover">-</div>
+        <div class="stat-sub" id="kpi-recover-sub">从开始检查到登录成功</div>
+      </div>
+
+      <div class="stat-cell" id="card-latency">
+        <div class="stat-label">当前延迟</div>
+        <div class="stat-value" id="kpi-latency">-</div>
+        <div class="stat-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
+      </div>
     </div>
-
-      </div>
-    </details>
+    <p class="hint" style="margin:8px 2px 0;">
+      诊断指标（近 7 天）· 数字取自 <span class="mono">logs/campus_login.log</span>：每个检查周期都留下了走向，不另存状态文件（重启不清零、升级不丢）。
+    </p>
     </div><!-- /page-col -->
 
     <!-- 右栏：账户与登录密码。三轮从「立即登录」下面挪进右栏（字段竖排 —— 这里约 430px 宽，
@@ -4665,13 +4642,13 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var d = (m && m.ok) ? m : null;
     var upt = d && isNum(d.uptime_pct) ? d.uptime_pct : null;
     text($('kpi-uptime'), upt === null ? '-' : upt + '%');
-    $('kpi-uptime').className = 'kpi-value' + (upt === null ? ' tone-muted'
+    $('kpi-uptime').className = 'stat-value' + (upt === null ? ' tone-muted'
       : (upt >= 99 ? ' tone-ok' : (upt >= 95 ? ' tone-warn' : ' tone-err')));
     text($('kpi-uptime-sub'), d ? ('有效周期 ' + d.effective_checks + ' / 共 ' + d.checks
       + (d.skip > 0 ? '（跳过 ' + d.skip + '）' : '')) : '等待统计');
 
     text($('kpi-relogin'), d ? String(d.relogin) : '-');
-    $('kpi-relogin').className = 'kpi-value' + (d && d.relogin > 0 ? '' : ' tone-muted');
+    $('kpi-relogin').className = 'stat-value' + (d && d.relogin > 0 ? '' : ' tone-muted');
     text($('kpi-relogin-sub'), d ? ('登录失败 ' + d.fail + ' · 网关不可达 ' + d.unreachable
       + (d.last_relogin_at ? ' · 最近 ' + fmtTimeOnly(d.last_relogin_at) : '')) : '近 7 天');
 
@@ -4682,35 +4659,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       : '从开始检查到登录成功');
 
     text($('kpi-latency'), d && isNum(d.latency_ms) ? (d.latency_ms + ' ms') : '不可达');
-    $('kpi-latency').className = 'kpi-value' + (!d || !isNum(d.latency_ms) ? ' tone-err'
+    $('kpi-latency').className = 'stat-value' + (!d || !isNum(d.latency_ms) ? ' tone-err'
       : (d.latency_ms < 120 ? ' tone-ok' : (d.latency_ms < 400 ? ' tone-warn' : ' tone-err')));
     text($('kpi-latency-sub'), d && d.last_unreachable_at
       ? ('最近一次不可达 ' + fmtTimeOnly(d.last_unreachable_at)) : '到校园网关的 TCP 握手');
-
-    var bars = $('qbars');
-    if (bars) {
-      bars.innerHTML = '';
-      var series = (d && d.series) ? d.series : [];
-      var max = 1;
-      series.forEach(function (s) { max = Math.max(max, (s.relogin || 0) + (s.fail || 0)); });
-      series.forEach(function (s) {
-        var n = (s.relogin || 0) + (s.fail || 0);
-        var col = document.createElement('div'); col.className = 'qbar';
-        var fill = document.createElement('div');
-        fill.className = 'qbar-fill' + ((s.fail || 0) > 0 ? ' qfail' : '');
-        fill.style.height = Math.round(n / max * 100) + '%';
-        fill.title = s.date + '：掉线重登 ' + (s.relogin || 0) + ' · 失败 ' + (s.fail || 0)
-          + ' · 检查 ' + (s.checks || 0) + ' 次';
-        var lab = document.createElement('div'); lab.className = 'qbar-day';
-        lab.textContent = String(s.date || '').slice(5);
-        col.appendChild(fill); col.appendChild(lab);
-        bars.appendChild(col);
-      });
-      text($('quality-note'), d
-        ? ('检查 ' + d.checks + ' 次 · 统计于 ' + (d.generated_at || '-')
-           + (d.avg_reach_ms ? '' : ' · 可达耗时从本版起记录'))
-        : ('暂无数据' + (m && m.error ? '（' + m.error + '）' : '（日志为空）')));
-    }
+    /* v2.1.2.0 三轮：原来这里还要画「连接质量」的 7 天柱图，板块已按用户意见删掉，
+       只保留上面 4 项指标的填充（它们现在直接显示在状态页上，不再藏在折叠里）。 */
   }
 
   function loadMetrics() {
@@ -4718,8 +4672,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   }
 
   (function () {
-    var btn = $('btn-metrics-refresh');
-    if (btn) btn.addEventListener('click', loadMetrics);
+    /* 三轮：连接质量板块没了，「刷新」按钮也一并没有；4 项诊断指标仍靠这次拉取填充，
+       所以启动即拉一次（指标本来就是低频变化的东西，不需要定时轮询）。 */
     loadMetrics();
   })();
 

@@ -361,12 +361,16 @@ check("v2.0.8.0 服务注入 metrics（_attach 在位）",
 check("v2.0.8.0 /api/metrics 路由 + 优雅降级",
       'path == "/api/metrics"' in src_web and "def api_get_metrics(" in src_web
       and "统计模块未就绪" in src_web)
-check("v2.0.8.0 状态页有连接质量卡片",
-      'id="card-quality"' in src_web and 'id="kpi-uptime"' in src_web
-      and 'id="qbars"' in src_web)
-check("v2.0.8.0 柱图是纯 CSS（不引入图表库）",
-      ".qbars" in src_web and "chart.js" not in src_web.lower()
-      and "echarts" not in src_web.lower())
+check("v2.1.2.0 连接质量板块已删（用户：「没啥用」）—— 卡片 / 柱图 / 刷新按钮 / 相关 CSS 全清掉",
+      'id="card-quality"' not in src_web and 'id="qbars"' not in src_web
+      and 'id="btn-metrics-refresh"' not in src_web and 'id="quality-note"' not in src_web
+      and ".qbars" not in src_web and "qbar-fill" not in src_web and "qbar-day" not in src_web)
+check("v2.1.2.0 诊断指标不再折叠（用户：「直接显示出来」）—— 改 4 格统计条，且仍不引图表库",
+      'class="card stat-strip stat-strip-4"' in src_web
+      and 'id="kpi-uptime"' in src_web and 'id="kpi-relogin"' in src_web
+      and 'id="kpi-recover"' in src_web and 'id="kpi-latency"' in src_web
+      and '<details class="diag">' not in src_web and ".diag-body" not in src_web
+      and "chart.js" not in src_web.lower() and "echarts" not in src_web.lower())
 # 行为级：三种走向 + 窗口过滤 + 老格式（没有「耗时」字段）容忍
 _ev = _mx.parse_log_lines([
     "[2026-09-28 07:28:05] [INFO] 开始检查 (reason=periodic)",
@@ -1651,10 +1655,10 @@ check("v2.1.2.0 背景 / 遮罩都压在内容层之下（负 z-index < .wrap �
       _decl(_css_rule('[data-theme="baka"] body::before'), "z-index") == "-3"
       and _decl(_baka_mask, "z-index") == "-2"
       and _decl(_css_rule(".wrap"), "z-index") == "1")
-check("v2.1.2.0 首屏按使用逻辑排：「状态 + 立即登录」在同一张卡里，且都在诊断区之前",
+check("v2.1.2.0 首屏按使用逻辑排：「状态 + 立即登录」在同一张卡里，且都在诊断指标之前",
       _pos('class="card status-hero"') >= 0
       and _pos('id="card-online"') >= 0 and _pos('id="btn-login"') >= 0
-      and _pos('id="card-online"') < _pos('id="btn-login"') < _pos('id="card-quality"'))
+      and _pos('id="card-online"') < _pos('id="btn-login"') < _pos('id="card-uptime"'))
 
 # —— 第三轮（用户反馈：「状态 / 配置 / 日志 改了个寂寞」——只改表面不算，得动信息架构）——
 check("v2.1.2.0 状态页：状态与动作合并成一张卡（不再两张卡各空一半），旧的 .lead 结构清掉",
@@ -1675,12 +1679,13 @@ check("v2.1.2.0 页面两栏布局：配置页与状态页共用同一套（左�
       and ".page-col > .status-hero, .page-col > .stat-strip { margin-top: 0; }" in _page
       and "@media (max-width: 980px) { .page-cols" in _page
       and "cfg-page" not in _page and "cfg-col" not in _page)
-check("v2.1.2.0 状态页左右两栏：左「状态 + 统计条 + 诊断详情」/ 右「账户与登录密码」",
+check("v2.1.2.0 状态页左右两栏：左「状态 + 日常统计条 + 诊断指标条」/ 右「账户与登录密码」",
       _pos('id="card-online"') < _pos('class="card stat-strip"')
-      < _pos('id="card-quality"') < _pos('id="card-password"')
+      < _pos('class="card stat-strip stat-strip-4"') < _pos('id="card-password"')
       and _pos('id="card-password"') < _pos('id="panel-config"'),
-      "online@%s strip@%s quality@%s pwd@%s" % (_pos('id="card-online"'),
-          _pos('class="card stat-strip"'), _pos('id="card-quality"'), _pos('id="card-password"')))
+      "online@%s strip@%s diag@%s pwd@%s" % (_pos('id="card-online"'),
+          _pos('class="card stat-strip"'), _pos('class="card stat-strip stat-strip-4"'),
+          _pos('id="card-password"')))
 check("v2.1.2.0 状态页右栏的账号密码竖排（右栏约 430px，四列会变窄条）；端口卡与升级设置仍一行三列",
       'class="pw-row pw-row-4"' not in _page and ".pw-row-4" not in _page
       and _page.count('class="pw-row pw-row-3"') == 2
@@ -1703,9 +1708,10 @@ check("v2.1.2.0 日志页：占用与诊断包改两栏（原来一长段说明�
       'class="log-diag-cols"' in _page and "日志占用与诊断包" in _page
       and _pos('id="log-list"') < _pos('id="btn-logs-refresh"')
       and _decl(_css_rule(".log-diag-cols"), "display") == "grid")
-check("v2.1.2.0 诊断指标默认收起（原生 details，零 JS）+ 品牌大标题已撤（不再与顶栏重复）",
-      '<details class="diag">' in _page and '<details class="diag" open' not in _page
-      and 'class="diag-summary"' in _page and 'class="hero-title"' not in _page)
+check("v2.1.2.0 品牌大标题已撤（不再与顶栏重复）+ 诊断指标不再折叠（三轮：直接显示）",
+      'class="hero-title"' not in _page and '<details class="diag">' not in _page
+      and _page.count('<details class="diag fold">') >= 3   # 折叠机制仍服务于配置 / 关于的进阶设置
+      and 'class="diag-summary"' in _page)
 check("v2.1.2.0 首屏默认主题 = baka，三种取值都认（存过的用户不被清掉）",
       "var theme = 'baka';" in _page
       and "saved === 'baka' || saved === 'dark' || saved === 'light'" in _page
