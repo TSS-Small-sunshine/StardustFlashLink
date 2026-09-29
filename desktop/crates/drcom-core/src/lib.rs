@@ -25,6 +25,7 @@ pub mod profiles;
 pub mod protocol;
 pub mod scheduler;
 pub mod secret;
+pub mod service;
 pub mod session;
 pub mod settings;
 pub mod timefmt;

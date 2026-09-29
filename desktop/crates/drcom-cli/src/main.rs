@@ -15,7 +15,7 @@ mod server;
 use drcom_core::net::{self, PlainHttp};
 use drcom_core::{
     channel::Version, config::Config, logfile::RotatingLog, platform, portal, protocol,
-    scheduler::Scheduler, secret, session, timefmt, Outcome, Status,
+    scheduler::Scheduler, secret, service, session, timefmt, Outcome, Status,
 };
 use std::time::{Duration, SystemTime};
 
@@ -61,6 +61,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("diagnostics") => diagnostics_cmd(&args[1..]),
         Some("portal") => portal_cmd(&args[1..]),
         Some("autostart") => autostart_cmd(&args[1..]),
+        Some("service") => service_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -84,6 +85,7 @@ fn print_help() {
          diagnostics [--out F] [--days N]        生成脱敏诊断包（ZIP，密码永不进包 ✓）\n  \
          portal [--url U] [--timeout N]         门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页）\n  \
          autostart on|off|status [--dry-run]    开机自启（当前用户级，免管理员 ✓；跑的是无界面循环）\n  \
+         service install|uninstall|start|stop|restart|status [--dry-run]   注册成常驻服务（Windows 走 NSSM ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -311,6 +313,92 @@ fn login(args: &[String]) -> i32 {
 }
 
 /// `diagnostics [--out FILE] [--days N]`：生成**脱敏**诊断包（ZIP ✓）。
+/// `service`：把常驻循环注册成系统服务 ✓
+/// （Windows = NSSM 托管的服务；Linux = systemd --user；macOS = LaunchAgent ✓）。
+fn service_cmd(args: &[String]) -> i32 {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("stardust-flash-link"));
+    let run_args = ["run"];
+    match action {
+        "status" => {
+            let available = service::manager_available();
+            println!("常驻方式: {}", service::flavor_name());
+            println!("管理工具: {}（{}）", service::manager_program(), if available { "可用 ✓" } else { "没找到 ✗" });
+            println!("状态: {}", service::status().label_cn());
+            if cfg!(target_os = "windows") {
+                println!("{}", service::shared_name_note());
+            }
+            if !available {
+                println!();
+                if cfg!(target_os = "windows") {
+                    println!("{}", service::nssm_missing_hint());
+                } else {
+                    println!("装好 {} 之后再用 `service install` ✓", service::manager_program());
+                }
+            }
+            println!();
+            println!("（也可以用 `autostart on`：登录时自动跑，免管理员、免额外工具 ✓）");
+            0
+        }
+        "install" | "on" => {
+            if args.iter().any(|a| a == "--dry-run") {
+                println!("将要做（**未改动系统** ✓）：");
+                for line in service::plan(&exe, &run_args) {
+                    println!("  {}", line);
+                }
+                return 0;
+            }
+            match service::install(&exe, &run_args) {
+                Ok(message) => {
+                    println!("{}", message);
+                    println!("常驻命令: {} run（无界面循环 ✓）", exe.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("注册失败: {}", e);
+                    1
+                }
+            }
+        }
+        "uninstall" | "off" => match service::uninstall() {
+            Ok(message) => {
+                println!("{}", message);
+                println!("（用 `service install` 可以再装回来 ✓）");
+                0
+            }
+            Err(e) => {
+                eprintln!("注销失败: {}", e);
+                1
+            }
+        },
+        "start" | "stop" | "restart" => {
+            let control = match action {
+                "start" => service::Control::Start,
+                "stop" => service::Control::Stop,
+                _ => service::Control::Restart,
+            };
+            match service::control(control) {
+                Ok(message) => {
+                    println!("{}", message);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("{}失败: {}", control.label_cn(), e);
+                    1
+                }
+            }
+        }
+        other => {
+            eprintln!(
+                "用法: service install|uninstall|start|stop|restart|status [--dry-run]（收到 `{}`）",
+                other
+            );
+            2
+        }
+    }
+}
+
 /// `autostart`：开 / 关 / 查开机自启。
 ///
 /// 全部是**当前用户级**（Windows 注册表 Run / systemd --user / LaunchAgent ✓）
@@ -799,6 +887,17 @@ fn suffix_flag_without_value(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_cmd_validates_actions_and_dry_run_touches_nothing() {
+        assert_eq!(service_cmd(&["nope".to_string()]), 2, "动作写错要提示用法 ✓");
+        assert_eq!(
+            service_cmd(&["install".to_string(), "--dry-run".to_string()]),
+            0,
+            "--dry-run 只打印计划（不动系统 ✓）"
+        );
+        assert_eq!(service_cmd(&["status".to_string()]), 0, "status 只读 ✓");
+    }
 
     #[test]
     fn autostart_cmd_validates_action_and_dry_run_touches_nothing() {

@@ -175,5 +175,31 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 | 开机自启 | ✅ 完成 | `autostart on\|off\|status [--dry-run]`：Windows `HKCU\...\Run` / Linux `systemd --user` / macOS LaunchAgent —— **全程当前用户级，一次管理员权限都不要** ✓；跑的是**无界面循环**（`run` ✓，不开机弹窗 ✗）。含「纯函数产出命令/文件内容 + 薄执行层」两层，命令逐字有单测 ✓（连「路径带空格要加引号」「plist 里 `&<>` 要转义」都测了 ✓） |
 | **系统托盘** | ⛔ 暂时做不了 | Slint 1.18 有 `system-tray` feature，但**只有 Qt 等后端实现** —— 查过 `i-slint-backend-winit-1.18.1` 源码，**零处引用 SystemTray** ✗。我们用 winit 后端 ⇒ 做出来也是个摆设 ✗，**不能给用户一个点不动的托盘**，故推迟到 M3（届时用平台原生 API：Windows `Shell_NotifyIcon`、Linux `libayatana-appindicator`、macOS `NSStatusItem`） |
 
+---
+
+## 9. 服务化（M3 起步，已完成）
+
+`stardust-flash-link service install|uninstall|start|stop|restart|status [--dry-run]` ✓
+
+| 平台 | 常驻方式 | 落点 / 命令 |
+| --- | --- | --- |
+| Windows | **NSSM 托管的服务** | 服务名 **`DrcomAutoLogin`**（与 2.x **故意共用** ✓，存量安装/卸载/升级脚本都认它 ✓）；`nssm install/set/start/stop/remove` |
+| Linux | `systemd --user` | `~/.config/systemd/user/stardust-flash-link.service` + `systemctl --user …`（**免 root** ✓） |
+| macOS | LaunchAgent | `~/Library/LaunchAgents/com.stardust.flashlink.plist` + `launchctl load -w` |
+
+设计要点（都写进代码注释与单测了 ✓）：
+1. **遵守 2.x 不变量 I7**：NSSM 的 `AppExit` 写 `Default Ignore` + `0 Ignore`，**绝不写 `Restart`** ✗ ——
+   重试由程序自己的退避负责 ✓（有单测断言这一点 ✓）。
+2. **同名服务是常态** ✓：3.0 查到「正在运行」时，跑的大概率是 **2.x 那个** ✓ ——
+   `service status` 会直接点明 ✓；`service install` 发现同名服务**不硬装** ✗，而是给出**接管**的
+   三条 `nssm set …`（Application / AppDirectory / AppParameters）+ 另一条「先 uninstall 再 install」✓。
+3. **不在 Windows 上自己写 SCM 调度器** ✗：那需要一大坨 `unsafe` FFI + 一个只在真机才能验的服务模型 ✓；
+   `nssm.exe` 2.x 安装包里本来就随包分发 ✓ → 先复用 ✓。
+4. **状态查询免管理员** ✓：Windows 用 `sc query`（普通用户可查 ✓，`1060` = 服务不存在 ✓ 比认中英文文案可靠 ✓）；
+   Linux/macOS 先看单元文件在不在，再问 `systemctl is-active` / `launchctl list` ✓。
+5. **没装管理工具时给两条可走的路** ✓：把 `nssm.exe` 放到程序目录旁 ✓，或先用 `autostart on` 顶上 ✓
+   （登录时自动跑、免管理员 ✓，只是没有服务级「开机即起」✓）。
+6. Linux / macOS 的单元文件与 `autostart` **共用同一份生成函数** ✓ —— 两条命令永远不会写出两份不一样的配置 ✓。
+
 > 小坑记录：改完 UI 只跑 `cargo test` **不会刷新 GUI 二进制** ✗ ——
 > 启动前要先 `cargo build -p drcom-ui` ✓（第一次真机验证单实例就是被旧二进制骗了 ✗）。

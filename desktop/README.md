@@ -53,6 +53,23 @@ stardust-flash-link autostart off                  # 关掉（幂等 ✓）
 自启跑的是**无界面循环**（`… run`）✓ —— 开机不弹窗 ✗；落点：Windows 注册表
 `HKCU\...\Run`、Linux `systemd --user`、macOS `~/Library/LaunchAgents` ✓。
 
+### 常驻服务（比自启更「正式」的做法）
+
+```bash
+stardust-flash-link service status                      # 常驻方式 + 状态 + 工具是否在手边
+stardust-flash-link service install --dry-run           # 只打印将执行的命令（不动系统 ✓）
+stardust-flash-link service install                     # 注册并启动
+stardust-flash-link service start|stop|restart          # 启停 / 重启
+stardust-flash-link service uninstall                   # 注销（幂等 ✓）
+```
+
+- Windows 走 **NSSM 托管的服务**，服务名是 **`DrcomAutoLogin`** —— 与 2.x **故意共用** ✓，
+  所以 `status` 显示「正在运行」时，**跑的可能就是 2.x 那个** ✓（命令会点明这一点 ✓）；
+  `install` 遇到同名服务**不会硬装** ✗，会给出把服务指向 3.0 程序的「**接管**」命令 ✓。
+- Linux / macOS 走 `systemd --user` / LaunchAgent，**全程免 root / 免管理员** ✓，
+  并且与 `autostart` 写的是**同一份文件** ✓（不会有两套配置打架 ✗）。
+- 状态查询**不需要管理员** ✓（Windows 用 `sc query` ✓）。
+
 ### 排障：一键脱敏诊断包
 
 出问题时不用截图 + 口述，直接生成一个包发给别人 ✓：
