@@ -1541,7 +1541,8 @@ check("v2.1.3.0 状态页凭据卡：一次存「账号 + 运营商 + 密码」�
       'id="btn-save-pwd" type="button">保存账号与密码' in _page
       and "API.saveCredentials" in _page and "scope: 'current'" in _page)
 check("v2.1.3.0 状态页明确写了保存范围（账号进配置、密码单独存文件）",
-      'id="cred-scope"' in _page and "不写进配置文件" in _page)
+      'id="cred-scope"' in _page and "密码永不写进配置文件" in _page
+      and _page.index('id="btn-save-pwd"') < _page.index('id="cred-scope"'))
 check("v2.1.3.0 配置页有「保存到选中方案」的账号 / 密码编辑区",
       'id="btn-profile-cred-save"' in _page and 'id="profile-account"' in _page
       and 'id="profile-pwd"' in _page and 'id="profile-pwd-clear"' in _page
@@ -2115,7 +2116,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.2.0", version.VERSION == "2.1.2.0", version.VERSION)
+check("版本 = 2.1.3.0", version.VERSION == "2.1.3.0", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

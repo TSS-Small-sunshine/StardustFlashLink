@@ -2884,12 +2884,14 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           <div class="err" id="err-pwd" role="alert"></div>
         </div>
         <!-- v2.1.3.0：这张卡以前只存密码 —— 账号 / 运营商改了**没有任何按钮能保存**
-             （「保存账户登录密码」只 POST /api/password）。现在一次存三样。 -->
-        <div class="hint" id="cred-scope">保存范围：账号与运营商写进本机配置；密码写「当前生效的密码文件」（当前方案有专属密码就是它，否则公共 <span class="mono">password.txt</span>），<b>不写进配置文件</b>。</div>
+             （「保存账户登录密码」只 POST /api/password）。现在一次存三样。
+             保存范围说明放在按钮**下面**：说明是补充信息，按钮才是要点的东西，
+             压在按钮上面会把它顶到 720 折叠线以下，README 截图里就看不见了。 -->
         <div class="field-foot">
           <span class="hint">保存后立即生效，无需重启服务。</span>
           <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账号与密码</button>
         </div>
+        <div class="hint" id="cred-scope">保存范围：账号与运营商进本机配置；密码进当前生效的密码文件（当前方案有自己的密码就是它，否则公共 <span class="mono">password.txt</span>）——<b>密码永不写进配置文件</b>。</div>
       </div>
     </div><!-- /page-col -->
     </div><!-- /page-cols -->
