@@ -1553,8 +1553,9 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   --glow-b: transparent;
   --glow-c: transparent;
 
-  /* 材质：更白更厚，卡片要像「浮在大图上」 */
-  --material: rgba(255, 255, 255, 0.78);
+  /* 材质：更白更厚，卡片要像「浮在大图上」。
+     0.78 → 0.86：浅紫底上白字卡太透会让正文发灰、读数吃力（配色首要的是看得清）。 */
+  --material: rgba(255, 255, 255, 0.86);
   --material-2: rgba(255, 255, 255, 0.62);
   --material-strong: rgba(255, 255, 255, 0.86);
   --material-solid: #ffffff;
@@ -1567,10 +1568,12 @@ _HTML_PAGE = r"""<!DOCTYPE html>
   --hairline: rgba(60, 70, 120, 0.10);
   --hairline-2: rgba(60, 70, 120, 0.18);
 
+  /* 次要文字整体加深一档：原来的 #5c6076 / #7b7f96 落在浅紫极光上偏虚，副标题与卡片
+     说明看起来「糊」；加深后同样克制，但一眼读得清。 */
   --text: #1b1d2b;
   --text-strong: #0d0f1a;
-  --text-2: #5c6076;
-  --text-3: #7b7f96;
+  --text-2: #4d5168;
+  --text-3: #686c83;
 
   /* 强调色：星尘紫（呼应参考图里的紫调） */
   --accent: #6b5cff;
@@ -1661,17 +1664,14 @@ body::before {
   z-index: -2;
   pointer-events: none;
   background: linear-gradient(180deg,
-    rgba(255, 255, 255, 0.80) 0%,
-    rgba(255, 255, 255, 0.66) 24%,
-    rgba(255, 255, 255, 0.46) 52%,
-    rgba(255, 255, 255, 0.28) 100%);
+    rgba(255, 255, 255, 0.86) 0%,
+    rgba(255, 255, 255, 0.72) 24%,
+    rgba(255, 255, 255, 0.52) 52%,
+    rgba(255, 255, 255, 0.34) 100%);
 }
 
-/* 首屏大标题（BakaXL 的「您好，XXX」位）：只在 baka 主题出现，老主题一个像素都不动 */
-.hero { display: none; }
-[data-theme="baka"] .hero { display: block; margin: 22px 2px 6px; }
-[data-theme="baka"] .hero-title { font-size: 40px; font-weight: 800; letter-spacing: -0.04em; line-height: 1.12; }
-[data-theme="baka"] .hero-sub { margin: 8px 0 0; font-size: 14.5px; color: var(--text-2); }
+/* v2.1.2.0：原来这里有个「品牌大标题」（只有 baka 主题显示）—— 与顶栏品牌名重复，又霸占
+   首屏最显眼的位置，已按使用逻辑撤掉；首屏改由状态面板的 .lead（当前状态 + 立即登录）承担。 */
 
 h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.02em; color: var(--text-strong); }
 a { color: var(--accent); text-decoration: none; }
@@ -1863,6 +1863,46 @@ a:hover { color: var(--accent-hover); }
   background: var(--material-2);
 }
 .action-card .muted { max-width: 46ch; }
+
+/* ============================================================
+   6.5 首屏「先办事」区 —— v2.1.2.0 按使用逻辑重排
+
+   以前：「立即登录」在页面最底部，要滚过 10 张 KPI（冷启动时 6 张是「未知 / -」）+ 一个
+   大空卡才按得到；首屏最显眼的位置却给了与顶栏重复的品牌大标题。
+   现在：首屏左边「现在通不通」（大字 + 状态色），右边「立即登录」；日常关心的几项跟在同一
+   屏内；9 项诊断指标与连接质量收进默认收起的「诊断详情」（原生 details，零 JS）。
+   ============================================================ */
+.lead { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+.lead-state { justify-content: center; padding: 26px 24px; box-shadow: var(--shadow-2), var(--highlight); }
+.lead-state .kpi-value { font-size: 34px; }
+.lead .action-card { margin-top: 0; padding: 26px 24px; justify-content: center; background: var(--material-strong); }
+/* 主卡按状态上色（不支持 :has() 的浏览器只是少了这条色边，功能不受影响） */
+.lead-state:has(.dot-ok) { border-color: rgba(48, 209, 88, 0.40); }
+.lead-state:has(.dot-err) { border-color: rgba(255, 69, 58, 0.40); }
+/* 日常区：恰好 5 项 —— 用 180px 的列宽（1080 内容宽正好排成 5 列一行），避免第 5 格
+   被挤到第二行孤零零占一格 */
+.lead-facts { margin-top: 14px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+
+/* 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏 */
+.diag { margin-top: 14px; }
+.diag-summary {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  padding: 13px 20px; list-style: none; cursor: pointer;
+  background: var(--material-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-lg); box-shadow: var(--highlight);
+  font-size: 13.5px; font-weight: 500; color: var(--text);
+  transition: background-color 0.18s ease, border-color 0.18s ease;
+}
+.diag-summary::-webkit-details-marker { display: none; }
+.diag-summary:hover { background: var(--fill); border-color: var(--hairline-2); }
+.diag-hint { font-size: 12px; font-weight: 400; color: var(--text-3); }
+.diag-caret { margin-left: auto; display: inline-flex; color: var(--text-3); transition: transform 0.22s ease; }
+.diag[open] .diag-caret { transform: rotate(180deg); }
+.diag-body {
+  margin-top: 14px;
+  display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(212px, 1fr));
+}
+.diag-body > #card-quality { grid-column: 1 / -1; }
 
 /* ============================================================
    7. 按钮 / 表单 / 开关 / 徽章
@@ -2115,6 +2155,11 @@ code.path {
   .btn-lg { width: 100%; }
   .save-bar { justify-content: stretch; bottom: 12px; }
   .save-bar .btn { flex: 1 1 auto; }
+  /* v2.1.2.0：窄屏把「状态 + 登录」竖起来，按钮仍留在第一屏 */
+  .lead { grid-template-columns: 1fr; gap: 12px; }
+  .lead-state { padding: 20px 18px; }
+  .lead-state .kpi-value { font-size: 27px; }
+  .lead .action-card { padding: 20px 18px; }
   .card { padding: 18px; }
 }
 @media (max-width: 480px) {
@@ -2200,11 +2245,8 @@ code.path {
 
 <main class="wrap" id="main">
 
-  <!-- BakaXL 风首屏大标题（只在 baka 主题显示，见样式表 §2.5） -->
-  <div class="hero">
-    <h1 class="hero-title">星尘闪连</h1>
-    <p class="hero-sub">Dr.COM 校园网自动登录 · 全程本机运行，密码不出这台电脑</p>
-  </div>
+  <!-- v2.1.2.0：首屏不再放「品牌大标题」（与顶栏重复、白占位置），
+       第一眼就是「现在通不通」+「立即登录」—— 见下面的 .lead。 -->
 
   <!-- ============ 状态 ============ -->
   <section class="panel active" id="panel-status" role="tabpanel" aria-labelledby="tab-status" tabindex="-1">
@@ -2222,7 +2264,29 @@ code.path {
       <button class="update-banner-dismiss" id="update-banner-dismiss" type="button" aria-label="关闭横幅"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6.4 6.4 17.6 17.6M17.6 6.4 6.4 17.6"/></svg></button>
     </div>
 
-    <div class="grid">
+    <!-- v2.1.2.0 首屏：先回答「现在通不通」（大字 + 状态色），再给「立即登录」。
+         以前登录按钮在页面最底部，要滚过 10 张 KPI 才按得到。 -->
+    <div class="lead">
+      <article class="card kpi lead-state" id="card-online">
+        <div class="kpi-label">当前状态</div>
+        <div class="kpi-value" id="kpi-online">
+          <span class="dot dot-unknown" id="kpi-online-dot" aria-hidden="true"></span>
+          <span id="kpi-online-text">未知</span>
+        </div>
+        <div class="kpi-sub" id="kpi-online-sub">登录结果：-</div>
+      </article>
+
+      <div class="card action-card">
+        <button class="btn btn-lg" id="btn-login" type="button">
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span id="btn-login-label">立即登录</span>
+        </button>
+        <p class="muted" id="login-hint" style="margin:0;font-size:12.5px;">点击按钮立即触发一次完整的网络检查与登录流程。</p>
+      </div>
+    </div>
+
+    <!-- 日常关心的几项：跟首屏同一屏内，不用滚 -->
+    <div class="grid lead-facts">
       <article class="card kpi" id="card-net">
         <div class="kpi-label">网络可达性</div>
         <div class="kpi-value" id="kpi-net">
@@ -2230,15 +2294,6 @@ code.path {
           <span id="kpi-net-text">未知</span>
         </div>
         <div class="kpi-sub" id="kpi-net-sub">等待首次检查</div>
-      </article>
-
-      <article class="card kpi" id="card-online">
-        <div class="kpi-label">在线状态</div>
-        <div class="kpi-value" id="kpi-online">
-          <span class="dot dot-unknown" id="kpi-online-dot" aria-hidden="true"></span>
-          <span id="kpi-online-text">未知</span>
-        </div>
-        <div class="kpi-sub" id="kpi-online-sub">登录结果：-</div>
       </article>
 
       <article class="card kpi">
@@ -2264,6 +2319,17 @@ code.path {
         <div class="kpi-value mono" id="kpi-next">未计划</div>
         <div class="kpi-sub" id="kpi-next-sub">-</div>
       </article>
+    </div>
+
+    <!-- 诊断详情：默认收起 —— 冷启动那几格「- / 未计划 / 等待统计」不再铺满首屏；
+         原生 details，零 JS，没有 JS 也能展开。 -->
+    <details class="diag">
+      <summary class="diag-summary">
+        <span>诊断详情</span>
+        <span class="diag-hint">在线率 / 掉线重登 / 平均恢复耗时 / 当前延迟 / 连接质量</span>
+        <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+      </summary>
+      <div class="diag-body">
 
       <!-- v2.0.8.0 / B4：连接质量（近 7 天，从日志现算） -->
       <article class="card kpi" id="card-uptime">
@@ -2289,7 +2355,6 @@ code.path {
         <div class="kpi-value" id="kpi-latency">-</div>
         <div class="kpi-sub" id="kpi-latency-sub">到校园网关的 TCP 握手</div>
       </article>
-    </div>
 
     <!-- v2.0.8.0 / B4：近 7 天柱状图（纯 CSS，无图表库） -->
     <div class="card" id="card-quality">
@@ -2302,13 +2367,8 @@ code.path {
       <div class="kpi-sub" id="quality-note">加载中…</div>
     </div>
 
-    <div class="card action-card">
-      <button class="btn btn-lg" id="btn-login" type="button">
-        <span class="btn-spinner" aria-hidden="true"></span>
-        <span id="btn-login-label">立即登录</span>
-      </button>
-      <p class="muted" id="login-hint" style="margin:0;font-size:12.5px;">点击按钮立即触发一次完整的网络检查与登录流程。</p>
-    </div>
+      </div>
+    </details>
   </section>
 
   <!-- ============ 配置 ============ -->

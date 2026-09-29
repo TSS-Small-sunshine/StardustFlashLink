@@ -1631,6 +1631,11 @@ def _decl(block, name):
     return _m.group(1).strip() if _m else ""
 
 
+def _pos(needle):
+    """页面里的出现位置（没有就 -1）—— 用来断言「谁在谁前面」这种使用逻辑顺序。"""
+    return _page.index(needle) if needle in _page else -1
+
+
 check("v2.1.2.0 三套令牌并存（:root 亮色 / dark / baka），baka 是实打实的一套",
       ":root {" in _page and '[data-theme="dark"] {' in _page
       and '[data-theme="baka"] {' in _page
@@ -1646,10 +1651,14 @@ check("v2.1.2.0 背景 / 遮罩都压在内容层之下（负 z-index < .wrap �
       _decl(_css_rule('[data-theme="baka"] body::before'), "z-index") == "-3"
       and _decl(_baka_mask, "z-index") == "-2"
       and _decl(_css_rule(".wrap"), "z-index") == "1")
-check("v2.1.2.0 首屏大标题只在 baka 出现（老主题 .hero 照旧 display:none）",
-      ".hero { display: none; }" in _page
-      and '[data-theme="baka"] .hero { display: block;' in _page
-      and 'class="hero-title"' in _page)
+check("v2.1.2.0 首屏按使用逻辑排：「状态 + 立即登录」都在诊断区之前（不用滚到底才能登录）",
+      _pos('class="lead"') >= 0
+      and _pos('id="card-online"') >= 0 and _pos('id="btn-login"') >= 0
+      and _pos('id="card-online"') < _pos('id="card-quality"')
+      and _pos('id="btn-login"') < _pos('id="card-quality"'))
+check("v2.1.2.0 诊断指标默认收起（原生 details，零 JS）+ 品牌大标题已撤（不再与顶栏重复）",
+      '<details class="diag">' in _page and '<details class="diag" open' not in _page
+      and 'class="diag-summary"' in _page and 'class="hero-title"' not in _page)
 check("v2.1.2.0 首屏默认主题 = baka，三种取值都认（存过的用户不被清掉）",
       "var theme = 'baka';" in _page
       and "saved === 'baka' || saved === 'dark' || saved === 'light'" in _page
