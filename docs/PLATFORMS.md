@@ -227,15 +227,23 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 | `deb-control` | Debian 元数据（**架构名换算** `x86_64→amd64` / `aarch64→arm64` / `armv7→armhf` ✓，体积换算成 KB ✓） |
 | `Info.plist` | macOS `.app`（BundleIdentifier / Executable / Version / `CFBundlePackageType=APPL` ✓） |
 | `README.txt` | 包里那封「怎么用」说明（**首句就写清是预览版** ✓，命令清单 + 配置兼容说明 ✓） |
-| 产物命名 | `stardust-flash-link-<版本>-<目标>.tar.gz|.zip|.dmg|.deb` ✓（无空格无斜杠 ✓ 有单测 ✓） |
+| 产物命名 | `stardust-flash-link-<版本>-<目标>.zip` ✓（无空格无斜杠 ✓ 有单测 ✓） |
 | `SHA256SUMS` 行 | coreutils 格式（**两个空格** ✓），自动升级对着它校验 ✓ |
+| ZIP 打包 | `archive`：用**自带的 ZIP 实现** ✓（CI 里不需要外部 `zip`/`tar` ✓，三平台行为一致 ✓）；写完会把文件**读回来解析中央目录**做自检 ✓ |
 
-用法（也是 CI 会做的两步 ✓）：
+用法（也就是 CI 里跑的那三步 ✓）：
 
 ```bash
-stardust-flash-link package-files --out pkg     # 第一行输出产物基名，脚本直接拿去用 ✓
-stardust-flash-link checksum pkg/README.txt     # → "<hex>  <文件>" / sha256sum 兼容 ✓
+stardust-flash-link package-files --out pkg --target linux-aarch64 --exe stardust-flash-link
+                 # ↑ 第一行输出产物基名；**交叉编译时必须显式 --target** ✗（宿主自报目标是错的 ✓）
+stardust-flash-link archive --out dist/<基名>.zip pkg
+stardust-flash-link checksum dist/<基名>.zip      # → "<hex>  <文件>" / sha256sum 兼容 ✓
 ```
 
-> ⏭ 下一步：把这两条接进 `preview-3.0.yml` 的 build 矩阵（各平台打 tar.gz/zip/dmg +
-> `SHA256SUMS` + 上传 artifact ✓），安装器（Inno/deb/dmg 正式包）随后 ✓。
+**CI 已接入** ✓（`preview-3.0.yml` 的 build 矩阵）：每个目标都产出 `dist/<基名>.zip` +
+`dist/SHA256SUMS`，与原始二进制一起挂 artifact ✓。交叉编译的行由**宿主编出的辅助程序**完成打包 ✓
+（目标二进制在 runner 上跑不了 ✗，所以生成包内文件与打 zip 都用宿主那份 ✓，靠 `--target` 纠正标签 ✓）。
+真机/CI 双重验证：Linux（含 aarch64/armv7 交叉）+ macOS（两架构）+ Windows 六行全绿 ✓；
+本地还用 **.NET `ZipFile`** 打开过我们写的包 ✓（条目名与字节数对得上 ✓，与 2.x 用 Python `zipfile` 互验同一路子 ✓）。
+
+> ⏭ 下一步：`.app` 包体 / `.dmg` / `.deb` 正式安装器（现在先是 ZIP + 校验和，够预览用 ✓）。
