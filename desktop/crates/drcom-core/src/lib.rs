@@ -12,6 +12,7 @@ pub mod cidr;
 pub mod config;
 pub mod diagnostics;
 pub mod guard;
+pub mod instance;
 pub mod logfile;
 pub mod metrics;
 pub mod net;

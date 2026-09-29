@@ -8,14 +8,36 @@
 
 mod model;
 
-use drcom_core::platform;
+use drcom_core::{instance, platform};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 slint::include_modules!();
 
+/// 单实例占用的本地端口（回环地址，高位端口 ✓）。
+const INSTANCE_PORT: u16 = 47653;
+
 fn main() -> Result<(), slint::PlatformError> {
+    // 单实例：已经有一个在跑时，把它的窗口叫到前面，自己安静退出 ✓
+    let instance_guard = match instance::acquire(INSTANCE_PORT) {
+        Ok(instance::Acquire::First(guard)) => Some(guard),
+        Ok(instance::Acquire::AlreadyRunning) => {
+            let reached = instance::request_focus(INSTANCE_PORT);
+            println!(
+                "{} 已经在运行了{}",
+                drcom_core::APP_NAME,
+                if reached { "，已把它的窗口叫到前面 ✓" } else { "（叫不动它，去任务栏看看 ✓）" }
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            // 拿不到端口也没关系：宁可多开一个，也不能不让用户用 ✗
+            eprintln!("单实例检查跳过：{}", e);
+            None
+        }
+    };
+
     let ui = AppWindow::new()?;
     apply(&ui, &model::collect());
 
@@ -74,6 +96,28 @@ fn main() -> Result<(), slint::PlatformError> {
         let Some(parent) = weak_parent.upgrade() else { return };
         open_settings(&holder, parent.as_weak());
     });
+
+    // 第二个实例敲门 → 把窗口抬到前面 ✓（非阻塞轮询，不占线程池 ✗）
+    let mut instance_timer: Option<slint::Timer> = None;
+    if let Some(guard) = instance_guard {
+        let weak = ui.as_weak();
+        let timer = slint::Timer::default();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(400),
+            move || {
+                if !guard.poll_focus_request() {
+                    return;
+                }
+                if let Some(ui) = weak.upgrade() {
+                    let _ = ui.show(); // 再 show 一次 = 置顶 ✓
+                    ui.window().request_redraw();
+                }
+            },
+        );
+        instance_timer = Some(timer); // 定时器必须活到 run() 结束（drop 即停 ✗）
+    }
+    let _keep_timer_alive = instance_timer;
 
     ui.run()
 }
