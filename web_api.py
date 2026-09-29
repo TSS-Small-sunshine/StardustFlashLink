@@ -2065,9 +2065,17 @@ a:hover { color: var(--accent-hover); }
 
 /* --- v2.1.2.0：表单类折叠（配置页「新建 / 覆盖方案」等）与两列表单 --- */
 .fold-body { margin-top: 12px; }
-/* 两列表单：固定两列 + 限宽（auto-fit 在宽屏会挤成三列，表格化表单反而更难读） */
-.pw-grid { display: grid; gap: 0 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 780px; }
-.pw-grid .field { margin-bottom: 16px; }
+/* --- v2.1.2.0：横向表单行 —— 宽屏把若干字段排成一行，别再纵向堆成一条长表 ---
+   （三轮：账号/运营商/密码/确认 一行四列；端口卡一行三列。
+     auto-fit 会在宽屏挤出第 5、6 条空轨，所以用显式列数 + 媒体查询递减。） */
+.pw-row { display: grid; gap: 0 18px; }
+.pw-row > .field { margin-bottom: 16px; min-width: 0; }
+.pw-row-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pw-row-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* 行内每格只有 200-350px，不再需要「输入框最长 560px」那条限宽 */
+.pw-row .field > input, .pw-row .field > select { max-width: none; }
+@media (max-width: 1000px) { .pw-row-3, .pw-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .pw-row-3, .pw-row-4 { grid-template-columns: minmax(0, 1fr); } }
 .cfg-cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: start; }
 
 /* --- v2.1.2.0：关于页顶部（真正的「关于」：这是什么 + 哪个版本 + 怎么装的） --- */
@@ -2373,7 +2381,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
 .card.section .field > input:not([type="checkbox"]):not([type="file"]),
 .card.section .field > select { max-width: 560px; }
 .card.section .field > input[type="number"] { max-width: 200px; }
-.pw-grid .field > input, .pw-grid .field > select { max-width: none; }
+/* 行内（.pw-row）与两列网格里的输入框不再限宽 —— 见前面的 .pw-row 规则 */
 .field input:focus-visible, .field select:focus-visible {
   outline: none; border-color: var(--accent);
   box-shadow: 0 0 0 3.5px var(--accent-soft);
@@ -2599,11 +2607,13 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
         <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
       </div>
-      <div class="pw-grid">
+      <!-- v2.1.2.0 三轮：改「一行四列」（账号 / 运营商 / 密码 / 再次输入）——
+           两列两行在大屏上每格近 500px 宽，输入框里只有几个字，白占半屏高。 -->
+      <div class="pw-row pw-row-4">
         <div class="field">
           <label for="cfg-account">账号</label>
           <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
-          <div class="hint">仅支持数字（学号 / 工号），不含运营商后缀</div>
+          <div class="hint">仅数字，不含运营商后缀</div>
           <div class="err" id="err-account" role="alert"></div>
         </div>
         <div class="field">
@@ -2614,7 +2624,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
             <option value="@dx">中国电信 @dx</option>
             <option value="@lt">中国联通 @lt</option>
           </select>
-          <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
+          <div class="hint">不同运营商后缀不同</div>
         </div>
         <div class="field">
           <label for="pwd-new">账户登录密码</label>
@@ -2622,8 +2632,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           <div class="hint">至少 1 个字符</div>
         </div>
         <div class="field">
-          <label for="pwd-confirm">再次输入账户登录密码</label>
+          <label for="pwd-confirm">再次输入密码</label>
           <input type="password" id="pwd-confirm" autocomplete="new-password">
+          <div class="hint">两次需一致才保存</div>
           <div class="err" id="err-pwd" role="alert"></div>
         </div>
       </div>
@@ -2777,7 +2788,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <h2 class="section-title">网络与服务端口</h2>
         <p class="section-desc" style="margin:0;">校园网认证网关，以及本管理页面监听的端口（改端口后需重启服务生效）。</p>
       </div>
-      <div class="pw-grid">
+      <div class="pw-row pw-row-3">
         <div class="field">
           <label for="cfg-host">认证服务器地址</label>
           <input type="text" id="cfg-host" class="cfg-lg" placeholder="例如 172.16.80.3" autocomplete="off" spellcheck="false">
@@ -2868,47 +2879,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         </div>
       </details>
 
-      <!-- v1.3 新增：自动升级字段（检查结果 / 进度 / 升级流水在「关于」页的「更新」块看） -->
-      <div class="field">
-        <label class="switch" for="cfg-auto-update-enabled">
-          <input type="checkbox" id="cfg-auto-update-enabled">
-          <span class="track" aria-hidden="true"></span>
-          <span class="switch-label">启用自动升级（GitHub 检测）</span>
-        </label>
-        <div class="hint">关闭后仅在启动时与手动点击时检查 GitHub 新版</div>
-      </div>
-      <div class="field">
-        <label for="cfg-update-interval">自动升级检查间隔</label>
-        <select id="cfg-update-interval">
-          <option value="6">6 小时</option>
-          <option value="12">12 小时</option>
-          <option value="24">24 小时</option>
-        </select>
-        <div class="hint">服务会定期访问 GitHub API 检查新版（未认证 60 req/h）</div>
-      </div>
-      <div class="field">
-        <label for="cfg-update-disk">下载前最小剩余磁盘（MB）</label>
-        <input type="number" id="cfg-update-disk" class="cfg-lg" min="50" max="10240" step="1" inputmode="numeric">
-        <div class="hint">下载安装包前要求磁盘剩余 ≥ 此值（50-10240 MB，默认 200）</div>
-      </div>
-      <div class="field">
-        <div class="hint" style="margin-bottom:8px;">手动触发</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button class="btn btn-secondary" id="btn-update-check-now" type="button">立即检查更新</button>
-          <button class="btn btn-secondary" id="btn-update-install-now" type="button">立即升级</button>
-        </div>
-        <div class="hint" style="margin-top:6px;">点「立即检查更新」拉 GitHub；发现新版再点「立即升级」（升级前自动停服务，约 30-60 秒）</div>
-      </div>
-
-      <div class="field">
-        <div class="hint" style="margin-bottom:8px;">版本回滚（升级把服务弄挂时的退路）</div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-          <select id="rollback-version" style="min-width:210px;"></select>
-          <button class="btn btn-secondary" id="btn-rollback-now" type="button">回滚到该版本</button>
-          <button class="btn btn-secondary" id="btn-rollback-refresh" type="button">刷新列表</button>
-        </div>
-        <div class="hint" id="rollback-hint" style="margin-top:6px;">正在读取备份列表...</div>
-      </div>
+      <!-- v2.1.2.0 三轮：升级相关设置（自动升级 / 检查间隔 / 磁盘余量 / 手动触发 / 版本回滚）
+           全部搬到「关于 → 更新」——「我点了检查更新，结果呢」和「什么时候自动检查」本来就
+           是一件事，拆在配置页里等于让用户跨页找。配置页这里只留周期自检与网络位置守卫。 -->
     </div>
 
     <!-- v2.1.2.0：「Web UI 监听端口」并进了上面的「网络与服务端口」——
@@ -3018,7 +2991,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     <div class="card section">
       <div class="section-head">
         <h2 class="section-title">更新</h2>
-        <p class="section-desc" style="margin:0;">「我点了检查更新，结果呢？」—— 结论与升级流水都在这儿，不用再去翻日志；触发按钮与详细设置仍在「配置 → 自动化」。</p>
+        <p class="section-desc" style="margin:0;">「我点了检查更新，结果呢？」—— 结论、触发按钮、升级流水与升级设置都在这儿；配置页只留「周期自检」和「网络位置守卫」。</p>
       </div>
       <div class="about-stats">
         <div class="about-stat"><div class="about-stat-label">当前版本</div><div class="about-stat-value mono" id="about-upd-local">-</div></div>
@@ -3030,9 +3003,62 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         <span id="about-upd-result">还没检查过 —— 点下面的「立即检查更新」。</span>
       </div>
       <div class="btn-row" style="margin-top:14px;">
-        <button class="btn btn-secondary" id="btn-about-check" type="button">立即检查更新</button>
+        <button class="btn btn-secondary" id="btn-update-check-now" type="button">立即检查更新</button>
+        <button class="btn btn-secondary" id="btn-update-install-now" type="button">立即升级</button>
         <button class="btn btn-secondary" id="btn-about-history" type="button">查看升级历史</button>
       </div>
+      <p class="hint" style="margin-top:10px;">「立即检查更新」拉 GitHub 最新版；发现新版再点「立即升级」（升级前自动停服务，约 30-60 秒后页面自动刷新）。</p>
+
+      <!-- v2.1.2.0 三轮：升级设置从「配置 → 自动化」搬来 —— 结论、按钮、流水、设置本来就该
+           在一块；「什么时候自动检查」「磁盘留多少」跟「刚才检查成没成」是同一个话题。
+           配置页只留「周期自检」与「网络位置守卫」。 -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>升级设置（进阶）</span>
+          <span class="diag-hint">自动检查新版 · 检查间隔 · 磁盘余量 · 版本回滚</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body">
+          <div class="field">
+            <label class="switch" for="cfg-auto-update-enabled">
+              <input type="checkbox" id="cfg-auto-update-enabled">
+              <span class="track" aria-hidden="true"></span>
+              <span class="switch-label">启用自动升级（GitHub 检测）</span>
+            </label>
+            <div class="hint">关闭后仅在启动时与手动点击时检查 GitHub 新版</div>
+          </div>
+          <div class="pw-row pw-row-3">
+            <div class="field">
+              <label for="cfg-update-interval">自动检查间隔</label>
+              <select id="cfg-update-interval">
+                <option value="6">6 小时</option>
+                <option value="12">12 小时</option>
+                <option value="24">24 小时</option>
+              </select>
+              <div class="hint">未认证的 GitHub API 限 60 次/小时</div>
+            </div>
+            <div class="field">
+              <label for="cfg-update-disk">下载前最小剩余磁盘（MB）</label>
+              <input type="number" id="cfg-update-disk" class="cfg-lg" min="50" max="10240" step="1" inputmode="numeric">
+              <div class="hint">50-10240 MB，默认 200</div>
+            </div>
+            <div class="field">
+              <label for="rollback-version">版本回滚</label>
+              <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <select id="rollback-version" style="flex:1 1 140px; min-width:0;"></select>
+                <button class="btn btn-secondary" id="btn-rollback-now" type="button">回滚</button>
+                <button class="btn btn-secondary" id="btn-rollback-refresh" type="button">刷新</button>
+              </div>
+              <div class="hint" id="rollback-hint">正在读取备份列表...</div>
+            </div>
+          </div>
+          <div class="field-foot" style="margin-top:4px;">
+            <span class="hint">升级把服务弄挂时的退路：回滚只还原代码文件，配置与密码一律不动。</span>
+            <button class="btn btn-secondary" id="btn-save-update-settings" type="button">保存升级设置</button>
+          </div>
+        </div>
+      </details>
+
       <div class="about-log-head">
         <span class="diag-hint" style="margin-left:0;">升级流水 · logs/upgrade.log 尾部</span>
         <button class="btn btn-secondary" id="btn-about-log-refresh" type="button">刷新</button>
@@ -3712,27 +3738,32 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     return ok;
   }
 
+  /* 保存配置：配置页吸底条与「关于 → 更新 → 升级设置」共用同一份实现。
+     为什么带 skipValidate：从「关于」保存升级设置时，认证服务器 / 账号可能还没填
+     （新装用户先来这里开自动升级是常见路径），不该被「账号不能为空」拦住。 */
+  function saveConfigFrom(btn, skipValidate) {
+    if (!skipValidate && !validateConfig()) {
+      toast('表单校验未通过，请修正标红字段', 'warn');
+      return;
+    }
+    if (btn) btn.disabled = true;
+    API.saveConfig(collectConfig()).then(function (r) {
+      if (r && r.ok) {
+        toast('配置已保存', 'success');
+        text($('config-state'), '已保存 · ' + nowClock());
+      } else {
+        toast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
+      }
+    }).catch(function () {
+      toast('保存请求失败，请检查服务状态', 'error');
+    }).then(function () { if (btn) btn.disabled = false; });
+  }
+
   function bindConfig() {
     var saveBtn = $('btn-save-config');
-    if (saveBtn) {
-      saveBtn.addEventListener('click', function () {
-        if (!validateConfig()) {
-          toast('表单校验未通过，请修正标红字段', 'warn');
-          return;
-        }
-        saveBtn.disabled = true;
-        API.saveConfig(collectConfig()).then(function (r) {
-          if (r && r.ok) {
-            toast('配置已保存', 'success');
-            text($('config-state'), '已保存 · ' + nowClock());
-          } else {
-            toast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
-          }
-        }).catch(function () {
-          toast('保存请求失败，请检查服务状态', 'error');
-        }).then(function () { saveBtn.disabled = false; });
-      });
-    }
+    if (saveBtn) saveBtn.addEventListener('click', function () { saveConfigFrom(saveBtn, false); });
+    var saveUpd = $('btn-save-update-settings');
+    if (saveUpd) saveUpd.addEventListener('click', function () { saveConfigFrom(saveUpd, true); });
 
     var pwdBtn = $('btn-save-pwd');
     if (pwdBtn) {
@@ -3955,13 +3986,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   }
 
   function bindAboutUpdate() {
-    var btnCheck = $('btn-about-check');
-    if (btnCheck) btnCheck.addEventListener('click', function () {
-      /* 复用配置页那个按钮的逻辑（唯一实现），避免两处各写一份触发代码 */
-      var src = $('btn-update-check-now');
-      if (src) src.click();
-      setTimeout(renderAboutUpdate, 1500);
-    });
+    /* 「立即检查更新 / 立即升级」现在是关于页自己的按钮（#btn-update-check-now /
+       #btn-update-install-now，从配置页整块搬过来的），绑定在 update 那一段里，
+       这里不再需要「代理点击配置页按钮」的绕路写法。 */
     var btnHistory = $('btn-about-history');
     if (btnHistory) btnHistory.addEventListener('click', openUpdateHistoryModal);
     var btnLog = $('btn-about-log-refresh');

@@ -1821,11 +1821,30 @@ check("v2.1.2.0 日志与诊断搬到了「日志」页（不再挤在关于页�
 check("v2.1.2.0 关于页：删掉「访问入口」、加上「更新」块与升流小窗、管理操作折起来",
       "about-local" not in _page
       and 'id="about-upd-result"' in _page and 'id="about-update-log"' in _page
-      and 'id="btn-about-check"' in _page
+      and _pos('id="btn-update-check-now"') > _end_log   # 检查按钮也在关于页里（三轮搬来）
       and _pos('id="about-upd-result"') > _end_log)  # 确实落在关于面板里（不是别处）
 check("v2.1.2.0 配置页瘦身：主流程之外的都折起来（新建方案 / 网络位置守卫）",
       _page.count('<details class="diag fold">') >= 2
       and 'id="guard-summary-hint"' in _page and 'class="fold-body field"' in _page)
+
+# —— 第三轮之二（用户：「改成左右排版」「配置里和更新相关的不该移到关于吗」）——
+check("v2.1.2.0 升级相关整块搬进「关于 → 更新」（配置页不再出现任何升级字段 / 按钮）",
+      _pos('id="cfg-auto-update-enabled"') > _end_log and _pos('id="cfg-update-interval"') > _end_log
+      and _pos('id="cfg-update-disk"') > _end_log and _pos('id="rollback-version"') > _end_log
+      and _pos('id="btn-update-install-now"') > _end_log
+      and _pos('id="cfg-auto-interval"') < _end_config   # 周期自检仍留在配置页（对照）
+      and _pos('id="cfg-auto-interval"') < _end_log,
+      "cfg-update-interval@%s panel-log@%s panel-about@%s"
+      % (_pos('id="cfg-update-interval"'), _end_config, _end_log))
+check("v2.1.2.0 关于页的升级设置自带保存按钮，且跳过配置页校验（新装用户会先来这儿开自动升级）",
+      'id="btn-save-update-settings"' in _page
+      and "saveConfigFrom(saveUpd, true)" in _page and "saveConfigFrom(saveBtn, false)" in _page)
+check("v2.1.2.0 横向表单行：账号/运营商/密码/确认 一行四列；端口卡与升级设置一行三列",
+      'class="pw-row pw-row-4"' in _page
+      and _page.count('class="pw-row pw-row-3"') == 2
+      and ".pw-row-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }" in _page
+      and ".pw-row .field > input, .pw-row .field > select { max-width: none; }" in _page
+      and "pw-grid" not in _page)
 # —— 第二轮打磨（用户：「排版要重新设计」「动效要做」「关于里 Logo 也没打上去」）——
 check("v2.1.2.0 关于页用的是真品牌 Logo（取不到才回退内联星芒）",
       'id="about-logo"' in _page and 'src="/branding/web-logo-64.png"' in _page
