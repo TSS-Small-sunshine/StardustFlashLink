@@ -1724,6 +1724,14 @@ check("v2.1.2.0 安装方式：源码树特征 → 源码部署，提示运行 u
 check("v2.1.2.0 安装方式：卸载器优先于源码特征（装完的源码目录不该被判成源码）",
       _det(_app, probe=_FakeProbe(uninstaller="unins001.exe", dirs=[_app + r"\.git"]))["mode"]
       == "installer")
+# 真机实测撞到的组合（本机装过安装包，但当前跑的是源码工作区）：必须判「当前这份代码」
+_src_reg = _det(r"D:\code\wt", probe=_FakeProbe(
+    files=[r"D:\code\wt\packaging\setup.iss"],
+    reg=[_web_api_probe._UNINSTALL_REG_KEYS[0], _web_api_probe._SERVICE_REG_KEY]))
+check("v2.1.2.0 安装方式：源码树 + 注册表卸载项 → 判源码（别引去卸载没在跑的那份），并附注另有安装副本",
+      _src_reg["mode"] == "source" and "uninstall.bat" in _src_reg["uninstall_hint"]
+      and "安装包安装的副本" in _src_reg["uninstall_hint"],
+      _src_reg["uninstall_hint"][:70])
 _unk = _det(r"C:\some\where", probe=_FakeProbe())
 check("v2.1.2.0 安装方式：都没命中 → unknown，且两种卸载途径都提到",
       _unk["mode"] == "unknown" and "uninstall.bat" in _unk["uninstall_hint"]

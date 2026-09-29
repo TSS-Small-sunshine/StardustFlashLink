@@ -564,10 +564,19 @@ class _OsProbe:
 
 
 def _detect_install_mode(app_dir, probe=None):
-    """判断这份程序是「安装包安装」还是「源码 / 绿色部署」，并给出对应的卸载指引。
+    """判断**当前这份代码**是怎么装的，并给出对应的卸载指引。
 
-    纯函数风格：所有外部依赖由 `probe` 注入（isfile / isdir / find_uninstaller /
-    reg_exists），因此可以断言行级地测「判据命中顺序」，不需要真机也不需要改动系统。
+    优先级（越靠前证据越硬，且都是「这份目录」自己的证据）：
+      1) 程序目录里有 Inno 卸载器 unins*.exe        → installer（这份目录就是安装目录本体）
+      2) 目录里带 .git / packaging/setup.iss        → source（源码 / 绿色部署跑起来的）
+      3) 注册表有本产品的卸载项（AppId 是不变量 I1）→ installer（目录被改名 / 卸载器被删）
+      4) 都不是                                     → unknown（两种途径都提示）
+
+    第 2 条**必须优先于**第 3 条 —— 真机实测（v2.1.2.0 开发机上）就撞到这个组合：
+    本机装过安装包（注册表有卸载项），但当前跑的是源码工作区。若按注册表判成
+    「安装包安装」，用户会被引到「设置 → 应用」去卸载**根本没在跑的那一份** ✗。
+    现在这种情况判 source，并附一句「本机另有安装包安装的副本」，两条路都说清楚。
+
     返回 dict：mode（installer / source / unknown）、evidence（判据，给人看）、
     uninstall_hint（前端直接显示，不再写死）。
     """
@@ -577,35 +586,38 @@ def _detect_install_mode(app_dir, probe=None):
     uninstaller = probe.find_uninstaller(app_dir)
     if uninstaller:
         evidence.append("程序目录里有安装器卸载器 {}".format(uninstaller))
-    reg_hit = next((k for k in _UNINSTALL_REG_KEYS if probe.reg_exists(k)), None)
-    if reg_hit:
-        evidence.append("注册表里有本产品的卸载项（{}）".format(
-            "WOW6432Node" if "WOW6432Node" in reg_hit else "64 位视图"))
 
     git_dir = os.path.join(app_dir, ".git")
-    if probe.isdir(git_dir) or probe.isfile(git_dir) or probe.isfile(
-            os.path.join(app_dir, "packaging", "setup.iss")):
+    source_like = bool(
+        probe.isdir(git_dir) or probe.isfile(git_dir)
+        or probe.isfile(os.path.join(app_dir, "packaging", "setup.iss")))
+    if source_like:
         evidence.append("程序目录里带着 .git / packaging/setup.iss（源码树特征）")
-        source_like = True
-    else:
-        source_like = False
 
-    if uninstaller or reg_hit:
+    reg_hit = next((k for k in _UNINSTALL_REG_KEYS if probe.reg_exists(k)), None)
+    if reg_hit:
+        evidence.append("注册表里有本产品的卸载项（{}）—— 本机装过安装包".format(
+            "WOW6432Node" if "WOW6432Node" in reg_hit else "64 位视图"))
+
+    if uninstaller:
         mode = "installer"
     elif source_like:
         mode = "source"
+    elif reg_hit:
+        mode = "installer"
     else:
         mode = "unknown"
 
     if mode == "installer":
-        hint = ("本机是安装包安装的（{}）。请到「设置 → 应用 → 已安装的应用」里卸载"
-                "「星尘闪连」，或直接双击 {}".format(
-                    uninstaller or "注册表里有卸载项",
-                    os.path.join(app_dir, uninstaller) if uninstaller else "安装目录里的卸载程序"))
+        target = os.path.join(app_dir, uninstaller) if uninstaller else "安装目录里的卸载程序"
+        hint = ("本机是安装包安装的（{}）。请到「设置 → 应用 → 已安装的应用」里卸载「星尘闪连」，"
+                "或直接双击 {}。".format(uninstaller or "注册表里有卸载项", target))
     elif mode == "source":
-        hint = ("本机是源码 / 绿色部署（没找到安装器卸载项）。请以管理员身份运行 {}"
+        hint = ("当前跑的是源码 / 绿色部署（这份目录里没找到安装器卸载器）。请以管理员身份运行 {}"
                 "—— 它会停止并移除 Windows 服务；只是试跑的话，停掉进程、删掉程序目录即可。".format(
                     os.path.join(app_dir, "uninstall.bat")))
+        if reg_hit:
+            hint += " 另外：本机还检测到安装包安装的副本（注册表里有卸载项），要卸载那一份请到「设置 → 应用」。"
     else:
         hint = ("没认出安装方式：若是用安装包装的，请到「设置 → 应用」里卸载；"
                 "若是源码 / 解压部署，请以管理员身份运行程序目录下的 uninstall.bat。")
