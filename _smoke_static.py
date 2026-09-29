@@ -2005,13 +2005,25 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.1.0", version.VERSION == "2.1.1.0", version.VERSION)
+check("版本 = 2.1.2.0", version.VERSION == "2.1.2.0", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
       "%s / %s" % (version.CODENAME, version.CODENAME_CN))
 check("v2.0.4.0 版本代号在位", bool(getattr(version, "CODENAME", "")) and bool(getattr(version, "CODENAME_CN", "")),
       "%s / %s" % (getattr(version, "CODENAME", ""), getattr(version, "CODENAME_CN", "")))
+
+# v2.1.2.0：版本字面量同步补齐 —— 这几个位置以前只改了文件头，banner / NSSM 服务描述
+# 一路漂到了 v2.0.14.0 / v2.1.0.0（用户 `sc qc DrcomAutoLogin` 看到的描述是过期的 ✗）。
+check("v2.1.2.0 install.bat 的 banner 与 NSSM 服务描述也同步版本号",
+      ("Windows 服务安装 (v%s)" % version.VERSION) in _inst14
+      and ('DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v%s）"'
+           % version.VERSION) in _inst14)
+check("v2.1.2.0 uninstall.bat 的 banner 也同步版本号",
+      ("服务 - 卸载 (v%s)" % version.VERSION) in _uinst14)
+check("v2.1.2.0 setup.iss 的 NSSM 服务描述改用 {#MyAppVersion}（不再写死版本号）",
+      "DrcomAutoLogin Description \"星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v{#MyAppVersion}）\""
+      in _iss_src)
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))
 sys.exit(1 if FAILS else 0)
