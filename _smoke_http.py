@@ -214,6 +214,98 @@ try:
             _pstore.get("account")), (200, True, {}, "", "2023999999"))
     _check("v2.0.9.0 删不存在的方案 → 400",
            _post_json("/api/profiles/delete", {"name": "没有这个"})[0], 400)
+
+    # ============================================================
+    # v2.1.3.0：/api/credentials —— 账号 + 运营商 + 密码一次存（current / profile 两种范围）
+    # 这一节的钉子（每一条不这么写都会变成真 bug）：
+    #   · current 必须是**部分更新**：只动 account / suffix，别的键一个都不许被重置 ✗
+    #   · profile 必须是**合并**：只动这两个键，方案的网关 / 间隔 / 守卫不许被抹 ✗
+    #   · 密码只进密码文件（这里打桩记录），方案 values 里永远不出现密码字段 ✗
+    #   · 给「别的方案」存密码不许碰当前生效的密码 ✗
+    #   · 方案不存在 → 400（否则会写出一堆 password.<乱名字>.txt 野文件 ✗）
+    # ============================================================
+    _pwd_calls = []
+    _reloads = []
+    _own = {"宿舍": True}
+    web_api._save_password_to_disk = lambda pwd, profile=None: _pwd_calls.append((pwd, profile))
+    web_api._profile_has_own_password = lambda name: bool(_own.get(name))
+    web_api._remove_profile_password = lambda name: bool(_own.pop(name, False))
+    web_api._load_password_from_disk = lambda: _reloads.append(1)
+    # 这几个常量平时由 联网_service.py 的 _attach() 注入；冒烟里只挂了 web_api → 手动补上 ✓
+    web_api.ALLOWED_SUFFIXES = ("", "@yd", "@dx", "@lt")
+    _pf_mod._attach(load_config=_pload, save_config=_psave, validate_config=lambda c: [],
+                    load_password_from_disk=lambda: _reloads.append(1))
+    _pstore.update({"host": "172.16.80.3", "port": 80, "auto_check_interval_min": 30,
+                    "account": "2023000001", "suffix": "@yd", "ui_port": 8848,
+                    "network_guard_enabled": True, "guard_allowed_ssids": "Dorm-WiFi",
+                    "guard_allowed_subnets": "",
+                    "profiles": {"宿舍": {"values": {"account": "2023000001", "suffix": "@yd",
+                                                     "host": "172.16.80.3",
+                                                     "auto_check_interval_min": 30}}},
+                    "active_profile": "宿舍", "profiles_auto_switch": False})
+
+    _st, _b = _post_json("/api/credentials", {"scope": "current", "account": "2023000002",
+                                              "suffix": ""})
+    _check("v2.1.3.0 current：账号 / 后缀存下了、密码没动",
+           (_st, _b.get("ok"), _pstore.get("account"), _pstore.get("suffix"), _b.get("password")),
+           (200, True, "2023000002", "", "unchanged"))
+    _check("v2.1.3.0 current 是部分更新：网关 / 端口 / 间隔 / 守卫 / UI 端口都没被重置",
+           (_pstore.get("host"), _pstore.get("port"), _pstore.get("auto_check_interval_min"),
+            _pstore.get("network_guard_enabled"), _pstore.get("guard_allowed_ssids"),
+            _pstore.get("ui_port")),
+           ("172.16.80.3", 80, 30, True, "Dorm-WiFi", 8848))
+    _check("v2.1.3.0 current 不带密码 → 一次密码文件都没写", len(_pwd_calls), 0)
+    _st, _b = _post_json("/api/credentials", {"scope": "current", "account": "2023000003",
+                                              "suffix": "@dx", "password": "#Demo-0001#"})
+    _check("v2.1.3.0 current + 密码 → 写「当前生效文件」（profile=None）",
+           (_st, _b.get("password"), _pwd_calls[-1]), (200, "set", ("#Demo-0001#", None)))
+    _check("v2.1.3.0 账号非数字 → 400",
+           _post_json("/api/credentials", {"account": "abc"})[0], 400)
+    _check("v2.1.3.0 后缀不在白名单 → 400",
+           _post_json("/api/credentials", {"suffix": "@xx"})[0], 400)
+    _check("v2.1.3.0 scope 不合法 → 400",
+           _post_json("/api/credentials", {"scope": "profiles"})[0], 400)
+    _check("v2.1.3.0 scope=profile 缺方案名 → 400",
+           _post_json("/api/credentials", {"scope": "profile"})[0], 400)
+    _check("v2.1.3.0 方案不存在 → 400（不写野密码文件）",
+           (_post_json("/api/credentials", {"scope": "profile", "name": "没有这个",
+                                            "password": "#Demo-0009#"})[0], len(_pwd_calls)),
+           (400, 1))
+    _st, _b = _post_json("/api/credentials", {"scope": "profile", "name": "宿舍",
+                                              "account": "2023999999", "suffix": "@lt",
+                                              "password": "#Demo-0002#"})
+    _vals = ((_pstore.get("profiles") or {}).get("宿舍") or {}).get("values") or {}
+    _check("v2.1.3.0 profile：账号 / 后缀进方案 + 密码写方案专属文件",
+           (_st, _b.get("ok"), _b.get("password"), _pwd_calls[-1]),
+           (200, True, "set", ("#Demo-0002#", "宿舍")))
+    _check("v2.1.3.0 profile 是**合并**：方案的网关 / 间隔还在（没被账号编辑抹掉）",
+           (_vals.get("host"), _vals.get("auto_check_interval_min")), ("172.16.80.3", 30))
+    _check("v2.1.3.0 方案 values 里没有任何密码字段（密码永不进配置）",
+           not any(("pass" in k.lower() or "pwd" in k.lower()) for k in _vals), True)
+    _check("v2.1.3.0 改的是当前方案 → 顺手重新应用（顶层账号跟着走）",
+           _pstore.get("account"), "2023999999")
+    _check("v2.1.3.0 重新应用顺带重载了密码文件", bool(_reloads), True)
+
+    _post_json("/api/profiles/save", {"name": "教学楼", "match_ssids": "Teach-WiFi"})
+    _reloads.clear()
+    _st, _b = _post_json("/api/credentials", {"scope": "profile", "name": "教学楼",
+                                              "password": "#Demo-0003#"})
+    _check("v2.1.3.0 给**别的**方案存密码：写它的专属文件、也不重载当前密码",
+           (_st, _b.get("password"), _pwd_calls[-1], len(_reloads)),
+           (200, "set", ("#Demo-0003#", "教学楼"), 0))
+    _g2 = _get_json("/api/profiles")
+    _item = {i["name"]: i for i in (_g2.get("items") or [])}
+    _check("v2.1.3.0 GET /api/profiles 带上 has_own_password（界面要显示「专属密码」）",
+           (_item.get("宿舍", {}).get("has_own_password"),
+            _item.get("教学楼", {}).get("has_own_password")), (True, False))
+    _own["教学楼"] = True
+    _st, _b = _post_json("/api/credentials", {"scope": "profile", "name": "教学楼",
+                                              "clear_password": True})
+    _check("v2.1.3.0 删除方案的专属密码 → removed + 重载（回落公共密码）",
+           (_st, _b.get("password"), len(_reloads)), (200, "removed", 1))
+    _check("v2.1.3.0 本来就没有专属密码 → 删除请求 400",
+           _post_json("/api/credentials", {"scope": "profile", "name": "教学楼",
+                                           "clear_password": True})[0], 400)
 finally:
     server.shutdown()
 
