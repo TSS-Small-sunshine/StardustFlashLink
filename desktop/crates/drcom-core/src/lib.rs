@@ -6,6 +6,7 @@
 //!   - **纯函数优先**：协议拼装、解析、脱敏、校验都是纯函数 → 单元测试就能覆盖 ✓；
 //!   - **与 2.x 契约一致**：配置键名、API 路由、账号/密码文件格式都不变，老用户零迁移 ✓。
 
+pub mod autostart;
 pub mod backoff;
 pub mod channel;
 pub mod cidr;

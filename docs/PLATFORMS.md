@@ -171,7 +171,7 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 | 主窗口（Slint 原生） | ✅ 完成 | 深色星尘主题，零 WebView ✓ |
 | 设置窗口 | ✅ 完成 | 账号/后缀/密码/间隔/守卫/通道 + 实时校验 + 测试连接 ✓ |
 | **单实例** | ✅ 完成 | 占 `127.0.0.1:47653`：第二个实例把第一个的窗口叫到前面后自己退出 ✓（真机验证：进程数 1 ✓）。**不用锁文件** ✗ —— 进程崩溃不会留下假锁 ✓ |
-| 开机自启 | 🚧 计划中 | Windows `HKCU\...\Run` / Linux `systemd --user` / macOS `launchd`，纯文件+系统命令实现 ✓ |
+| 开机自启 | ✅ 完成 | `autostart on\|off\|status [--dry-run]`：Windows `HKCU\...\Run` / Linux `systemd --user` / macOS LaunchAgent —— **全程当前用户级，一次管理员权限都不要** ✓；跑的是**无界面循环**（`run` ✓，不开机弹窗 ✗）。含「纯函数产出命令/文件内容 + 薄执行层」两层，命令逐字有单测 ✓（连「路径带空格要加引号」「plist 里 `&<>` 要转义」都测了 ✓） |
 | **系统托盘** | ⛔ 暂时做不了 | Slint 1.18 有 `system-tray` feature，但**只有 Qt 等后端实现** —— 查过 `i-slint-backend-winit-1.18.1` 源码，**零处引用 SystemTray** ✗。我们用 winit 后端 ⇒ 做出来也是个摆设 ✗，**不能给用户一个点不动的托盘**，故推迟到 M3（届时用平台原生 API：Windows `Shell_NotifyIcon`、Linux `libayatana-appindicator`、macOS `NSStatusItem`） |
 
 > 小坑记录：改完 UI 只跑 `cargo test` **不会刷新 GUI 二进制** ✗ ——

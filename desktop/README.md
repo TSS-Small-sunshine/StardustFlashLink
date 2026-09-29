@@ -38,6 +38,18 @@ cargo run -p drcom-ui        # 主界面：状态卡 + 立即检查 / 自检 / �
   位置守卫与白名单、自动升级与通道 —— 有**实时校验**和「测试连接」（用表单里的值试一次，**不保存** ✓）
 - **单实例**：重复启动不会开出第二个窗口 ✓ —— 后启动的那个会把已有窗口**叫到前面**再自己退出 ✓
 
+### 开机自启 / 后台常驻
+
+```bash
+stardust-flash-link autostart status               # 看现在开没开
+stardust-flash-link autostart on --dry-run         # 只打印将要执行的命令（不动系统 ✓）
+stardust-flash-link autostart on                   # 开启（**当前用户级，免管理员** ✓）
+stardust-flash-link autostart off                  # 关掉（幂等 ✓）
+```
+
+自启跑的是**无界面循环**（`… run`）✓ —— 开机不弹窗 ✗；落点：Windows 注册表
+`HKCU\...\Run`、Linux `systemd --user`、macOS `~/Library/LaunchAgents` ✓。
+
 ### 排障：一键脱敏诊断包
 
 出问题时不用截图 + 口述，直接生成一个包发给别人 ✓：

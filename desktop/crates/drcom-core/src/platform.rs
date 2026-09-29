@@ -88,7 +88,8 @@ pub fn target_label() -> String {
     format!("{}-{}", Os::current().as_str(), arch())
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// 家目录（Windows 用 `USERPROFILE`，其它平台用 `HOME` ✓）。
+pub fn home_dir() -> Option<PathBuf> {
     // 不引 dirs crate：三个平台各取一个环境变量就够了，且少一个依赖 ✓
     if cfg!(target_os = "windows") {
         std::env::var_os("USERPROFILE").map(PathBuf::from)

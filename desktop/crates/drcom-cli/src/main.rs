@@ -60,6 +60,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("profile") => profile_cmd(&args[1..]),
         Some("diagnostics") => diagnostics_cmd(&args[1..]),
         Some("portal") => portal_cmd(&args[1..]),
+        Some("autostart") => autostart_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
         Some(other) => {
             eprintln!("未知命令: {}", other);
@@ -82,6 +83,7 @@ fn print_help() {
          profile list|save|activate|delete|auto   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）\n  \
          diagnostics [--out F] [--days N]        生成脱敏诊断包（ZIP，密码永不进包 ✓）\n  \
          portal [--url U] [--timeout N]         门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页）\n  \
+         autostart on|off|status [--dry-run]    开机自启（当前用户级，免管理员 ✓；跑的是无界面循环）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
@@ -309,6 +311,61 @@ fn login(args: &[String]) -> i32 {
 }
 
 /// `diagnostics [--out FILE] [--days N]`：生成**脱敏**诊断包（ZIP ✓）。
+/// `autostart`：开 / 关 / 查开机自启。
+///
+/// 全部是**当前用户级**（Windows 注册表 Run / systemd --user / LaunchAgent ✓）
+/// —— **一次管理员权限都不需要** ✓；`--dry-run` 只打印将要做什么 ✓。
+fn autostart_cmd(args: &[String]) -> i32 {
+    let action = args.first().map(String::as_str).unwrap_or("status");
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("stardust-flash-link"));
+    let run_args = ["run"];
+    match action {
+        "on" | "enable" => {
+            if args.iter().any(|a| a == "--dry-run") {
+                println!("将要做（**未改动系统** ✓）：");
+                for line in drcom_core::autostart::plan(&exe, &run_args) {
+                    println!("  {}", line);
+                }
+                return 0;
+            }
+            match drcom_core::autostart::enable(&exe, &run_args) {
+                Ok(msg) => {
+                    println!("{}", msg);
+                    println!("自启的命令: {} run（无界面循环 ✓）", exe.display());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("开启自启失败: {}", e);
+                    1
+                }
+            }
+        }
+        "off" | "disable" => match drcom_core::autostart::disable() {
+            Ok(msg) => {
+                println!("{}", msg);
+                0
+            }
+            Err(e) => {
+                eprintln!("关闭自启失败: {}", e);
+                1
+            }
+        },
+        "status" => {
+            let state = drcom_core::autostart::status();
+            println!("开机自启: {}", state.label_cn());
+            match drcom_core::autostart::file_path() {
+                Some(path) => println!("落点: {}", path.display()),
+                None => println!("落点: 注册表 HKCU\\...\\Run（当前用户 ✓，免管理员 ✓）"),
+            }
+            0
+        }
+        other => {
+            eprintln!("用法: autostart on|off|status [--dry-run]（收到 `{}`）", other);
+            2
+        }
+    }
+}
+
 /// `portal`：看看是不是被校园网门户拦住了。
 ///
 /// 实测：未认证时校园 AC 会 302 到登录页（`a79.htm`），重定向里还带着
@@ -742,6 +799,17 @@ fn suffix_flag_without_value(args: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autostart_cmd_validates_action_and_dry_run_touches_nothing() {
+        assert_eq!(autostart_cmd(&["nope".to_string()]), 2, "动作写错要提示用法 ✓");
+        assert_eq!(
+            autostart_cmd(&["on".to_string(), "--dry-run".to_string()]),
+            0,
+            "--dry-run 只打印计划（不动系统 ✓）"
+        );
+        assert_eq!(autostart_cmd(&["status".to_string()]), 0, "status 只读 ✓");
+    }
 
     #[test]
     fn portal_cmd_reports_failure_without_panicking() {
