@@ -144,7 +144,11 @@ jobs:
 
           # ④ 包内说明文件（.desktop / deb-control / Info.plist / README.txt ✓）
           #    --target 必须显式给：宿主自报的目标是错的 ✗
-          OUT=$("$HOST_BIN" package-files --out "$STAGE" --target "${{ matrix.label }}" --exe "$CLI_NAME")
+          PKG_EXE="${CLI_NAME}"
+          if [ -f "target/${{ matrix.target }}/release/${APP_NAME}" ]; then
+            PKG_EXE="${APP_NAME}"
+          fi
+          OUT=$("$HOST_BIN" package-files --out "$STAGE" --target "${{ matrix.label }}" --exe "$PKG_EXE")
           printf '%s\n' "$OUT"
           NAME=$(printf '%s\n' "$OUT" | head -1)
 
@@ -153,6 +157,44 @@ jobs:
           "$HOST_BIN" archive --out "dist/${NAME}.zip" "$STAGE"
           SUM=$("$HOST_BIN" checksum "dist/${NAME}.zip" | awk '{print $1}')
           printf '%s  %s\n' "$SUM" "${NAME}.zip" > dist/SHA256SUMS
+
+          # —— Linux：用我们生成的 deb 元数据组装 .deb ✓
+          #    dpkg-deb 是 dpkg 自带的（ubuntu runner 上必有 ✓）；--root-owner-group 让交叉架构也能打 ✓
+          if [ "${{ matrix.os }}" = "ubuntu-24.04" ]; then
+            DEB_ROOT="pkg/deb"
+            rm -rf "$DEB_ROOT"
+            mkdir -p "$DEB_ROOT/DEBIAN" "$DEB_ROOT/usr/bin" "$DEB_ROOT/usr/share/applications"
+            cp "$STAGE/deb-control" "$DEB_ROOT/DEBIAN/control"
+            cp "$STAGE/${CLI_NAME}" "$DEB_ROOT/usr/bin/"
+            if [ -f "$STAGE/${APP_NAME}" ]; then
+              cp "$STAGE/${APP_NAME}" "$DEB_ROOT/usr/bin/"
+            fi
+            cp "$STAGE/stardust-flash-link.desktop" "$DEB_ROOT/usr/share/applications/"
+            dpkg-deb --build --root-owner-group "$DEB_ROOT" "dist/${NAME}.deb"
+            SUM=$("$HOST_BIN" checksum "dist/${NAME}.deb" | awk '{print $1}')
+            printf '%s  %s\n' "$SUM" "${NAME}.deb" >> dist/SHA256SUMS
+          fi
+
+          # —— macOS：.app 包体 + .dmg（hdiutil 系统自带 ✓），里面放一个 /Applications 快捷方式 ✓
+          if [ "${{ matrix.os }}" = "macos-14" ]; then
+            GUEST="${CLI_NAME}"
+            if [ -f "$STAGE/${APP_NAME}" ]; then
+              GUEST="${APP_NAME}"
+            fi
+            APP_DIR="pkg/StardustFlashLink.app"
+            rm -rf "$APP_DIR" pkg/dmg
+            mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" pkg/dmg
+            cp "$STAGE/${GUEST}" "$APP_DIR/Contents/MacOS/"
+            cp "$STAGE/Info.plist" "$APP_DIR/Contents/Info.plist"
+            cp "$STAGE/README.txt" "$APP_DIR/Contents/Resources/" 2>/dev/null || true
+            cp -R "$APP_DIR" pkg/dmg/
+            ln -s /Applications pkg/dmg/Applications
+            hdiutil create -volname "Stardust Flash Link" -srcfolder pkg/dmg \
+              -ov -format UDZO "dist/${NAME}.dmg"
+            SUM=$("$HOST_BIN" checksum "dist/${NAME}.dmg" | awk '{print $1}')
+            printf '%s  %s\n' "$SUM" "${NAME}.dmg" >> dist/SHA256SUMS
+          fi
+
           echo "--- dist ---"
           ls -l dist
           cat dist/SHA256SUMS
