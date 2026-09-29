@@ -72,16 +72,20 @@ README 的截图必须由**假数据渲染**，账号一律打码。工具在仓
 
 ```powershell
 cd d:\Student_Workstation\Using_Workstation
-$srv  = Start-Process -FilePath 'python' -ArgumentList '_ui_redesign\preview.py','18899' -PassThru -WindowStyle Hidden
+# 第二个参数 = 要预览的检出目录。本仓库是多 worktree 开发（主检出 + 各版本线的 worktree），
+# 拍哪条线就指哪个 worktree，截图也要落到那个 worktree 的 docs\（否则拍出来的是另一条线的页面）。
+$repo = 'd:\Student_Workstation\Using_Workstation\_wt_2x'
+$srv  = Start-Process -FilePath 'python' -ArgumentList '_ui_redesign\preview.py','18899',$repo -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 3
 $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
-$docs = 'd:\Student_Workstation\Using_Workstation\DrcomAutoLogin-Windows\docs'
-& $edge --headless --disable-gpu --no-sandbox --hide-scrollbars --window-size=1280,720 --virtual-time-budget=4000 --screenshot=$docs\screenshot-webui.png      'http://127.0.0.1:18899/'
+$docs = "$repo\docs"
+& $edge --headless --disable-gpu --no-sandbox --hide-scrollbars --window-size=1280,720 --virtual-time-budget=4000 --screenshot=$docs\screenshot-webui.png      'http://127.0.0.1:18899/?theme=light'
 & $edge --headless --disable-gpu --no-sandbox --hide-scrollbars --window-size=1280,720 --virtual-time-budget=4000 --screenshot=$docs\screenshot-webui-dark.png 'http://127.0.0.1:18899/?theme=dark'
 Stop-Process -Id $srv.Id -Force
 ```
 
-- `preview.py` 里的假数据**必须**保持脱敏（账号形如 `2023******@yd`）；它同时是 `?theme=dark` / `?tab=config|log|about` / `?probe=1` 等预览变体的入口。
+- `preview.py` 里的假数据**必须**保持脱敏（账号形如 `2023******@yd`）；它同时是 `?theme=light|dark|baka` / `?tab=config|log|about` / `?probe=1` 等预览变体的入口。
+- **主题用 `?theme=` 显式指定**：v2.1.2 起默认主题是 `baka`（星尘风），不写就拍成默认主题，和 README 上「亮 / 暗」两句配文对不上。
 - 拍完**肉眼看一眼**：账号打码了、版本徽章是当前版本、没有真实网关 / 账号 / 学号。
 - 只提交 `docs\screenshot-webui*.png` 这两张（亮 / 暗）。
 

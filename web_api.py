@@ -2023,11 +2023,15 @@ a:hover { color: var(--accent-hover); }
 .stat-cell:first-child { border-left: none; }
 .stat-label { font-size: 12px; color: var(--text-2); }
 .stat-value {
-  display: flex; align-items: center; gap: 7px; margin-top: 5px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 7px; margin-top: 5px;
   font-size: 19px; font-weight: 600; letter-spacing: -0.01em; color: var(--text-strong);
   word-break: break-word;
 }
 .stat-value.mono { font-size: 14.5px; }
+/* 窄格里的日期不再折成三行（四轮）：ISO 串的 `-` 也是断行点，5 格统计条一格只有约 60px
+   内容宽，浏览器会把「2026-09-27 19:48:12」折成 2026- / 09-27 / 19:48:12。
+   值里的「日期」「时间」两段各自包成 .nb（nowrap），配合上面的 flex-wrap 最多折两行。 */
+.nb { white-space: nowrap; }
 .stat-sub { margin-top: 3px; font-size: 11.5px; color: var(--text-3); line-height: 1.4; }
 /* 「上次错误」有值 → 整格浅橙底 + 左侧色条（原来靠一张卡变边框，现在卡没了） */
 .stat-cell.stat-alert { background: var(--warn-fill); box-shadow: inset 3px 0 0 var(--warn); }
@@ -3236,6 +3240,17 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     return '<code class="path">' + html + '</code>';
   }
 
+  /* 窄格子里的日期值：把「日期」「时间」两段各自包成 .nb（nowrap，见 CSS），
+     要折就折成两行，不再从 `-` 中间断开成三行。 */
+  function isoValueHtml(iso) {
+    var parts = fmtIso(iso).split(' ');
+    var html = '';
+    for (var i = 0; i < parts.length; i++) {
+      html += (i ? ' ' : '') + '<span class="nb">' + esc(parts[i]) + '</span>';
+    }
+    return html;
+  }
+
   function fmtIso(iso) {
     if (!iso) return '-';
     return String(iso).replace('T', ' ');
@@ -3443,7 +3458,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     text($('kpi-account-sub'), s.current_account ? '账号 + 运营商后缀' : '请到「配置」页填写账号');
 
     /* —— 上次登录时间 —— */
-    text($('kpi-lastlogin'), s.last_login_at ? fmtIso(s.last_login_at) : '从未');
+    $('kpi-lastlogin').innerHTML = s.last_login_at ? isoValueHtml(s.last_login_at) : '从未';
     $('kpi-lastlogin').className = 'stat-value' + (s.last_login_at ? '' : ' tone-muted');
     text($('kpi-lastlogin-sub'), s.last_login_at ? '最近一次登录尝试' : '尚无登录记录');
 

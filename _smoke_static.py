@@ -1860,6 +1860,11 @@ check("v2.1.2.0 三条「说明性文案」不上屏（诊断脚注 / 凭据说�
       "不另存状态文件" not in _page and "完整凭据" not in _page
       and "about-mode-evidence" not in _page
       and "badge.setAttribute('title', '判据：'" in _page)   # 判据改悬停提示，信息没丢
+check("v2.1.2.0 统计条里的 ISO 日期不再折成三行（日期 / 时间两段 nowrap，最多两行）",
+      ".nb { white-space: nowrap; }" in _page
+      and "display: flex; align-items: center; flex-wrap: wrap;" in _page
+      and "function isoValueHtml(iso) {" in _page
+      and "$('kpi-lastlogin').innerHTML = s.last_login_at ? isoValueHtml(s.last_login_at)" in _page)
 check("v2.1.2.0 次要操作不再用主按钮尺寸：「服务与维护」四键缩成 btn-sm（窄栏里少占一行）",
       ".btn-sm { padding: 7px 14px; font-size: 13px; gap: 5px; }" in _page
       and 'class="btn btn-sm btn-secondary" id="btn-restart"' in _page
