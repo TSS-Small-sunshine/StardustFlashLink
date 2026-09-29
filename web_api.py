@@ -506,8 +506,133 @@ def api_get_log_download():
     return "campus_login_{}.log".format(datetime.now().strftime("%Y%m%d_%H%M%S")), data
 
 
+# ============================================================
+# 安装方式识别（v2.1.2.0）—— 「卸载服务」得说对话
+#
+# 以前点「卸载服务」永远只弹一句写死的话：「请以管理员身份运行程序目录下的
+# uninstall.bat」。可安装包装的用户**没有**那个 bat（Inno 生成的卸载器是
+# unins000.exe，正路是「设置 → 应用」）；源码跑的用户又没有安装器卸载项。
+# 一句话两边都不对，用户只能自己猜。这里按证据判三种情形，提示分别给。
+#
+# 判据只用「不会误判」的事实（命中即定）：
+#   1) 程序目录里有 Inno 卸载器 unins*.exe        → installer（安装包）
+#   2) 注册表有本产品卸载项（AppId 是不变量 I1）  → installer
+#   3) 目录里带 .git / packaging/setup.iss        → source（源码或绿色部署）
+#   4) 都不是                                     → unknown（两种提示都给）
+# ============================================================
+INNO_UNINSTALL_APPID = "{A8F2E3D1-7C4B-4F89-9D5E-1A2B3C4D5E6F}"  # 与 packaging/setup.iss 一致（不变量 I1）
+_UNINSTALL_REG_KEYS = (
+    "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + INNO_UNINSTALL_APPID + "_is1",
+    "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + INNO_UNINSTALL_APPID + "_is1",
+)
+_SERVICE_REG_KEY = "SYSTEM\\CurrentControlSet\\Services\\DrcomAutoLogin"
+
+
+class _OsProbe:
+    """真机探测实现（测试注入替身，见 `_detect_install_mode` 的 `probe` 参数）。"""
+
+    @staticmethod
+    def isfile(path):
+        return os.path.isfile(path)
+
+    @staticmethod
+    def isdir(path):
+        return os.path.isdir(path)
+
+    @staticmethod
+    def find_uninstaller(app_dir):
+        """程序目录里的 Inno 卸载器（unins000.exe / unins001.exe …）→ 文件名或 None。"""
+        try:
+            names = os.listdir(app_dir)
+        except OSError:
+            return None
+        for name in sorted(names):
+            low = name.lower()
+            if low.startswith("unins") and low.endswith(".exe"):
+                return name
+        return None
+
+    @staticmethod
+    def reg_exists(subkey):
+        """HKLM 下某子键是否存在；非 Windows / 无权限 / 被拒一律 False（绝不抛）。"""
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey):
+                return True
+        except Exception:  # noqa: BLE001  OSError / ImportError / PermissionError
+            return False
+
+
+def _detect_install_mode(app_dir, probe=None):
+    """判断这份程序是「安装包安装」还是「源码 / 绿色部署」，并给出对应的卸载指引。
+
+    纯函数风格：所有外部依赖由 `probe` 注入（isfile / isdir / find_uninstaller /
+    reg_exists），因此可以断言行级地测「判据命中顺序」，不需要真机也不需要改动系统。
+    返回 dict：mode（installer / source / unknown）、evidence（判据，给人看）、
+    uninstall_hint（前端直接显示，不再写死）。
+    """
+    probe = probe or _OsProbe()
+    evidence = []
+
+    uninstaller = probe.find_uninstaller(app_dir)
+    if uninstaller:
+        evidence.append("程序目录里有安装器卸载器 {}".format(uninstaller))
+    reg_hit = next((k for k in _UNINSTALL_REG_KEYS if probe.reg_exists(k)), None)
+    if reg_hit:
+        evidence.append("注册表里有本产品的卸载项（{}）".format(
+            "WOW6432Node" if "WOW6432Node" in reg_hit else "64 位视图"))
+
+    git_dir = os.path.join(app_dir, ".git")
+    if probe.isdir(git_dir) or probe.isfile(git_dir) or probe.isfile(
+            os.path.join(app_dir, "packaging", "setup.iss")):
+        evidence.append("程序目录里带着 .git / packaging/setup.iss（源码树特征）")
+        source_like = True
+    else:
+        source_like = False
+
+    if uninstaller or reg_hit:
+        mode = "installer"
+    elif source_like:
+        mode = "source"
+    else:
+        mode = "unknown"
+
+    if mode == "installer":
+        hint = ("本机是安装包安装的（{}）。请到「设置 → 应用 → 已安装的应用」里卸载"
+                "「星尘闪连」，或直接双击 {}".format(
+                    uninstaller or "注册表里有卸载项",
+                    os.path.join(app_dir, uninstaller) if uninstaller else "安装目录里的卸载程序"))
+    elif mode == "source":
+        hint = ("本机是源码 / 绿色部署（没找到安装器卸载项）。请以管理员身份运行 {}"
+                "—— 它会停止并移除 Windows 服务；只是试跑的话，停掉进程、删掉程序目录即可。".format(
+                    os.path.join(app_dir, "uninstall.bat")))
+    else:
+        hint = ("没认出安装方式：若是用安装包装的，请到「设置 → 应用」里卸载；"
+                "若是源码 / 解压部署，请以管理员身份运行程序目录下的 uninstall.bat。")
+
+    service_installed = probe.reg_exists(_SERVICE_REG_KEY)
+    if not service_installed:
+        hint += " 另外：当前没检测到 Windows 服务（可能不是以服务方式运行）。"
+
+    return {
+        "mode": mode,
+        "app_dir": app_dir,
+        "uninstaller": uninstaller,
+        "service_installed": service_installed,
+        "evidence": evidence,
+        "uninstall_hint": hint,
+    }
+
+
 def api_get_about():
     s = _snapshot_state()
+    try:
+        install = _detect_install_mode(BASE_DIR)
+    except Exception as exc:  # noqa: BLE001  识别失败不该把「关于」页打成 500
+        logger.warning("安装方式识别失败: %s", exc)
+        install = {"mode": "unknown", "app_dir": BASE_DIR, "uninstaller": None,
+                   "service_installed": False, "evidence": [],
+                   "uninstall_hint": "安装方式识别失败，请按程序目录下的 uninstall.bat 卸载。"}
     return {
         "version": VERSION,
         "version_full": VERSION_FULL,
@@ -520,6 +645,7 @@ def api_get_about():
         "config_file": CONFIG_FILE,
         "password_file": PASSWORD_FILE,
         "log_dir": str(LOG_DIR),
+        "install": install,
     }
 
 
@@ -1904,6 +2030,25 @@ a:hover { color: var(--accent-hover); }
 }
 .diag-body > #card-quality { grid-column: 1 / -1; }
 
+/* --- v2.1.2.0：表单类折叠（配置页「新建 / 覆盖方案」等）与两列表单 --- */
+.fold-body { margin-top: 12px; }
+.pw-grid { display: grid; gap: 0 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.pw-grid .field { margin-bottom: 16px; }
+.cfg-cols { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: start; }
+
+/* --- v2.1.2.0：关于页顶部（真正的「关于」：这是什么 + 哪个版本 + 怎么装的） --- */
+.about-hero { display: flex; gap: 16px; align-items: center; }
+.about-mark {
+  width: 48px; height: 48px; flex: none; border-radius: var(--r-md);
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent);
+}
+.about-name { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.about-ver { font-size: 13px; font-weight: 500; color: var(--text-2); }
+.about-tagline { margin: 6px 0 0; font-size: 13px; color: var(--text-2); }
+.about-meta { margin: 10px 0 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-3); }
+.log-box.mini { height: auto; max-height: 220px; margin-top: 12px; font-size: 12px; }
+
 /* ============================================================
    7. 按钮 / 表单 / 开关 / 徽章
    ============================================================ */
@@ -2285,6 +2430,44 @@ code.path {
       </div>
     </div>
 
+    <!-- v2.1.2.0：账户与登录密码搬到主页 —— 最常改的东西不该藏在配置页第二块，
+         就放在「立即登录」下面，登录不顺时顺手就能改账号 / 密码。 -->
+    <div class="card section" id="card-password">
+      <div class="section-head">
+        <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
+        <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
+      </div>
+      <div class="pw-grid">
+        <div class="field">
+          <label for="cfg-account">账号</label>
+          <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
+          <div class="hint">仅支持数字（学号 / 工号），不含运营商后缀</div>
+          <div class="err" id="err-account" role="alert"></div>
+        </div>
+        <div class="field">
+          <label for="cfg-suffix">运营商</label>
+          <select id="cfg-suffix">
+            <option value="">校园用户（无后缀）</option>
+            <option value="@yd">中国移动 @yd</option>
+            <option value="@dx">中国电信 @dx</option>
+            <option value="@lt">中国联通 @lt</option>
+          </select>
+          <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
+        </div>
+        <div class="field">
+          <label for="pwd-new">账户登录密码</label>
+          <input type="password" id="pwd-new" autocomplete="new-password">
+          <div class="hint">至少 1 个字符</div>
+        </div>
+        <div class="field">
+          <label for="pwd-confirm">再次输入账户登录密码</label>
+          <input type="password" id="pwd-confirm" autocomplete="new-password">
+          <div class="err" id="err-pwd" role="alert"></div>
+        </div>
+      </div>
+      <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
+    </div>
+
     <!-- 日常关心的几项：跟首屏同一屏内，不用滚 -->
     <div class="grid lead-facts">
       <article class="card kpi" id="card-net">
@@ -2384,8 +2567,16 @@ code.path {
         <select id="profile-select" class="cfg-lg"></select>
         <div class="hint" id="profile-hint">还没有方案 —— 调好配置后点下面的「用当前配置保存」建一个（例如「教室」「宿舍」「家里」）。</div>
       </div>
-      <div class="field">
-        <label for="profile-new-name">新建 / 覆盖方案</label>
+      <!-- v2.1.2.0：主流程是「选方案 → 应用 / 删除」，新建表单不该夹在中间；
+           折起来默认收起，要用再展开（跟外观无关，纯属别把主流程切碎）。 -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>新建 / 覆盖方案</span>
+          <span class="diag-hint">方案名 + 自动匹配的 Wi-Fi 名</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body field">
+          <label for="profile-new-name">新建 / 覆盖方案</label>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <input type="text" id="profile-new-name" class="cfg-lg" style="flex:1 1 150px;" placeholder="方案名（例如 家里）" autocomplete="off" spellcheck="false" maxlength="24">
           <input type="text" id="profile-match-ssids" class="cfg-lg" style="flex:2 1 220px;" placeholder="自动匹配的 Wi-Fi 名（可选，逗号分隔）" autocomplete="off" spellcheck="false">
@@ -2396,7 +2587,8 @@ code.path {
           <button class="btn" id="btn-profile-save" type="button">用当前配置保存</button>
         </div>
         <div class="hint">填了「自动匹配的 Wi-Fi 名」= <b>自动方案</b>：打开下面的自动切换后，一连上这个 Wi-Fi 就自动切过去。</div>
-      </div>
+        </div>
+      </details>
       <div class="field">
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <button class="btn" id="btn-profile-apply" type="button">应用选中方案</button>
@@ -2409,41 +2601,10 @@ code.path {
       </div>
     </div>
 
-    <div class="card section" id="card-password">
-      <div class="section-head">
-        <h2 class="section-title">账户与登录密码 <span class="badge badge-muted" id="pwd-badge">状态未知</span></h2>
-        <p class="section-desc" style="margin:0;">账号 + 运营商 + 密码构成本机登录校园网的完整凭据。密码仅保存于本机 password.txt，保存后立即生效，无需重启。</p>
-      </div>
-      <div class="field">
-        <label for="cfg-account">账号</label>
-        <input type="text" id="cfg-account" class="cfg-lg" placeholder="学号 / 工号（纯数字）" autocomplete="off" spellcheck="false" inputmode="numeric">
-        <div class="hint">仅支持数字（学号 / 工号），不含运营商后缀</div>
-        <div class="err" id="err-account" role="alert"></div>
-      </div>
-      <div class="field">
-        <label for="cfg-suffix">运营商</label>
-        <select id="cfg-suffix">
-          <option value="">校园用户（无后缀）</option>
-          <option value="@yd">中国移动 @yd</option>
-          <option value="@dx">中国电信 @dx</option>
-          <option value="@lt">中国联通 @lt</option>
-        </select>
-        <div class="hint">宽带运营商不同，认证域名后缀也不同</div>
-      </div>
-      <div class="field">
-        <label for="pwd-new">账户登录密码</label>
-        <input type="password" id="pwd-new" autocomplete="new-password">
-        <div class="hint">至少 1 个字符</div>
-      </div>
-      <div class="field">
-        <label for="pwd-confirm">再次输入账户登录密码</label>
-        <input type="password" id="pwd-confirm" autocomplete="new-password">
-        <div class="err" id="err-pwd" role="alert"></div>
-      </div>
-      <button class="btn btn-secondary" id="btn-save-pwd" type="button">保存账户登录密码</button>
-    </div>
+    <!-- v2.1.2.0：「账户与登录密码」已搬到「状态」页（主页）—— 日常改得最多的东西
+         不该排在配置页第二块、还要先滚过「配置方案」。 -->
 
-    <div class="card section">
+    <div class="card section">      
       <div class="section-head">
         <h2 class="section-title">认证服务器</h2>
         <p class="section-desc" style="margin:0;">校园网认证网关地址与端口。</p>
@@ -2492,7 +2653,14 @@ code.path {
         <div class="hint">每次检查等待校园网可达的最长时间，10-300 秒</div>
         <div class="err" id="err-timeout" role="alert"></div>
       </div>
-      <!-- v2.0.5.0 新增：网络位置守卫 -->
+      <!-- v2.0.5.0：网络位置守卫（v2.1.2.0 起折起来：它是进阶设置，展开会顶掉半屏） -->
+      <details class="diag fold">
+        <summary class="diag-summary">
+          <span>网络位置守卫（进阶）</span>
+          <span class="diag-hint" id="guard-summary-hint">只在校园网内登录 · Wi-Fi 名 / 网段白名单</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body">
       <div class="field">
         <label class="switch" for="cfg-guard-enabled">
           <input type="checkbox" id="cfg-guard-enabled">
@@ -2518,7 +2686,10 @@ code.path {
         <div class="hint">逗号分隔；宿舍有线也适用。留空 = 不按网段判断</div>
         <div class="err" id="err-guard" role="alert"></div>
       </div>
-      <!-- v1.3 新增：自动升级字段 -->
+        </div>
+      </details>
+
+      <!-- v1.3 新增：自动升级字段（检查结果 / 进度 / 升级流水在「关于」页的「更新」块看） -->
       <div class="field">
         <label class="switch" for="cfg-auto-update-enabled">
           <input type="checkbox" id="cfg-auto-update-enabled">
@@ -2613,60 +2784,9 @@ code.path {
         <span id="log-updated">未更新</span>
       </div>
     </div>
-  </section>
 
-  <!-- ============ 关于 ============ -->
-  <section class="panel" id="panel-about" role="tabpanel" aria-labelledby="tab-about" tabindex="-1">
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">版本信息</h2>
-      </div>
-      <dl class="info">
-        <dt>版本号</dt><dd id="about-version">-</dd>
-        <dt>服务启动时间</dt><dd id="about-started">-</dd>
-        <dt>已运行时长</dt><dd id="about-uptime" class="mono">-</dd>
-      </dl>
-    </div>
-
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">文件位置</h2>
-      </div>
-      <dl class="info">
-        <dt>配置文件</dt><dd id="about-config"><code class="path">-</code></dd>
-        <dt>日志文件</dt><dd id="about-log"><code class="path">-</code></dd>
-        <dt>数据目录</dt><dd id="about-data"><code class="path">-</code></dd>
-      </dl>
-    </div>
-
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">访问入口</h2>
-      </div>
-      <div class="link-row">
-        <a class="btn btn-secondary" id="about-local" href="http://127.0.0.1:8848" target="_blank" rel="noopener">本机管理页面</a>
-        <a class="btn" href="https://github.com/TSS-Small-sunshine/StardustFlashLink" target="_blank" rel="noopener noreferrer">在 GitHub 上查看</a>
-      </div>
-      <p class="hint" style="margin-top:14px;">
-        本页面仅监听本机回环地址（127.0.0.1），局域网内其他设备无法访问；所有配置、密码与日志文件都保存在程序所在的数据目录中，删除目录即彻底清除。
-      </p>
-    </div>
-
-    <div class="card section">
-      <div class="section-head">
-        <h2 class="section-title">管理操作</h2>
-      </div>
-      <div class="btn-row">
-        <button class="btn btn-secondary" id="btn-restart" type="button">重启服务</button>
-        <button class="btn btn-danger" id="btn-uninstall" type="button">卸载服务</button>
-        <!-- v1.3 新增：升级历史按钮 -->
-        <button class="btn btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
-        <!-- v2.0.0 新增：查看更新日志按钮 -->
-        <button class="btn btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
-      </div>
-      <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
-    </div>
-
+    <!-- v2.1.2.0：从「关于」页搬来 —— 日志占用与诊断包本来就是日志 / 排障的事，
+         挤在「关于」里既臃肿又难找 -->
     <div class="card section">
       <div class="section-head">
         <h2 class="section-title">日志与诊断</h2>
@@ -2683,6 +2803,84 @@ code.path {
         反馈问题时把它发给维护者即可。
       </p>
     </div>
+  </section>
+
+  <!-- ============ 关于 ============ -->
+  <section class="panel" id="panel-about" role="tabpanel" aria-labelledby="tab-about" tabindex="-1">
+    <!-- v2.1.2.0：真正的「关于」—— 这是什么 / 哪个版本 / 怎么装的（安装方式后端自动识别） -->
+    <div class="card section about-hero">
+      <span class="about-mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2.2l1.9 6.1a2 2 0 0 0 1.3 1.3l6.1 1.9-6.1 1.9a2 2 0 0 0-1.3 1.3L12 20.8l-1.9-6.1a2 2 0 0 0-1.3-1.3L2.7 11.5l6.1-1.9a2 2 0 0 0 1.3-1.3L12 2.2z"/></svg></span>
+      <div>
+        <div class="about-name">星尘闪连 <span class="about-ver" id="about-version">-</span></div>
+        <p class="about-tagline">Dr.COM 校园网自动登录 · 全程本机运行，密码不出这台电脑</p>
+        <p class="about-meta">
+          <span class="badge badge-muted" id="about-mode-badge">识别安装方式…</span>
+          <span>启动于 <b id="about-started">-</b></span>
+          <span>已运行 <b id="about-uptime" class="mono">-</b></span>
+        </p>
+      </div>
+    </div>
+
+    <!-- v2.1.2.0：更新 —— 「我点了检查更新，结果呢？」的答案就放这儿，
+         不用再去日志里翻（以前每个用户都得自己触发一次、再去翻 upgrade.log）。 -->
+    <div class="card section">
+      <div class="section-head">
+        <h2 class="section-title">更新</h2>
+        <p class="section-desc" style="margin:0;">最近一次检查的结论与升级流水都在这一块；触发按钮和详细设置仍在「配置 → 自动化」里。</p>
+      </div>
+      <dl class="info">
+        <dt>当前版本</dt><dd id="about-upd-local" class="mono">-</dd>
+        <dt>最近一次检查</dt><dd id="about-upd-checked">尚未检查</dd>
+        <dt>结论</dt><dd id="about-upd-result">-</dd>
+      </dl>
+      <div class="btn-row" style="margin-top:14px;">
+        <button class="btn btn-secondary" id="btn-about-check" type="button">立即检查更新</button>
+        <button class="btn btn-secondary" id="btn-about-history" type="button">查看升级历史</button>
+      </div>
+      <details class="diag fold" id="about-log-wrap">
+        <summary class="diag-summary">
+          <span>升级流水（logs/upgrade.log 尾部）</span>
+          <span class="diag-hint">检查 / 下载 / 安装每一步都在这</span>
+          <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+        </summary>
+        <div class="fold-body">
+          <button class="btn btn-secondary" id="btn-about-log-refresh" type="button">刷新</button>
+          <pre class="log-box mini" id="about-update-log">展开即读取…</pre>
+        </div>
+      </details>
+    </div>
+
+    <div class="card section">
+      <div class="section-head">
+        <h2 class="section-title">数据与文件位置</h2>
+      </div>
+      <dl class="info">
+        <dt>配置文件</dt><dd id="about-config"><code class="path">-</code></dd>
+        <dt>日志文件</dt><dd id="about-log"><code class="path">-</code></dd>
+        <dt>数据目录</dt><dd id="about-data"><code class="path">-</code></dd>
+      </dl>
+    </div>
+
+    <!-- v2.1.2.0：管理操作折起来 —— 「关于」页不该一进来就是四个按钮；
+         而且卸载的说辞得按「怎么装的」给（安装包装的根本没有 uninstall.bat）。 -->
+    <details class="diag fold">
+      <summary class="diag-summary">
+        <span>服务与维护</span>
+        <span class="diag-hint">重启服务 / 卸载 / 升级历史 / 更新日志</span>
+        <span class="diag-caret" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5 12 15.5 18 9.5"/></svg></span>
+      </summary>
+      <div class="fold-body">
+        <div class="btn-row">
+          <button class="btn btn-secondary" id="btn-restart" type="button">重启服务</button>
+          <button class="btn btn-danger" id="btn-uninstall" type="button">卸载服务</button>
+          <!-- v1.3 新增：升级历史按钮 -->
+          <button class="btn btn-secondary" id="btn-update-history" type="button">查看升级历史</button>
+          <!-- v2.0.0 新增：查看更新日志按钮 -->
+          <button class="btn btn-secondary" id="btn-changelog" type="button">查看更新日志</button>
+        </div>
+        <p class="hint" id="admin-hint" style="margin-top:14px;"></p>
+      </div>
+    </details>
   </section>
 </main>
 
@@ -3456,6 +3654,7 @@ code.path {
       text($('about-started'), fmtIso(r.service_started_at));
       uptimeBase = { sec: Number(r.service_uptime_sec) || 0, at: Date.now() };
       text($('about-uptime'), fmtDuration(uptimeBase.sec));
+      if (r.install && r.install.mode) renderInstallMode(r.install);
       if (r.config_file) $('about-config').innerHTML = '<code class="path">' + esc(r.config_file) + '</code>';
       if (r.data_dir) $('about-data').innerHTML = '<code class="path">' + esc(r.data_dir) + '</code>';
       if (r.log_file) $('about-log').innerHTML = '<code class="path">' + esc(r.log_file) + '</code>';
@@ -3469,12 +3668,82 @@ code.path {
     });
   }
 
+  /* —— v2.1.2.0：这份程序是怎么装的（安装包 / 源码）+ 更新结果与升流 —— */
+
+  var installInfo = null;
+  var INSTALL_MODE_TEXT = { installer: '安装包安装', source: '源码 / 绿色部署', unknown: '安装方式未识别' };
+
+  /* 安装方式由后端按证据判定（程序目录里的 unins*.exe / 注册表卸载项 / .git …），
+     前端只负责显示 —— 这样「卸载服务」才能按情形说对话，而不是永远一句写死的
+     「运行 uninstall.bat」（安装包装的用户根本找不到那个文件）。 */
+  function renderInstallMode(info) {
+    installInfo = info;
+    var badge = $('about-mode-badge');
+    if (badge) text(badge, INSTALL_MODE_TEXT[info.mode] || INSTALL_MODE_TEXT.unknown);
+  }
+
+  /* 「我点了检查更新，结果呢？」—— 有进行中的状态就复用状态横幅那套文案（单一来源），
+     否则用 last_check_at / latest_version / last_error 直接给结论。 */
+  function renderAboutUpdate() {
+    var localEl = $('about-upd-local');
+    var atEl = $('about-upd-checked');
+    var resEl = $('about-upd-result');
+    if (!localEl || !atEl || !resEl) return;
+    return getUpdateJson('/api/update/status').then(function (r) {
+      if (!r || typeof r !== 'object') { text(resEl, '读取失败'); return; }
+      updateStateCache = r;
+      text(localEl, 'v' + (r.local_version || '-'));
+      text(atEl, r.last_check_at ? fmtIso(r.last_check_at) : '尚未检查');
+      if (r.state) {
+        renderUpdateBanner(r);
+        var t = $('update-banner-title');
+        var d = $('update-banner-desc');
+        text(resEl, (t ? t.textContent : '') + (d && d.textContent ? '：' + d.textContent : ''));
+      } else if (r.last_error) {
+        text(resEl, '上次检查失败：' + r.last_error);
+      } else if (r.update_available) {
+        text(resEl, '发现新版本 v' + (r.latest_version || '?') + '（当前 v' + (r.local_version || '?') +
+                    '）—— 可到「配置 → 自动化」点「立即升级」');
+      } else if (r.last_check_at) {
+        text(resEl, '已是最新' + (r.latest_version ? '（远端 v' + r.latest_version + '）' : ''));
+      } else {
+        text(resEl, '还没检查过 —— 点上面的「立即检查更新」');
+      }
+    }).catch(function () { text(resEl, '读取失败'); });
+  }
+
+  /* 升流小窗：upgrade.log 尾部若干行，省得用户自己去翻文件 */
+  function loadAboutLog() {
+    var box = $('about-update-log');
+    if (!box) return;
+    box.textContent = '读取中…';
+    getUpdateJson('/api/update/history').then(function (r) {
+      var lines = (r && r.lines) || [];
+      box.textContent = lines.length
+        ? lines.slice(-14).join('\n')
+        : '暂无升级流水（第一次自动升级成功后才会有）';
+    }).catch(function () { box.textContent = '读取失败'; });
+  }
+
+  function bindAboutUpdate() {
+    var btnCheck = $('btn-about-check');
+    if (btnCheck) btnCheck.addEventListener('click', function () {
+      /* 复用配置页那个按钮的逻辑（唯一实现），避免两处各写一份触发代码 */
+      var src = $('btn-update-check-now');
+      if (src) src.click();
+      setTimeout(renderAboutUpdate, 1500);
+    });
+    var btnHistory = $('btn-about-history');
+    if (btnHistory) btnHistory.addEventListener('click', openUpdateHistoryModal);
+    var btnLog = $('btn-about-log-refresh');
+    if (btnLog) btnLog.addEventListener('click', loadAboutLog);
+    var wrap = $('about-log-wrap');
+    if (wrap) wrap.addEventListener('toggle', function () { if (wrap.open) loadAboutLog(); });
+  }
+
   function bindAbout() {
-    var local = $('about-local');
-    if (local && window.location && window.location.origin && window.location.origin.indexOf('http') === 0) {
-      local.href = window.location.origin;
-      local.textContent = '本机管理页面（' + window.location.origin + '）';
-    }
+    /* v2.1.2.0：原来这里会把「本机管理页面」链接改成本页地址 —— 「访问入口」整块已删
+       （用户原话：「关于的访问入口有存在的必要吗」），本页地址栏里就有。 */
     var btnRestart = $('btn-restart');
     if (btnRestart) btnRestart.addEventListener('click', function () {
       if (!window.confirm('确认重启服务？NSSM 将自动重新拉起进程。')) return;
@@ -3484,7 +3753,13 @@ code.path {
     });
     var btnUninstall = $('btn-uninstall');
     if (btnUninstall) btnUninstall.addEventListener('click', function () {
-      text($('admin-hint'), '请以管理员身份运行程序目录下的 uninstall.bat 完成卸载。');
+      /* v2.1.2.0：按安装方式说对话（以前永远一句「运行 uninstall.bat」，
+         安装包装的用户根本没有那个文件）。判据也一并给出来，方便用户核对。 */
+      var hint = (installInfo && installInfo.uninstall_hint)
+        || '请以管理员身份运行程序目录下的 uninstall.bat 完成卸载。';
+      var ev = installInfo && installInfo.evidence && installInfo.evidence.length
+        ? '（判据：' + installInfo.evidence.join('；') + '）' : '';
+      text($('admin-hint'), hint + ev);
     });
   }
 
@@ -3502,7 +3777,7 @@ code.path {
       if (p) p.classList.toggle('active', n === name);
     });
     if (name === 'config') loadConfig();
-    else if (name === 'about') { loadAbout(); }
+    else if (name === 'about') { loadAbout(); renderAboutUpdate(); }
     else if (name === 'log') reloadLog();
   }
 
@@ -3544,12 +3819,19 @@ code.path {
     bindConfig();
     bindLog();
     bindAbout();
+    bindAboutUpdate();
     bindUpdate();
 
     startStatusPolling();
     startLogPolling();
     startUpdatePolling();
     loadAbout();
+    renderAboutUpdate();   /* 启动就把「更新」块的结论填上，切到「关于」不该先看到一排「-」 */
+    /* v2.1.2.0：密码徽标现在挂在主页那张「账户与登录密码」卡上，
+       不能等用户点开「配置」页才更新（以前只在 loadConfig 里刷）。 */
+    API.config().then(function (c) {
+      if (c && c.password_status) setPwdBadge(c.password_status);
+    }).catch(function () { /* 读不到就保持「状态未知」 */ });
 
     setInterval(tickCountdown, 1000);
     setInterval(function () {

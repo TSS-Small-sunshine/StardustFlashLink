@@ -1679,6 +1679,120 @@ check("v2.1.2.0 按钮静态标签不再写死两态，且首屏同步一次（�
       and "applyTheme(currentTheme(), false);" in _page)
 
 
+# ---- v2.1.2.0（第二轮，按用户反馈重排）：账号密码上主页 / 关于页重做 / 安装方式识别 ----
+# 用户原话：「把账户与密码移动到主页」「配置每个版块占这么多真的好吗」「关于放的很臃肿」
+#           「更新的边上应该放一个小的日志窗或者告诉检测到新版本的结果」
+#           「关于的访问入口有存在的必要吗」「卸载服务的提示是写死的吗？有没有办法区分」
+class _FakeProbe:
+    """给 `_detect_install_mode` 用的假探测（判据命中顺序必须可断言，且不碰真机）。"""
+
+    def __init__(self, uninstaller=None, reg=(), files=(), dirs=()):
+        self._unins = uninstaller
+        self._reg = set(reg)
+        self._files = set(files)
+        self._dirs = set(dirs)
+
+    def isfile(self, path):
+        return path in self._files
+
+    def isdir(self, path):
+        return path in self._dirs
+
+    def find_uninstaller(self, app_dir):
+        return self._unins
+
+    def reg_exists(self, subkey):
+        return subkey in self._reg
+
+
+_det = _web_api_probe._detect_install_mode
+_app = r"C:\Program Files\DrcomAutoLogin"
+_ins = _det(_app, probe=_FakeProbe(uninstaller="unins000.exe", reg=[_web_api_probe._SERVICE_REG_KEY]))
+check("v2.1.2.0 安装方式：目录里有 Inno 卸载器 → 安装包，且提示走「设置 → 应用」",
+      _ins["mode"] == "installer" and "应用" in _ins["uninstall_hint"]
+      and "unins000.exe" in _ins["uninstall_hint"] and _ins["service_installed"] is True,
+      _ins["uninstall_hint"][:60])
+_reg_only = _det(_app, probe=_FakeProbe(reg=[_web_api_probe._UNINSTALL_REG_KEYS[0]]))
+check("v2.1.2.0 安装方式：只剩注册表卸载项也判安装包（卸载器被改名 / 挪走时），",
+      _reg_only["mode"] == "installer" and _reg_only["uninstaller"] is None,
+      _reg_only["mode"])
+_src = _det(r"D:\code\StardustFlashLink", probe=_FakeProbe(
+    files=[r"D:\code\StardustFlashLink\packaging\setup.iss"]))
+check("v2.1.2.0 安装方式：源码树特征 → 源码部署，提示运行 uninstall.bat",
+      _src["mode"] == "source" and "uninstall.bat" in _src["uninstall_hint"]
+      and "安装包安装" not in _src["uninstall_hint"], _src["uninstall_hint"][:60])
+check("v2.1.2.0 安装方式：卸载器优先于源码特征（装完的源码目录不该被判成源码）",
+      _det(_app, probe=_FakeProbe(uninstaller="unins001.exe", dirs=[_app + r"\.git"]))["mode"]
+      == "installer")
+_unk = _det(r"C:\some\where", probe=_FakeProbe())
+check("v2.1.2.0 安装方式：都没命中 → unknown，且两种卸载途径都提到",
+      _unk["mode"] == "unknown" and "uninstall.bat" in _unk["uninstall_hint"]
+      and "应用" in _unk["uninstall_hint"])
+_about_saved = {k: getattr(_web_api_probe, k, None) for k in
+                ("BASE_DIR", "LOG_FILE", "CONFIG_FILE", "PASSWORD_FILE", "LOG_DIR",
+                 "VERSION", "VERSION_FULL", "CODENAME", "CODENAME_CN", "logger",
+                 "_snapshot_state")}
+
+
+class _FakeLogger:
+    def warning(self, *a, **k):
+        pass
+
+    def exception(self, *a, **k):
+        pass
+
+
+_web_api_probe.BASE_DIR = _app            # 假安装目录：不依赖本机真实布局
+_web_api_probe.LOG_FILE = _app + r"\logs\campus_login.log"
+_web_api_probe.CONFIG_FILE = _app + r"\config.json"
+_web_api_probe.PASSWORD_FILE = _app + r"\password.txt"
+_web_api_probe.LOG_DIR = _app + r"\logs"
+_web_api_probe.VERSION = "1.2.3"
+_web_api_probe.VERSION_FULL = "1.2.3 (test)"
+_web_api_probe.CODENAME = "Test"
+_web_api_probe.CODENAME_CN = "测试"
+_web_api_probe.logger = _FakeLogger()
+_web_api_probe._snapshot_state = lambda: {"service_started_at": "2026-09-29T10:00:00",
+                                          "service_uptime_sec": 60}
+try:
+    _about_payload = _web_api_probe.api_get_about()
+finally:
+    for _k, _v in _about_saved.items():
+        if _v is not None:
+            setattr(_web_api_probe, _k, _v)
+check("v2.1.2.0 /api/about 带上 install 判定 + 卸载提示（前端据此说对话）",
+      isinstance(_about_payload.get("install"), dict)
+      and _about_payload["install"].get("mode") in ("installer", "source", "unknown")
+      and bool(_about_payload["install"].get("uninstall_hint")),
+      str(_about_payload.get("install", {}).get("mode")))
+check("v2.1.2.0 卸载提示不再写死一句话（按 installInfo 给，兜底才用旧文案）",
+      "installInfo.uninstall_hint" in _page and "installInfo.evidence" in _page
+      and 'id="about-mode-badge"' in _page)
+
+# —— 搬运结果：谁该在哪个面板里（用位置断言，防止以后又被搬回去）——
+_end_status = _pos('id="panel-config"')
+_end_config = _pos('id="panel-log"')
+_end_log = _pos('id="panel-about"')
+check("v2.1.2.0 账户与登录密码在「状态」页（不是配置页）",
+      _pos('id="card-password"') >= 0 and _pos('id="card-password"') < _end_status
+      and _pos('id="cfg-account"') < _end_status,
+      "card-password@%s panel-config@%s" % (_pos('id="card-password"'), _end_status))
+check("v2.1.2.0 日志与诊断搬到了「日志」页（不再挤在关于页）",
+      _pos('id="log-list"') > _end_config and _pos('id="log-list"') < _end_log
+      and _pos('id="btn-logs-refresh"') < _end_log,
+      "log-list@%s panel-log@%s panel-about@%s" % (_pos('id="log-list"'), _end_config, _end_log))
+check("v2.1.2.0 关于页：删掉「访问入口」、加上「更新」块与升流小窗、管理操作折起来",
+      "about-local" not in _page
+      and 'id="about-upd-result"' in _page and 'id="about-update-log"' in _page
+      and 'id="btn-about-check"' in _page
+      and _pos('id="about-upd-result"') > _end_log)  # 确实落在关于面板里（不是别处）
+check("v2.1.2.0 配置页瘦身：主流程之外的都折起来（新建方案 / 网络位置守卫）",
+      _page.count('<details class="diag fold">') >= 3
+      and 'id="guard-summary-hint"' in _page and 'class="fold-body field"' in _page)
+check("v2.1.2.0 密码徽标在主页也要能更新（不能只在 loadConfig 里刷）",
+      "c.password_status" in _page and "setPwdBadge(c.password_status)" in _page)
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
