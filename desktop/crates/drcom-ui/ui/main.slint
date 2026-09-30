@@ -7,16 +7,18 @@ export { Theme } from "theme.slint";
 
 // 主窗口 —— 版式照 2.x Web UI 的「状态」页搬 ✓：
 //   顶栏（品牌 + 版本徽标 + 通道徽标 + 主题切换）
-//   状态与主操作**同一张卡** → 日常统计条 → 诊断统计条 → 账户与登录密码卡 → 终端式结果窗
-// 2.x 的状态页是两栏（右栏是凭据卡）；3.0 预览版先做**单栏**：
-//   Slint 里布局子元素的 width/height 会被忽略、改成按「内容最小宽度」重排 ✗，
-//   而统计条的格子宽度又要依赖父宽 → 两栏会形成循环引用、右栏被推到窗外 ✗（折腾过一轮 ✓）。
-//   等信息架构稳下来再按 2.x 分栏 ✓。
+//   两栏：左栏「状态与主操作同一张卡 + 日常 5 格 + 诊断 4 格」/ 右栏「账户与登录密码卡」
+//   终端式结果窗（跨两栏）→ 页脚
+//
+// 上一轮为了绕开「内容比窗口宽」退成过单栏 ✗ —— 那其实是**假象**：
+//   截屏脚本没声明 DPI 感知（SetProcessDPIAware ✗）→ GetWindowRect 返回虚拟化的逻辑坐标，
+//   而 CopyFromScreen 按物理像素抓 → 只拍到窗口左上角，看起来就像右端被裁 ✗（真踩过 ✓）。
+//   布局本身一直是好的：两栏、5 格统计条、右端按钮全都在窗口内 ✓
 // 界面只做展示：数据由 Rust 从 drcom-core 拼好塞进来 ✓
 export component AppWindow inherits Window {
     title: "星尘闪连 3.0（预览版）";
-    width: 1440px;
-    height: 900px;
+    width: 1280px;
+    height: 800px;
     background: Theme.bg;
 
     // —— 以下属性全部由 Rust 从核心填充（界面本身不读文件、不碰网络 ✓）——
@@ -116,111 +118,118 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ── 状态与主操作合卡（2.x：「当前状态」与「立即登录」就是同一张卡 ✓）──
-        Card {
-            HorizontalLayout {
+        // ── 两栏区（2.x 状态页就是两栏：左栏「状态 + 统计」，右栏「账户与密码」✓）──
+        // 别再因为「内容比窗口宽」就退成单栏 ✗：那轮是**截屏脚本没声明 DPI 感知**、
+        // 只拍到窗口左上角造成的假象（真踩过 ✓）—— 布局本身一直是好的 ✓
+        HorizontalLayout {
+            spacing: Theme.gap;
+
+            // 左栏：状态与主操作合卡（2.x：「当前状态」与「立即登录」就是同一张卡 ✓）+ 两条统计条
+            VerticalLayout {
+                horizontal-stretch: 1;
                 spacing: Theme.gap;
-                VerticalLayout {
-                    spacing: 3px;
-                    alignment: start;
-                    Text {
-                        text: "当前状态";
-                        font-size: 12px;
-                        color: Theme.text-3;
-                    }
-                    Text {
-                        text: root.service-line;
-                        font-size: 22px;
-                        font-weight: 700;
-                        color: Theme.text-strong;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: root.background-line;
-                        font-size: 12px;
-                        color: Theme.text-2;
-                        wrap: word-wrap;
+
+                Card {
+                    HorizontalLayout {
+                        spacing: Theme.gap;
+                        VerticalLayout {
+                            spacing: 3px;
+                            alignment: start;
+                            Text {
+                                text: "当前状态";
+                                font-size: 12px;
+                                color: Theme.text-3;
+                            }
+                            Text {
+                                text: root.service-line;
+                                font-size: 22px;
+                                font-weight: 700;
+                                color: Theme.text-strong;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.background-line;
+                                font-size: 12px;
+                                color: Theme.text-2;
+                                wrap: word-wrap;
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            PillButton {
+                                text: root.busy ? "检查中…" : "立即检查";
+                                primary: true;
+                                enabled: !root.busy;
+                                clicked => { root.do-check(); }
+                            }
+                            PillButton {
+                                text: "运行自检";
+                                enabled: !root.busy;
+                                clicked => { root.do-selfcheck(); }
+                            }
+                            PillButton {
+                                text: "刷新状态";
+                                enabled: !root.busy;
+                                clicked => { root.refresh(); }
+                            }
+                        }
                     }
                 }
-                HorizontalLayout {
-                    spacing: 8px;
-                    PillButton {
-                        text: root.busy ? "检查中…" : "立即检查";
-                        primary: true;
-                        enabled: !root.busy;
-                        clicked => { root.do-check(); }
-                    }
-                    PillButton {
-                        text: "运行自检";
-                        enabled: !root.busy;
-                        clicked => { root.do-selfcheck(); }
-                    }
-                    PillButton {
-                        text: "刷新状态";
-                        enabled: !root.busy;
-                        clicked => { root.refresh(); }
-                    }
-                }
+
+                // ── 日常 5 格 / 诊断 4 格（2.x 状态页那两条统计条；出错那格浅橙底 ✓）──
+                StatStrip { cells: root.daily-cells; }
+                StatStrip { cells: root.diag-cells; }
             }
-        }
 
-        // ── 日常 5 格（2.x 状态页那条统计条；出错那格浅橙底 ✓）──
-        StatStrip { cells: root.daily-cells; }
-        // ── 诊断 4 格 ──
-        StatStrip { cells: root.diag-cells; }
+            // 右栏：账户与登录密码（2.x 的凭据卡；竖排 + 两个按钮压到底 ✓）
+            Card {
+                preferred-width: 380px;
+                min-width: 320px;
+                content-padding: 18px;
 
-        // ── 账户与登录密码（2.x 的右栏凭据卡；单栏版让它横过来 ✓）──
-        Card {
-            content-padding: 18px;
-            HorizontalLayout {
-                spacing: Theme.gap;
-                VerticalLayout {
-                    width: 260px;
-                    spacing: 3px;
-                    alignment: start;
-                    Text {
-                        text: "账户与登录密码";
-                        font-size: 15px;
-                        font-weight: 700;
-                        color: Theme.text-strong;
-                    }
-                    Text {
-                        text: root.account-line;
-                        font-size: 17px;
-                        font-weight: 600;
-                        color: Theme.text;
-                        overflow: elide;
-                    }
+                Text {
+                    text: "账户与登录密码";
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: Theme.text-strong;
                 }
-                VerticalLayout {
-                    spacing: 3px;
-                    alignment: start;
-                    Text {
-                        text: "认证网关";
-                        font-size: 12px;
-                        color: Theme.text-3;
-                    }
-                    Text {
-                        text: root.gateway-line;
-                        font-size: 12px;
-                        color: Theme.text-2;
-                        overflow: elide;
-                    }
-                    Text {
-                        text: "密码只在「设置」里改：界面永不回显、诊断包不含它 ✓";
-                        font-size: 11px;
-                        color: Theme.text-3;
-                        overflow: elide;
-                    }
+                Text {
+                    text: root.account-line;
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: Theme.text;
+                    overflow: elide;
                 }
+                Text {
+                    text: "已脱敏显示 —— 密码只在「设置」里改：界面永不回显、诊断包不含它 ✓";
+                    font-size: 11px;
+                    color: Theme.text-3;
+                    wrap: word-wrap;
+                }
+                Rectangle { height: 1px; background: Theme.hairline; }
+                Text {
+                    text: "认证网关";
+                    font-size: 12px;
+                    color: Theme.text-3;
+                }
+                Text {
+                    text: root.gateway-line;
+                    font-size: 15px;
+                    font-weight: 600;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+                Rectangle { vertical-stretch: 1; }   // 弹簧：把按钮压到卡片底部 ✓
                 PillButton {
                     text: "打开设置…";
                     primary: true;
+                    horizontal-stretch: 1;
                     enabled: !root.busy;
                     clicked => { root.open-settings(); }
                 }
                 PillButton {
                     text: "打开数据目录";
+                    horizontal-stretch: 1;
                     enabled: !root.busy;
                     clicked => { root.open-data-dir(); }
                 }

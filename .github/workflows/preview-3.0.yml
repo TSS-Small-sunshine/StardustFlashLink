@@ -17,6 +17,8 @@ jobs:
   # ① 单元测试：三个平台各跑一遍（核心是纯函数 + 本地 API，跨平台必须同绿 ✓）
   test:
     name: 测试（${{ matrix.os }}）
+    # 卡住的 job 别一直占着 runner ✗（曾见过 windows-latest 上单测偶发挂住 ✓）
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +50,8 @@ jobs:
   build:
     name: 构建 ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    # 交叉编译 + 六个目标的打包步骤很长，给一个上限 ✓（正常 15~25 分钟）
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: desktop

@@ -412,18 +412,22 @@ fn apply(ui: &AppWindow, dash: &model::Dashboard) {
     ui.set_config_line(SharedString::from(dash.config_line.as_str()));
     ui.set_service_line(SharedString::from(dash.service_line.as_str()));
     ui.set_background_line(SharedString::from(dash.background_line.as_str()));
-    // 两条统计条（2.x 状态页的「日常 / 诊断」两排）：
+    // 两条统计条（2.x 状态页的「日常 5 格 / 诊断 4 格」）：
     // 内容全部来自上面那些字段 —— 界面层只是换个摆法，不加新判断 ✓（R7）
-    // 每排只摆 3 格：Slint 布局按「内容最小宽度」兜底，格子多了会把整列顶出窗口 ✗（真踩过 ✓）
+    // （上一轮把它们压成 3+3 是为了绕开一个**假**溢出 ✗：那是截屏脚本没声明 DPI 感知、
+    //   只拍到窗口左上角造成的 ✗。布局本身没问题，格数与文案都还原成 2.x 的样子 ✓）
     ui.set_daily_cells(ModelRc::new(VecModel::from(vec![
-        cell("运行方式", &model::shorten(&dash.service_line, 16), &model::shorten(&dash.background_line, 20)),
+        cell("运行方式", &dash.service_line, &dash.background_line),
         cell("当前账号", &dash.account_line, "已脱敏"),
         cell("自动检查", &dash.interval_line, &dash.interval_note),
+        cell("认证网关", &dash.gateway_line, "校园网 Dr.COM"),
+        cell("数据目录", &model::shorten(&dash.data_dir_line, 34), &dash.config_line),
     ])));
     ui.set_diag_cells(ModelRc::new(VecModel::from(vec![
         cell("平台", &dash.os_line, &dash.target_line),
-        cell("认证网关", &dash.gateway_line, "校园网 Dr.COM"),
-        cell("配置", &dash.config_line, &model::shorten(&dash.data_dir_line, 22)),
+        cell("便携版本", &dash.portable_line, "数据放哪由它决定"),
+        cell("版本", &dash.version_line, &dash.channel_line),
+        cell("配置", &dash.config_line, &model::shorten(&dash.data_dir_line, 34)),
     ])));
 }
 
