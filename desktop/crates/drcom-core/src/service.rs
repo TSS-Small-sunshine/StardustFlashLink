@@ -16,7 +16,6 @@
 
 use crate::platform::{self, Os};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Windows 服务名 —— 2.x 沿用，**不可更改** ✗（存量脚本依赖 ✓）。
 pub const WINDOWS_SERVICE_NAME: &str = "DrcomAutoLogin";
@@ -97,27 +96,38 @@ pub fn manager_available() -> bool {
     which(manager_program()).is_some()
 }
 
-/// 找可执行文件：先看**程序目录旁边**，再看 PATH ✓
+/// 找可执行文件：先看**程序目录旁边** ✓，再把 PATH 逐个走一遍 ✓
 /// （2.x 的安装包就是把 `nssm.exe` 跟主程序放一起的 ✓）。
+///
+/// 只查文件系统、**绝不试运行** ✗ —— 早先那版用 `program --help` 探活，
+/// 于是「查个状态」也要启动一次外部程序 ✗：CI 上正好撞到一个不返回的子进程，
+/// 把整个 `cargo test` 拖了 6 小时 ✗（来由写在 [`crate::proc`] 顶上 ✓）。
 pub fn which(program: &str) -> Option<PathBuf> {
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let mut candidates = vec![dir.join(program)];
-            if cfg!(target_os = "windows") {
-                candidates.push(dir.join(format!("{}.exe", program)));
-            }
-            for candidate in candidates {
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
+    let exe = std::env::current_exe().ok();
+    which_within(program, exe.as_deref(), std::env::var_os("PATH").as_deref())
+}
+
+/// 纯函数版（单测用 ✓）：exe 所在目录优先 ✓，然后按 PATH 顺序找 ✓。
+fn which_within(
+    program: &str,
+    exe: Option<&Path>,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    if let Some(dir) = exe.and_then(Path::parent) {
+        if let Some(found) = find_in_dir(dir, program) {
+            return Some(found);
         }
     }
-    // PATH 里能不能跑起来（跑不起来由调用方看错误信息 ✓）
-    if Command::new(program).arg("--help").output().is_ok() {
-        return Some(PathBuf::from(program));
+    std::env::split_paths(path_env?).find_map(|dir| find_in_dir(&dir, program))
+}
+
+/// 一个目录里找可执行文件 ✓（Windows 同时认 `名字` 与 `名字.exe` ✓）。
+fn find_in_dir(dir: &Path, program: &str) -> Option<PathBuf> {
+    let mut candidates = vec![dir.join(program)];
+    if cfg!(target_os = "windows") {
+        candidates.push(dir.join(format!("{}.exe", program)));
     }
-    None
+    candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
 // ---------------- Windows：NSSM ----------------
@@ -308,37 +318,26 @@ pub fn parse_launchctl_list(stdout: &str) -> ServiceState {
 
 // ---------------- 执行层（很薄 ✓） ----------------
 
-/// 跑一条命令并拿 stdout；失败时把 stderr 带回来 ✓。
+/// 跑一条命令并拿 stdout；失败时把 stderr 带回来 ✓（**带硬超时** ✓，见 [`crate::proc`]）。
 fn run(program: &Path, args: &[String]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("执行 {} 失败: {}", program.display(), e))?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+    let got = crate::proc::run(program, args)?;
+    if got.ok() {
+        return Ok(got.stdout);
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     Err(format!(
         "{} {} 没成功：{}",
         program.display(),
         args.first().cloned().unwrap_or_default(),
-        if stderr.is_empty() {
-            format!("退出码 {}", output.status.code().unwrap_or(-1))
-        } else {
-            stderr
-        }
+        got.detail()
     ))
 }
 
 /// 跑一条命令，**成败都拿回文本与退出码** ✓（查状态要用退出码 ✓）。
 fn run_quiet(program: &Path, args: &[String]) -> Result<(String, i32), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("执行 {} 失败: {}", program.display(), e))?;
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    Ok((text, output.status.code().unwrap_or(-1)))
+    let got = crate::proc::run(program, args)?;
+    let mut text = got.stdout;
+    text.push_str(&got.stderr);
+    Ok((text, got.code))
 }
 
 /// 将要做什么（`--dry-run`：**只打印，不动系统** ✓）。
@@ -598,6 +597,49 @@ mod tests {
         let state = status();
         assert!(!state.label_cn().is_empty());
         assert_eq!(state.is_running(), matches!(state, ServiceState::Running));
+    }
+
+    #[test]
+    fn which_finds_the_tool_beside_the_exe_then_on_path() {
+        // 造两个同名「工具」：程序目录旁边那个必须赢 ✓（2.x 安装包就是这么放的 ✓）
+        let root = std::env::temp_dir().join("drcom-which-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let beside = root.join("app");
+        let on_path = root.join("bin");
+        std::fs::create_dir_all(&beside).unwrap();
+        std::fs::create_dir_all(&on_path).unwrap();
+        let tool = if cfg!(target_os = "windows") {
+            "nssm.exe"
+        } else {
+            "nssm"
+        };
+        std::fs::write(beside.join(tool), b"").unwrap();
+        std::fs::write(on_path.join(tool), b"").unwrap();
+        let exe = beside.join(if cfg!(target_os = "windows") {
+            "app.exe"
+        } else {
+            "app"
+        });
+
+        assert_eq!(
+            which_within("nssm", Some(exe.as_path()), None),
+            Some(beside.join(tool)),
+            "程序目录旁边优先 ✓"
+        );
+        // 旁边没有 → 按 PATH 顺序找 ✓
+        assert_eq!(
+            which_within("nssm", None, Some(on_path.as_os_str())),
+            Some(on_path.join(tool)),
+            "PATH 要能兜住 ✓"
+        );
+        // 哪都没有 → None ✓（而且**一个程序都没启动过** ✗ —— 这才是重点 ✓）
+        assert_eq!(
+            which_within("drcom-nope-xyz", Some(exe.as_path()), Some(on_path.as_os_str())),
+            None
+        );
+        assert_eq!(which_within("nssm", Some(exe.as_path()), None), Some(beside.join(tool)));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

@@ -13,7 +13,6 @@
 
 use crate::platform::{self, Os};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// 注册表值名 / systemd 单元名（三处保持一致 ✓）。
 pub const ENTRY_NAME: &str = "StardustFlashLink";
@@ -257,14 +256,10 @@ pub fn disable() -> Result<String, String> {
 /// 现在的状态 ✓（只读 ✓）。
 pub fn status() -> AutostartState {
     match Os::current() {
-        Os::Windows => match Command::new("reg").args(windows_query_args()).output() {
-            Ok(output) => {
-                let text = format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                if output.status.success() && reg_output_has_entry(&text) {
+        Os::Windows => match crate::proc::run(Path::new("reg"), &windows_query_args()) {
+            Ok(got) => {
+                let text = format!("{}{}", got.stdout, got.stderr);
+                if got.ok() && reg_output_has_entry(&text) {
                     AutostartState::Enabled
                 } else {
                     AutostartState::Disabled
@@ -291,18 +286,13 @@ fn remove_file_if_exists() -> Result<(), String> {
 }
 
 fn run(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("执行 {} 失败: {}", program, e))?;
-    if output.status.success() {
+    let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // 带硬超时 ✓（外部工具卡住不许把调用方一起带走 ✗ —— 见 [`crate::proc`] ✓）
+    let got = crate::proc::run(Path::new(program), &owned)?;
+    if got.ok() {
         return Ok(());
     }
-    Err(format!(
-        "{} 返回失败：{}",
-        program,
-        String::from_utf8_lossy(&output.stderr).trim()
-    ))
+    Err(format!("{} 返回失败：{}", program, got.detail()))
 }
 
 fn run_reg(args: &[String]) -> Result<(), String> {

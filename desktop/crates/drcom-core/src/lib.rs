@@ -24,6 +24,7 @@ pub mod password;
 pub mod platform;
 pub mod portal;
 pub mod probe;
+pub mod proc;
 pub mod profiles;
 pub mod protocol;
 pub mod scheduler;

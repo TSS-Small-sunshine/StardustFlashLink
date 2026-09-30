@@ -12,7 +12,7 @@
 //!
 //! 读不到一律返回 `None` / 空列表 —— **守卫那边是 fail-open**，读不到不会误拦 ✓。
 
-use std::process::Command;
+use std::path::Path;
 
 /// 一次探测的快照。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -214,11 +214,13 @@ pub fn parse_plain_ssid_lines(text: &str) -> Vec<String> {
 }
 
 fn run(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
-    if !output.status.success() {
+    let owned: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    // 带超时 ✓（外部工具卡住时安静降级 ✓，绝不跟着卡死 ✗ —— 见 [`crate::proc`] ✓）
+    let got = crate::proc::run(Path::new(program), &owned).ok()?;
+    if !got.ok() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = got.stdout;
     if text.trim().is_empty() {
         None
     } else {
