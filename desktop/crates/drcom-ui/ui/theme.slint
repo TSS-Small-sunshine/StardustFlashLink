@@ -1,88 +1,311 @@
-// 品牌设计令牌 —— 与 2.x HTML UI / 宣传海报同一套（深色星尘 + 玻璃卡片）✓
-// 改颜色只改这里，界面各处自动跟着变。
+// 品牌设计令牌 —— 与 2.x Web UI 的「星尘风」（BakaXL 风）同一套 ✓
+//
+// 2.x 的 Web UI 是三态（星尘 / 亮色 / 暗色）；3.0 只做两态：
+//   · dark = false → 星尘风（默认 ✓）：浅紫极光底 + 更白更厚的卡片 + 星尘紫强调；
+//   · dark = true  → 深色档：与 2.x 的暗色主题同源 ✓。
+// 分层靠「留白 + 阴影」而不是描边（这是 2.x baka 的取舍 ✓），圆角也整体再大一档 ✓。
+// 改颜色只改这里，界面各处自动跟着变 ✓。
 export global Theme {
-    // 底色（深空）
-    out property <color> bg-deep: #070b18;
-    out property <color> bg-mid: #0d1730;
-    out property <color> bg-high: #16233f;
-    // 极光渐变（主视觉）
-    out property <color> aurora-start: #2AA8FF;
-    out property <color> aurora-end: #3DDC97;
-    // 品牌蓝
-    out property <color> accent: #0071e3;
-    out property <color> accent-light: #0a84ff;
-    // 文本
-    out property <color> text-primary: #eaf1ff;
-    out property <color> text-muted: #93a4c4;
-    out property <color> text-dim: #6b7c9c;
-    // 卡片（玻璃）—— 用 rgba() 而不是 #rrggbb.with-alpha()：
-    // 后者会被词法分析当成十六进制字面量的一部分 ✗（官方给的是 rgba()/with-alpha() 两种，前者最稳 ✓）
-    out property <color> card-bg: rgba(255, 255, 255, 0.06);
-    out property <color> card-stroke: rgba(255, 255, 255, 0.12);
-    out property <color> card-bg-hover: rgba(255, 255, 255, 0.10);
-    // 语义色
-    out property <color> ok: #3DDC97;
-    out property <color> warn: #ffb020;
-    out property <color> danger: #ff5d5d;
-    // 尺寸
-    out property <length> radius: 18px;
-    out property <length> radius-sm: 12px;
-    out property <length> pad: 20px;
+    /// 主题两态。2.x 的「亮色」与「星尘风」本来就高度接近，预览版先不做第三态 ✓
+    in-out property <bool> dark: false;
+
+    // —— 画布 / 背景（星尘风 = 2.x baka 的整窗极光：四团很淡的色晕 + 浅紫底）——
+    out property <color> bg: dark ? #070b18 : #f3f5ff;
+    out property <color> bg-base-1: dark ? #070b18 : #e6ecff;
+    out property <color> bg-base-2: dark ? #16233f : #e6f8ff;
+    out property <color> aurora-a: dark ? #10305c : #8fb2ff;
+    out property <color> aurora-b: dark ? #3a1f4d : #ffb3dc;
+    out property <color> aurora-c: dark ? #12414a : #93e8ff;
+    out property <color> aurora-d: dark ? #271f4d : #c9b2ff;
+
+    // —— 卡片材质：星尘风「更白更厚」（浅紫底上白卡太透会让正文发灰、读数吃力 ✗）——
+    out property <color> card: dark ? rgba(255, 255, 255, 0.06) : rgba(255, 255, 255, 0.90);
+    out property <color> card-soft: dark ? rgba(255, 255, 255, 0.04) : rgba(255, 255, 255, 0.62);
+    out property <color> card-hover: dark ? rgba(255, 255, 255, 0.10) : #ffffff;
+    out property <color> hairline: dark ? rgba(255, 255, 255, 0.12) : rgba(60, 70, 120, 0.10);
+    out property <color> hairline-2: dark ? rgba(255, 255, 255, 0.18) : rgba(60, 70, 120, 0.18);
+    out property <color> fill: dark ? rgba(255, 255, 255, 0.06) : rgba(120, 120, 150, 0.10);
+
+    // —— 阴影令牌（Slint 侧用 drop-shadow-* 表达 2.x 的 --shadow-1 / --shadow-2 ✓）——
+    out property <length> shadow-blur: dark ? 16px : 26px;
+    out property <length> shadow-dy: dark ? 6px : 10px;
+    out property <color> shadow-color: dark ? rgba(0, 0, 0, 0.45) : rgba(50, 60, 110, 0.20);
+
+    // —— 文本（星尘风的次要文字整体加深一档：浅紫极光上原来偏虚、副标题糊 ✗）——
+    out property <color> text: dark ? #eaf1ff : #1b1d2b;
+    out property <color> text-strong: dark ? #ffffff : #0d0f1a;
+    out property <color> text-2: dark ? #93a4c4 : #4d5168;
+    out property <color> text-3: dark ? #6b7c9c : #686c83;
+
+    // —— 强调色：星尘紫（深色档沿用品牌蓝，与 2.x 的暗色主题一致 ✓）——
+    out property <color> accent: dark ? #0a84ff : #6b5cff;
+    out property <color> accent-hover: dark ? #2a95ff : #7d70ff;
+    out property <color> accent-soft: dark ? rgba(10, 132, 255, 0.18) : rgba(107, 92, 255, 0.14);
+    out property <color> on-accent: #ffffff;
+
+    // —— 语义色（星尘风用深一档的 ok / warn / err，白底上才读得清 ✓）——
+    out property <color> ok: dark ? #3DDC97 : #1a7f45;
+    out property <color> warn: dark ? #ffb020 : #9a5b00;
+    out property <color> danger: dark ? #ff5d5d : #cc2b3d;
+    out property <color> ok-soft: rgba(48, 209, 88, 0.18);
+    out property <color> warn-soft: rgba(255, 159, 10, 0.20);
+    out property <color> danger-soft: rgba(255, 69, 58, 0.14);
+
+    // —— 终端窗口（2.x 日志页那套：深底浅字 —— 两态都不变 ✓）——
+    out property <color> terminal: #171a2b;
+    out property <color> terminal-text: #e6e7f2;
+    out property <color> terminal-dim: #8b8fa8;
+
+    // —— 形状：圆角整体大一档；内距 / 间距收口成三档（2.x 的令牌 ✓）——
+    out property <length> r-xl: 30px;
+    out property <length> r-lg: 22px;
+    out property <length> r-md: 16px;
+    out property <length> r-sm: 12px;
+    out property <length> r-xs: 10px;
+    out property <length> pad: 22px;
+    out property <length> pad-sm: 14px;
     out property <length> gap: 16px;
     out property <length> gap-sm: 10px;
+
+    // —— 旧令牌名（设置窗口与既有组件在用 ✓ 一律保留，指向新令牌）——
+    out property <color> bg-deep: dark ? #070b18 : #e6ecff;
+    out property <color> bg-mid: dark ? #0d1730 : #f6ecff;
+    out property <color> bg-high: dark ? #16233f : #e6f8ff;
+    out property <color> aurora-start: dark ? #2AA8FF : #6b5cff;
+    out property <color> aurora-end: dark ? #3DDC97 : #93a2ff;
+    out property <color> accent-light: accent-hover;
+    out property <color> text-primary: text;
+    out property <color> text-muted: text-2;
+    out property <color> text-dim: text-3;
+    out property <color> card-bg: card;
+    out property <color> card-stroke: dark ? hairline-2 : rgba(60, 70, 120, 0.14);
+    out property <color> card-bg-hover: card-hover;
+    out property <color> secondary: fill;
+    out property <length> radius: r-md;
+    out property <length> radius-sm: r-sm;
 }
 
-// 一行「标签 : 值」的统计卡
-export component StatCard inherits Rectangle {
-    in property <string> label: "";
-    in property <string> value: "";
-    in property <string> note: "";
-    in property <color> accent-color: Theme.accent-light;
+// 卡片容器 —— 2.x 的「更白更厚 + 大圆角 + 只靠阴影分层」（不带描边 ✓）
+export component Card inherits Rectangle {
+    in property <length> content-padding: Theme.pad;
+    in property <bool> soft: false;   // soft = 次级卡（半透明白，用来衬托终端窗口之类 ✓）
 
-    height: 84px;
-    border-radius: Theme.radius-sm;
-    background: Theme.card-bg;
-    border-width: 1px;
-    border-color: Theme.card-stroke;
+    background: soft ? Theme.card-soft : Theme.card;
+    border-radius: Theme.r-lg;
+    drop-shadow-color: Theme.shadow-color;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-dy;
+
+    VerticalLayout {
+        padding: root.content-padding;
+        spacing: Theme.gap-sm;
+        alignment: start;
+        @children
+    }
+}
+
+// 卡内标题（2.x 的卡片标题比正文大一档、字重 700 ✓）
+export component SectionTitle inherits Rectangle {
+    in property <string> text: "";
+    in property <string> note: "";
+    height: root.note == "" ? 24px : 42px;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 2px;
+        alignment: start;
+        Text {
+            text: root.text;
+            font-size: 16px;
+            font-weight: 700;
+            color: Theme.text-strong;
+        }
+        Text {
+            visible: root.note != "";
+            text: root.note;
+            font-size: 12px;
+            color: Theme.text-3;
+            overflow: elide;
+        }
+    }
+}
+
+// 胶囊徽标（状态 / 通道 / 专属密码这类小标记 ✓）
+export component Chip inherits Rectangle {
+    in property <string> text: "";
+    in property <string> kind: "muted";   // ok / warn / danger / accent / muted
+    out property <color> tone: kind == "ok" ? Theme.ok
+        : kind == "warn" ? Theme.warn
+        : kind == "danger" ? Theme.danger
+        : kind == "accent" ? Theme.accent
+        : Theme.text-2;
+    out property <color> tone-fill: kind == "ok" ? Theme.ok-soft
+        : kind == "warn" ? Theme.warn-soft
+        : kind == "danger" ? Theme.danger-soft
+        : kind == "accent" ? Theme.accent-soft
+        : Theme.fill;
+
+    height: 26px;
+    background: root.tone-fill;
+    border-radius: 13px;
 
     HorizontalLayout {
-        padding: Theme.gap-sm;
-
-        // 左侧色条（视觉锚点 ✓）
-        Rectangle {
-            width: 4px;
-            border-radius: 2px;
-            background: accent-color;
+        padding-left: 10px;
+        padding-right: 10px;
+        Text {
+            text: root.text;
+            font-size: 12px;
+            font-weight: 600;
+            color: root.tone;
+            horizontal-alignment: center;
+            vertical-alignment: center;
         }
+    }
+}
 
-        VerticalLayout {
-            padding-left: Theme.gap-sm;
-            spacing: 4px;
-            alignment: start;
+// 统计条里的一格（标签 / 数值 / 脚注 ✓）
+export struct StatCell {
+    label: string,
+    value: string,
+    note: string,
+    kind: string,   // "" 普通 / "ok" 浅绿底 / "warn" 浅橙底（2.x 出错那格的画法 ✓）
+}
 
-            Text {
-                text: root.label;
-                color: Theme.text-muted;
-                font-size: 12px;
+// 统计条 —— 一格一列、格间竖线：2.x 状态页的「日常 5 格 / 诊断 4 格」就是这条 ✓
+export component StatStrip inherits Rectangle {
+    in property <[StatCell]> cells: [];
+
+    height: 78px;
+    // 统计条必须能缩：格内文字的最小宽度会把整条撑到 1700px 上下，
+    // 接着把整列（含按钮）全顶出窗口 ✗（真踩过 ✓）
+    min-width: 0px;
+    preferred-width: 0px;
+    background: Theme.card;
+    border-radius: Theme.r-md;
+    drop-shadow-color: Theme.shadow-color;
+    drop-shadow-blur: Theme.shadow-blur;
+    drop-shadow-offset-y: Theme.shadow-dy;
+
+    // 一格一列、格间竖线：格子可缩、文字 elide ✓
+    // （别用「宽度 = root.width / 格数」的绝对定位版：root.width 依赖父宽、父宽又依赖内容 ✗
+    //   循环引用解出来的宽度比窗口还大，整列都会被撑爆 ✓真踩过）
+    HorizontalLayout {
+        padding: 5px;
+        for cell[i] in root.cells : HorizontalLayout {
+            if i > 0 : Rectangle {
+                width: 1px;
+                background: Theme.hairline;
             }
-            Text {
-                text: root.value;
-                color: Theme.text-primary;
-                font-size: 17px;
-                font-weight: 600;
-                overflow: elide;
-            }
-            Text {
-                text: root.note;
-                color: Theme.text-dim;
-                font-size: 11px;
-                overflow: elide;
+            Rectangle {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                border-radius: Theme.r-xs;
+                background: cell.kind == "warn" ? Theme.warn-soft
+                    : cell.kind == "ok" ? Theme.ok-soft
+                    : transparent;
+
+                VerticalLayout {
+                    padding: 10px;
+                    spacing: 2px;
+                    alignment: start;
+                    Text {
+                        text: cell.label;
+                        font-size: 11px;
+                        color: Theme.text-3;
+                        min-width: 0px;
+                    }
+                    Text {
+                        text: cell.value;
+                        font-size: 16px;
+                        font-weight: 600;
+                        wrap: no-wrap;
+                        overflow: elide;
+                        min-width: 0px;
+                        color: cell.kind == "warn" ? Theme.danger : Theme.text;
+                    }
+                    Text {
+                        visible: cell.note != "";
+                        text: cell.note;
+                        font-size: 10px;
+                        color: Theme.text-3;
+                        overflow: elide;
+                        min-width: 0px;
+                    }
+                }
             }
         }
     }
 }
 
-// 自绘胶囊按钮（比 std-widgets 更贴品牌，也更小 ✓）
+// 终端窗口标题栏上的一颗小灯 ✓
+export component Dot inherits Rectangle {
+    in property <color> tone: #ffffff;
+
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: root.tone;
+}
+
+// 终端窗口 —— 2.x 日志页那套：三个圆点 + 徽标 + 深底正文（两态都不变 ✓）
+export component TerminalCard inherits Rectangle {
+    in property <string> badge: "";
+    in property <string> kind: "info";   // ok / warn / danger / info（决定徽标颜色 ✓）
+    in property <string> body: "";
+    out property <color> badge-tone: kind == "ok" ? Theme.ok
+        : kind == "warn" ? Theme.warn
+        : kind == "danger" ? Theme.danger
+        : Theme.terminal-dim;
+
+    background: Theme.terminal;
+    border-radius: Theme.r-md;
+    min-width: 0px;
+    preferred-width: 0px;
+    min-height: 150px;
+
+    VerticalLayout {
+        spacing: 0;
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            spacing: 6px;
+            Dot { tone: #ff5f57; }
+            Dot { tone: #febc2e; }
+            Dot { tone: #28c840; }
+            Text {
+                text: root.badge;
+                font-size: 11px;
+                font-weight: 600;
+                color: root.badge-tone;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: rgba(255, 255, 255, 0.08);
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 12px;
+                alignment: start;
+                Text {
+                    text: root.body;
+                    font-size: 12px;
+                    color: Theme.terminal-text;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}
+
+// 自绘按钮（比 std-widgets 更贴品牌，也更小 ✓）
+// 2.x 的语言：主按钮 = 实心星尘紫 + 一点阴影；次要按钮 = 白底 + 细边（不带阴影 ✓）
 export component PillButton inherits Rectangle {
     in property <string> text: "";
     in property <bool> primary: false;
@@ -91,19 +314,22 @@ export component PillButton inherits Rectangle {
 
     height: 38px;
     min-width: 118px;
-    border-radius: 19px;
+    border-radius: Theme.r-sm;
     background: !enabled
-        ? Theme.card-bg
+        ? Theme.card-soft
         : (primary
-            ? (touch.has-hover ? Theme.accent-light : Theme.accent)
-            : (touch.has-hover ? Theme.card-bg-hover : Theme.card-bg));
-    border-width: 1px;
-    border-color: primary ? transparent : Theme.card-stroke;
+            ? (touch.has-hover ? Theme.accent-hover : Theme.accent)
+            : (touch.has-hover ? Theme.card-hover : Theme.card));
+    border-width: primary ? 0px : 1px;
+    border-color: Theme.card-stroke;
+    drop-shadow-color: primary ? Theme.shadow-color : transparent;
+    drop-shadow-blur: primary ? Theme.shadow-blur : 0px;
+    drop-shadow-offset-y: primary ? Theme.shadow-dy : 0px;
     opacity: enabled ? 1.0 : 0.5;
 
     Text {
         text: root.text;
-        color: root.primary ? #ffffff : Theme.text-primary;
+        color: root.primary ? Theme.on-accent : Theme.text;
         font-size: 14px;
         font-weight: 600;
         horizontal-alignment: center;
@@ -128,32 +354,32 @@ export component LogLine inherits Text {
     wrap: word-wrap;
 }
 
-// 表单行：左边标签，右边一个输入框（玻璃底 ✓）
+// 表单行：左边标签，右边一个输入框（2.x 的材质：白底 + 细边 + 圆角大一档 ✓）
 export component FormRow inherits Rectangle {
     in property <string> label: "";
     in property <string> hint: "";
     in-out property <string> value: "";
     in property <bool> secret: false;   // 密码框：用 password 类型输入 ✓
 
-    height: hint == "" ? 48px : 64px;
+    height: hint == "" ? 50px : 66px;
     background: transparent;
 
     VerticalLayout {
-        spacing: 2px;
+        spacing: 3px;
         HorizontalLayout {
             spacing: Theme.gap-sm;
             Text {
                 text: root.label;
                 width: 132px;
                 font-size: 13px;
-                color: Theme.text-muted;
+                color: Theme.text-2;
                 vertical-alignment: center;
             }
             Rectangle {
                 horizontal-stretch: 1;
-                height: 34px;
-                border-radius: 10px;
-                background: Theme.card-bg;
+                height: 36px;
+                border-radius: Theme.r-sm;
+                background: Theme.card;
                 border-width: 1px;
                 border-color: Theme.card-stroke;
 
@@ -166,7 +392,7 @@ export component FormRow inherits Rectangle {
                         single-line: true;
                         input-type: root.secret ? password : text;
                         font-size: 14px;
-                        color: Theme.text-primary;
+                        color: Theme.text;
                         vertical-alignment: center;
                         edited => { root.value = self.text; }
                     }
@@ -179,7 +405,7 @@ export component FormRow inherits Rectangle {
             Text {
                 text: root.hint;
                 font-size: 11px;
-                color: Theme.text-dim;
+                color: Theme.text-3;
                 wrap: word-wrap;
             }
         }

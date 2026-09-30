@@ -1,12 +1,23 @@
-import { Theme, StatCard, PillButton } from "theme.slint";
+import { Theme, Card, SectionTitle, Chip, StatStrip, StatCell, TerminalCard, PillButton } from "theme.slint";
 // 设置窗口在另一个文件里；这里**转出**它，`slint::include_modules!()` 才能一起生成 ✓
 export { SettingsWindow } from "settings.slint";
+// 主题令牌也要转出：Rust 侧要 `ui.global::<Theme>()` 切星尘风 / 深色 ✓
+// （只 import 不 export 的话，生成出来的 Rust 模块里根本没有这个类型 ✗ —— 真踩过 ✓）
+export { Theme } from "theme.slint";
 
+// 主窗口 —— 版式照 2.x Web UI 的「状态」页搬 ✓：
+//   顶栏（品牌 + 版本徽标 + 通道徽标 + 主题切换）
+//   状态与主操作**同一张卡** → 日常统计条 → 诊断统计条 → 账户与登录密码卡 → 终端式结果窗
+// 2.x 的状态页是两栏（右栏是凭据卡）；3.0 预览版先做**单栏**：
+//   Slint 里布局子元素的 width/height 会被忽略、改成按「内容最小宽度」重排 ✗，
+//   而统计条的格子宽度又要依赖父宽 → 两栏会形成循环引用、右栏被推到窗外 ✗（折腾过一轮 ✓）。
+//   等信息架构稳下来再按 2.x 分栏 ✓。
+// 界面只做展示：数据由 Rust 从 drcom-core 拼好塞进来 ✓
 export component AppWindow inherits Window {
     title: "星尘闪连 3.0（预览版）";
-    width: 900px;
-    height: 640px;
-    background: @linear-gradient(160deg, Theme.bg-deep 0%, Theme.bg-mid 55%, Theme.bg-high 100%);
+    width: 1440px;
+    height: 900px;
+    background: Theme.bg;
 
     // —— 以下属性全部由 Rust 从核心填充（界面本身不读文件、不碰网络 ✓）——
     in property <string> version-line: "…";
@@ -28,185 +39,207 @@ export component AppWindow inherits Window {
     in property <string> result-kind: "info";
     in property <bool>   busy: false;
 
+    // —— 统计条与终端窗的内容（Rust 按上面那些字段拼好；界面只负责画 ✓）——
+    in property <[StatCell]> daily-cells: [];
+    in property <[StatCell]> diag-cells: [];
+    in property <string> result-badge: "结果";
+
     callback do-check();
     callback do-selfcheck();
     callback open-data-dir();
     callback open-settings();
     callback refresh();
+    callback toggle-theme();
+
+    // —— 整窗极光底（2.x baka 的「大图」：浅紫底 + 四团很淡的色晕）——
+    // Slint 没有 CSS 那套 blur 滤镜：这里用「大面积 + 透明渐变」近似，观感一致 ✓
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: @linear-gradient(168deg, Theme.bg-base-1 0%, Theme.bg 44%, Theme.bg-base-2 100%);
+    }
+    Rectangle {
+        x: -260px; y: -280px; width: 1000px; height: 820px;
+        background: @radial-gradient(circle, Theme.aurora-a 0%, transparent 62%);
+    }
+    Rectangle {
+        x: parent.width - 720px; y: -220px; width: 940px; height: 700px;
+        background: @radial-gradient(circle, Theme.aurora-b 0%, transparent 60%);
+    }
+    Rectangle {
+        x: parent.width - 900px; y: parent.height - 560px; width: 1020px; height: 640px;
+        background: @radial-gradient(circle, Theme.aurora-c 0%, transparent 64%);
+    }
+    Rectangle {
+        x: -300px; y: parent.height - 580px; width: 900px; height: 640px;
+        background: @radial-gradient(circle, Theme.aurora-d 0%, transparent 62%);
+    }
+    // 顶部白色渐隐（星尘风专属：让首屏文字更清楚，2.x 也压了这么一层 ✓）
+    Rectangle {
+        visible: !Theme.dark;
+        width: parent.width;
+        height: 300px;
+        background: @linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0) 100%);
+    }
 
     VerticalLayout {
-        padding: 26px;
+        padding: 24px;
         spacing: Theme.gap;
 
-        // ── 顶部：产品名 + 版本 + 通道徽章 ──
+        // ── 顶栏：品牌 + 版本徽标 + 通道徽标 + 主题切换（2.x 顶栏就这一行 ✓）──
         HorizontalLayout {
             spacing: Theme.gap-sm;
             Text {
                 text: "星尘闪连";
-                font-size: 26px;
+                font-size: 24px;
                 font-weight: 700;
-                color: Theme.text-primary;
-                vertical-alignment: center;
+                color: Theme.text-strong;
+            }
+            Chip {
+                text: root.version-line;
+                kind: "accent";
             }
             Text {
-                text: root.version-line;
-                font-size: 15px;
-                color: Theme.text-muted;
+                text: "Dr.COM 校园网自动登录";
+                font-size: 12px;
+                color: Theme.text-3;
                 vertical-alignment: center;
             }
             Rectangle { horizontal-stretch: 1; }
-            Rectangle {
-                height: 28px;
-                border-radius: 14px;
-                background: root.is-prerelease
-                    ? rgba(255, 176, 32, 0.16)
-                    : rgba(61, 220, 151, 0.16);
-                border-width: 1px;
-                border-color: root.is-prerelease
-                    ? rgba(255, 176, 32, 0.45)
-                    : rgba(61, 220, 151, 0.45);
+            Chip {
+                text: root.channel-line;
+                kind: root.is-prerelease ? "warn" : "ok";
+            }
+            PillButton {
+                text: Theme.dark ? "星尘风" : "深色";
+                clicked => { root.toggle-theme(); }
+            }
+        }
 
-                HorizontalLayout {
-                    padding-left: 11px;
-                    padding-right: 11px;
+        // ── 状态与主操作合卡（2.x：「当前状态」与「立即登录」就是同一张卡 ✓）──
+        Card {
+            HorizontalLayout {
+                spacing: Theme.gap;
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: start;
                     Text {
-                        text: root.channel-line;
+                        text: "当前状态";
                         font-size: 12px;
-                        font-weight: 600;
-                        color: root.is-prerelease ? Theme.warn : Theme.ok;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
+                        color: Theme.text-3;
+                    }
+                    Text {
+                        text: root.service-line;
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: Theme.text-strong;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: root.background-line;
+                        font-size: 12px;
+                        color: Theme.text-2;
+                        wrap: word-wrap;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    PillButton {
+                        text: root.busy ? "检查中…" : "立即检查";
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => { root.do-check(); }
+                    }
+                    PillButton {
+                        text: "运行自检";
+                        enabled: !root.busy;
+                        clicked => { root.do-selfcheck(); }
+                    }
+                    PillButton {
+                        text: "刷新状态";
+                        enabled: !root.busy;
+                        clicked => { root.refresh(); }
                     }
                 }
             }
         }
 
-        // ── 极光渐变细条（品牌主视觉）──
-        Rectangle {
-            height: 3px;
-            border-radius: 2px;
-            background: @linear-gradient(90deg, Theme.aurora-start 0%, Theme.aurora-end 100%);
+        // ── 日常 5 格（2.x 状态页那条统计条；出错那格浅橙底 ✓）──
+        StatStrip { cells: root.daily-cells; }
+        // ── 诊断 4 格 ──
+        StatStrip { cells: root.diag-cells; }
+
+        // ── 账户与登录密码（2.x 的右栏凭据卡；单栏版让它横过来 ✓）──
+        Card {
+            content-padding: 18px;
+            HorizontalLayout {
+                spacing: Theme.gap;
+                VerticalLayout {
+                    width: 260px;
+                    spacing: 3px;
+                    alignment: start;
+                    Text {
+                        text: "账户与登录密码";
+                        font-size: 15px;
+                        font-weight: 700;
+                        color: Theme.text-strong;
+                    }
+                    Text {
+                        text: root.account-line;
+                        font-size: 17px;
+                        font-weight: 600;
+                        color: Theme.text;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 3px;
+                    alignment: start;
+                    Text {
+                        text: "认证网关";
+                        font-size: 12px;
+                        color: Theme.text-3;
+                    }
+                    Text {
+                        text: root.gateway-line;
+                        font-size: 12px;
+                        color: Theme.text-2;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: "密码只在「设置」里改：界面永不回显、诊断包不含它 ✓";
+                        font-size: 11px;
+                        color: Theme.text-3;
+                        overflow: elide;
+                    }
+                }
+                PillButton {
+                    text: "打开设置…";
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { root.open-settings(); }
+                }
+                PillButton {
+                    text: "打开数据目录";
+                    enabled: !root.busy;
+                    clicked => { root.open-data-dir(); }
+                }
+            }
         }
 
-        // ── 状态卡：两行三列 ──
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            StatCard {
-                horizontal-stretch: 1;
-                label: "网关";
-                value: root.gateway-line;
-                note: "Dr.COM 认证地址";
-                accent-color: Theme.accent-light;
-            }
-            StatCard {
-                horizontal-stretch: 1;
-                label: "账号";
-                value: root.account-line;
-                note: "已脱敏显示";
-                accent-color: Theme.aurora-end;
-            }
-            StatCard {
-                horizontal-stretch: 1;
-                label: "自动检查";
-                value: root.interval-line;
-                note: root.interval-note;
-                accent-color: Theme.aurora-start;
-            }
-        }
-
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            StatCard {
-                horizontal-stretch: 1;
-                label: "平台";
-                value: root.os-line;
-                note: root.target-line;
-                accent-color: Theme.accent;
-            }
-            StatCard {
-                horizontal-stretch: 1;
-                label: "运行方式";
-                value: root.service-line;
-                note: root.background-line;
-                accent-color: Theme.text-muted;
-            }
-            StatCard {
-                horizontal-stretch: 1;
-                label: "配置";
-                value: root.config-line;
-                note: root.data-dir-line;
-                accent-color: Theme.accent-light;
-            }
-        }
-
-        // ── 操作区 ──
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            PillButton {
-                text: root.busy ? "检查中…" : "立即检查";
-                primary: true;
-                enabled: !root.busy;
-                clicked => { root.do-check(); }
-            }
-            PillButton {
-                text: "运行自检";
-                enabled: !root.busy;
-                clicked => { root.do-selfcheck(); }
-            }
-            PillButton {
-                text: "打开数据目录";
-                enabled: !root.busy;
-                clicked => { root.open-data-dir(); }
-            }
-            PillButton {
-                text: "刷新状态";
-                enabled: !root.busy;
-                clicked => { root.refresh(); }
-            }
-            PillButton {
-                text: "设置…";
-                enabled: !root.busy;
-                clicked => { root.open-settings(); }
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        // ── 结果区（玻璃卡片；文字自动换行，长输出也能看 ✓）──
-        Rectangle {
+        // ── 结果 → 2.x 的终端窗口（三个圆点 + 徽标 + 深底正文 ✓）──
+        TerminalCard {
             vertical-stretch: 1;
-            border-radius: Theme.radius;
-            background: Theme.card-bg;
-            border-width: 1px;
-            border-color: Theme.card-stroke;
-
-            VerticalLayout {
-                padding: Theme.gap-sm;
-                spacing: 6px;
-                alignment: start;
-
-                Text {
-                    text: "结果";
-                    font-size: 12px;
-                    color: Theme.text-dim;
-                }
-                Text {
-                    vertical-stretch: 1;
-                    text: root.result-text;
-                    wrap: word-wrap;
-                    font-size: 13px;
-                    color: root.result-kind == "ok" ? Theme.ok
-                        : root.result-kind == "danger" ? Theme.danger
-                        : root.result-kind == "warn" ? Theme.warn
-                        : Theme.text-primary;
-                }
-            }
+            badge: root.result-badge;
+            kind: root.result-kind;
+            body: root.result-text;
         }
 
         // ── 页脚 ──
         Text {
             text: "3.0 预览版（Altair 开发线）· 仅供尝鲜；稳定版请用 2.1.x（Vega）";
             font-size: 11px;
-            color: Theme.text-dim;
+            color: Theme.text-3;
         }
     }
 }

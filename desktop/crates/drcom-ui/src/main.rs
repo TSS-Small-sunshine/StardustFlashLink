@@ -98,6 +98,16 @@ fn main() -> Result<(), slint::PlatformError> {
         open_settings(&holder, parent.as_weak());
     });
 
+    // 主题两态：星尘风 ⇄ 深色（2.x 顶栏那个主题按钮，做成原生版 ✓）
+    // 只切界面令牌，不落盘 —— 主题是纯外观，配置格式必须与 2.x 保持一致（R3 ✓）
+    let weak = ui.as_weak();
+    ui.on_toggle_theme(move || {
+        if let Some(ui) = weak.upgrade() {
+            let theme = ui.global::<Theme>();
+            theme.set_dark(!theme.get_dark());
+        }
+    });
+
     // 第二个实例敲门 → 把窗口抬到前面 ✓（非阻塞轮询，不占线程池 ✗）
     let mut instance_timer: Option<slint::Timer> = None;
     if let Some(guard) = instance_guard {
@@ -402,10 +412,44 @@ fn apply(ui: &AppWindow, dash: &model::Dashboard) {
     ui.set_config_line(SharedString::from(dash.config_line.as_str()));
     ui.set_service_line(SharedString::from(dash.service_line.as_str()));
     ui.set_background_line(SharedString::from(dash.background_line.as_str()));
+    // 两条统计条（2.x 状态页的「日常 / 诊断」两排）：
+    // 内容全部来自上面那些字段 —— 界面层只是换个摆法，不加新判断 ✓（R7）
+    // 每排只摆 3 格：Slint 布局按「内容最小宽度」兜底，格子多了会把整列顶出窗口 ✗（真踩过 ✓）
+    ui.set_daily_cells(ModelRc::new(VecModel::from(vec![
+        cell("运行方式", &model::shorten(&dash.service_line, 16), &model::shorten(&dash.background_line, 20)),
+        cell("当前账号", &dash.account_line, "已脱敏"),
+        cell("自动检查", &dash.interval_line, &dash.interval_note),
+    ])));
+    ui.set_diag_cells(ModelRc::new(VecModel::from(vec![
+        cell("平台", &dash.os_line, &dash.target_line),
+        cell("认证网关", &dash.gateway_line, "校园网 Dr.COM"),
+        cell("配置", &dash.config_line, &model::shorten(&dash.data_dir_line, 22)),
+    ])));
 }
 
-/// 更新结果区（颜色 + 文本一起给，省得界面自己判断 ✓）。
+/// 统计条的一格 ✓（kind 留空 = 普通格；后面要标红某格时就给 "warn"/"ok" ✓）
+fn cell(label: &str, value: &str, note: &str) -> StatCell {
+    StatCell {
+        label: SharedString::from(label),
+        value: SharedString::from(value),
+        note: SharedString::from(note),
+        kind: SharedString::from(""),
+    }
+}
+
+/// 更新结果区（颜色 + 文本 + 终端窗徽标一起给，省得界面自己判断 ✓）。
 fn set_result(ui: &AppWindow, kind: &str, text: &str) {
     ui.set_result_kind(SharedString::from(kind));
     ui.set_result_text(SharedString::from(text));
+    ui.set_result_badge(SharedString::from(badge_for(kind)));
+}
+
+/// 结果类型 → 终端窗右上角那枚徽标 ✓
+fn badge_for(kind: &str) -> &'static str {
+    match kind {
+        "ok" => "成功",
+        "warn" => "警告",
+        "danger" => "错误",
+        _ => "结果",
+    }
 }
