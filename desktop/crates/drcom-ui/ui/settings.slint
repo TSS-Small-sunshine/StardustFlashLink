@@ -1,4 +1,4 @@
-import { Theme, PillButton, FormRow, ToggleSwitch } from "theme.slint";
+import { Theme, Card, SectionTitle, Chip, PillButton, ToggleSwitch, InputField, FoldSection } from "theme.slint";
 
 /// 方案列表里的一行 ✓
 export struct ProfileRow {
@@ -7,11 +7,22 @@ export struct ProfileRow {
     active: bool,
 }
 
+// 设置窗口 —— 版式照 2.x Web UI 的**配置页**搬 ✓（v2.1.2.0 那轮的收敛结果）：
+//   · **两栏卡片**：左栏「账户与登录 / 配置方案」，右栏「检查节奏 / 运行方式 / 升级 / 网络位置守卫」
+//     （2.x 原话：改成两栏后「纵向长度砍掉近一半，不用再一路滚到底」✓）
+//   · 卡片 = 标题 + 一句说明（2.x 的 section-head ✓）；字段「标签在上、提示在下」（2.x 的 .field ✓），
+//     并且支持一行并两列（网关 + 端口 / 账号 + 后缀 —— 2.x 的「两列表单」✓）
+//   · 进阶项**折叠**收起 ✓（2.x 的 <details class="fold">：「展开会顶掉半屏」✗）
+//   · 底部整宽**保存条**：左边状态、右边按钮 ✓（2.x 的 save-bar ✓）
+//
+// 界面只做展示：值由 Rust 填进来、点「保存」时读回去 ✓（密码永不回显 ✓）。
+// 正文用 Flickable 而不是 ScrollView ✗（后者属于 std-widgets，我们只开了核心 ✓）——
+// 卡片高度都是常量 ⇒ 内容高度可以直接算出来 ✓（与方案列表同一套做法 ✓）。
 export component SettingsWindow inherits Window {
     title: "星尘闪连 · 设置";
-    width: 700px;
-    height: 920px;
-    background: @linear-gradient(160deg, Theme.bg-deep 0%, Theme.bg-mid 55%, Theme.bg-high 100%);
+    width: 1040px;
+    height: 820px;
+    background: Theme.bg;
 
     // —— 表单字段（双向绑定 ✓，由 Rust 填充初值 ✓）——
     in-out property <string> host: "";
@@ -46,6 +57,10 @@ export component SettingsWindow inherits Window {
     in property <string> service-hint: "";
     in property <bool> service-installed: false;
 
+    // —— 两个折叠区的开合（纯界面状态 ✓，Rust 不用管 ✓）——
+    in-out property <bool> profile-new-open: false;
+    in-out property <bool> guard-open: false;
+
     callback save();
     callback test-connection();
     callback open-data-dir();
@@ -57,309 +72,429 @@ export component SettingsWindow inherits Window {
     callback profile-toggle-auto();
     callback service-toggle();
 
-    VerticalLayout {
-        padding: 24px;
-        spacing: 8px;
+    // —— 正文两栏的高度（卡片写死了高度 ⇒ 加一加就是内容高度 ✓；再留 16px 余量 ✗）——
+    // 左边：账户卡 288 + 间距 14 + 方案卡（收起 240 / 展开 420 ✓）
+    property <length> left-h: 288px + 14px + (root.profile-new-open ? 420px : 240px);
+    // 右边：检查节奏 197 + 运行方式 202 + 升级 134 + 守卫（收起 40 / 展开 290 ✓）
+    property <length> right-h: 197px + 14px + 202px + 14px + 134px + 14px + (root.guard-open ? 290px : 40px);
+    property <length> body-h: Math.max(root.left-h, root.right-h) + 16px;
 
-        Text {
-            text: "设置";
-            font-size: 22px;
-            font-weight: 700;
-            color: Theme.text-primary;
+    // —— 整窗极光底：与主窗口同一套（星尘风 = 浅紫底 + 四团很淡的色晕 ✓）——
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: @linear-gradient(168deg, Theme.bg-base-1 0%, Theme.bg 44%, Theme.bg-base-2 100%);
+    }
+    Rectangle {
+        x: -260px; y: -280px; width: 1000px; height: 820px;
+        background: @radial-gradient(circle, Theme.aurora-a 0%, transparent 62%);
+    }
+    Rectangle {
+        x: parent.width - 720px; y: -220px; width: 940px; height: 700px;
+        background: @radial-gradient(circle, Theme.aurora-b 0%, transparent 60%);
+    }
+    Rectangle {
+        x: parent.width - 900px; y: parent.height - 560px; width: 1020px; height: 640px;
+        background: @radial-gradient(circle, Theme.aurora-c 0%, transparent 64%);
+    }
+    Rectangle {
+        x: -300px; y: parent.height - 580px; width: 900px; height: 640px;
+        background: @radial-gradient(circle, Theme.aurora-d 0%, transparent 62%);
+    }
+    Rectangle {
+        visible: !Theme.dark;
+        width: parent.width;
+        height: 280px;
+        background: @linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0) 100%);
+    }
+
+    VerticalLayout {
+        spacing: 0;
+
+        // ── 顶栏：标题 + 通道 + 打开数据目录（工具类动作放这儿，不进主流程 ✓）──
+        HorizontalLayout {
+            padding-left: 22px;
+            padding-right: 22px;
+            padding-top: 16px;
+            padding-bottom: 12px;
+            spacing: 10px;
+            VerticalLayout {
+                spacing: 2px;
+                horizontal-stretch: 1;
+                Text {
+                    text: "设置";
+                    font-size: 21px;
+                    font-weight: 700;
+                    color: Theme.text-strong;
+                }
+                Text {
+                    text: "改完点右下角「保存」生效 ✓ · 密码永不回显 ✓";
+                    font-size: 11px;
+                    color: Theme.text-3;
+                    overflow: elide;
+                }
+            }
+            Chip {
+                text: root.channel-label;
+                kind: "accent";
+            }
+            PillButton {
+                text: "打开数据目录";
+                height: 34px;
+                min-width: 104px;
+                clicked => { root.open-data-dir(); }
+            }
         }
         Rectangle {
             height: 3px;
-            border-radius: 2px;
             background: @linear-gradient(90deg, Theme.aurora-start 0%, Theme.aurora-end 100%);
         }
 
-        FormRow {
-            label: "认证网关";
-            value <=> root.host;
-            hint: "校园网 Dr.COM 网关地址，例如 172.16.80.3";
-        }
-        FormRow {
-            label: "网关端口";
-            value <=> root.port-text;
-            hint: "一般是 80（登录固定走 801，无需填）";
-        }
-        FormRow {
-            label: "账号";
-            value <=> root.account;
-            hint: "学号；留空也能保存（只是会跳过登录 ✓）";
-        }
-        FormRow {
-            label: "账号后缀";
-            value <=> root.suffix;
-            hint: "校内公共场合留空；宿舍走移动宽带填 @yd —— 想按 Wi-Fi 自动切就用「配置方案」✓";
-        }
-        FormRow {
-            label: "密码";
-            value <=> root.password-text;
-            secret: true;
-            hint: root.password-hint;
-        }
-
-        // 检查间隔：一排可选药丸（来源与核心同一个常量 ✓）
-        HorizontalLayout {
-            spacing: 6px;
-            Text {
-                text: "检查间隔";
-                width: 132px;
-                font-size: 13px;
-                color: Theme.text-muted;
-                vertical-alignment: center;
-            }
-            for choice in root.interval-choices : PillButton {
-                text: choice;
-                primary: root.interval-text == choice;
-                min-width: 56px;
-                clicked => { root.interval-text = choice; }
-            }
-            Text {
-                text: "分钟";
-                font-size: 12px;
-                color: Theme.text-dim;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        FormRow {
-            label: "等网络超时";
-            value <=> root.wait-text;
-            hint: "秒；冷启动/刚连上 Wi-Fi 时先等一会儿再检查 ✓";
-        }
-
-        ToggleSwitch {
-            label: "网络位置守卫";
-            checked <=> root.guard-enabled;
-        }
-        FormRow {
-            label: "允许的 Wi-Fi";
-            value <=> root.guard-ssids;
-            hint: "逗号分隔；命中就检查（读不到 Wi-Fi 名时一律放行 ✓）";
-        }
-        FormRow {
-            label: "允许的网段";
-            value <=> root.guard-subnets;
-            hint: "逗号分隔 CIDR，例如 172.16.0.0/12,10.0.0.0/8（有线也适用 ✓）";
-        }
-
-        ToggleSwitch {
-            label: "自动升级";
-            checked <=> root.auto-update;
-        }
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            Text {
-                text: "升级通道";
-                width: 132px;
-                font-size: 13px;
-                color: Theme.text-muted;
-                vertical-alignment: center;
-            }
-            Text {
-                text: root.channel-label;
-                font-size: 13px;
-                color: Theme.text-primary;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        // —— 配置方案（按 Wi-Fi 自动切）——
+        // ── 正文：两栏卡片（左主右辅 ✓，与 2.x 配置页同一套骨架 ✓）──
         Rectangle {
-            height: 2px;
-            background: Theme.card-stroke;
-        }
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            Text {
-                text: "配置方案";
-                font-size: 15px;
-                font-weight: 600;
-                color: Theme.text-primary;
-                vertical-alignment: center;
-            }
-            Text {
-                text: root.profiles-summary;
-                font-size: 11px;
-                color: Theme.text-dim;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                wrap: word-wrap;
-            }
-            PillButton {
-                text: root.profile-auto ? "自动切换：开" : "自动切换：关";
-                primary: root.profile-auto;
-                clicked => { root.profile-toggle-auto(); }
-            }
-        }
-        Rectangle {
-            height: 124px;
-            border-radius: Theme.radius-sm;
-            background: Theme.card-bg;
-            border-width: 1px;
-            border-color: Theme.card-stroke;
+            vertical-stretch: 1;
+            background: transparent;
 
-            Flickable {
-                // 不用 ScrollView：那属于 std-widgets ✗（我们只开了核心 ✓）；
-                // 行高固定 32px ⇒ 内容高度可以直接算出来 ✓（不依赖任何自动测量 ✓）
-                content-width: self.width;
-                content-height: root.profile-rows.length * 36px + 14px;
-                VerticalLayout {
-                    padding: 6px;
-                    spacing: 4px;
-                    for row in root.profile-rows : HorizontalLayout {
-                        height: 32px;
-                        spacing: 6px;
-                        Text {
-                            text: row.name;
-                            width: 128px;
-                            font-size: 13px;
-                            color: row.active ? Theme.ok : Theme.text-primary;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: row.detail;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 0;
+
+                Flickable {
+                    content-width: self.width;
+                    content-height: root.body-h;
+                    interactive: root.body-h > self.height;
+
+                    HorizontalLayout {
+                        spacing: 14px;
+
+                        // ———— 左栏（主）：账户与登录 + 配置方案 ————
+                        VerticalLayout {
                             horizontal-stretch: 1;
-                            font-size: 11px;
-                            color: Theme.text-dim;
-                            vertical-alignment: center;
-                            overflow: elide;
+                            height: root.body-h;
+                            spacing: 14px;
+                            // 关键 ✗：竖直布局默认会把余量摊给卡片 ⇒ 卡内底部一大片空白 ✗
+                            // 改成从顶部堆 ✓（余量落在两栏底部，这才是两栏排版该有的样子 ✓）
+                            alignment: start;
+
+                            Card {
+                                content-padding: 16px;
+                                vertical-stretch: 0;
+                                height: 288px;
+                                SectionTitle {
+                                    text: "账户与登录";
+                                    note: "认证网关与账号密码；密码只存在本机，界面永不回显 ✗";
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    InputField {
+                                        label: "认证网关";
+                                        placeholder: "172.16.80.3";
+                                        value <=> root.host;
+                                        horizontal-stretch: 2;
+                                    }
+                                    InputField {
+                                        label: "端口";
+                                        placeholder: "80";
+                                        value <=> root.port-text;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    InputField {
+                                        label: "账号";
+                                        placeholder: "学号，例如 2023001234";
+                                        value <=> root.account;
+                                        horizontal-stretch: 2;
+                                    }
+                                    InputField {
+                                        label: "账号后缀";
+                                        placeholder: "校内留空；宿舍 @yd";
+                                        value <=> root.suffix;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                InputField {
+                                    label: "密码";
+                                    secret: true;
+                                    placeholder: "不改就留空 ✓";
+                                    hint: root.password-hint;
+                                    value <=> root.password-text;
+                                }
+                            }
+
+                            Card {
+                                content-padding: 16px;
+                                vertical-stretch: 0;
+                                // 方案卡：折叠区展开时整张卡跟着长 ✓（高度必须显式写 ⇒ 不能靠内容算 ✗）
+                                height: root.profile-new-open ? 420px : 240px;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    SectionTitle {
+                                        text: "配置方案";
+                                        note: root.profiles-summary;
+                                        horizontal-stretch: 1;
+                                    }
+                                    PillButton {
+                                        text: root.profile-auto ? "Wi-Fi 自动切换：开" : "Wi-Fi 自动切换：关";
+                                        primary: root.profile-auto;
+                                        height: 30px;
+                                        min-width: 150px;
+                                        clicked => { root.profile-toggle-auto(); }
+                                    }
+                                }
+                                // 方案列表（行高固定 34px ⇒ 内容高度直接算出来 ✓）
+                                Rectangle {
+                                    height: 104px;
+                                    border-radius: Theme.r-sm;
+                                    background: Theme.card-soft;
+                                    border-width: 1px;
+                                    border-color: Theme.card-stroke;
+
+                                    Flickable {
+                                        content-width: self.width;
+                                        content-height: root.profile-rows.length * 34px + 8px;
+                                        VerticalLayout {
+                                            padding: 4px;
+                                            spacing: 2px;
+                                            for row in root.profile-rows : HorizontalLayout {
+                                                height: 34px;
+                                                spacing: 6px;
+                                                Text {
+                                                    text: row.name;
+                                                    width: 120px;
+                                                    font-size: 13px;
+                                                    font-weight: 600;
+                                                    color: row.active ? Theme.ok : Theme.text;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: row.detail;
+                                                    horizontal-stretch: 1;
+                                                    font-size: 11px;
+                                                    color: Theme.text-dim;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                }
+                                                PillButton {
+                                                    text: "应用";
+                                                    primary: row.active;
+                                                    height: 26px;
+                                                    min-width: 54px;
+                                                    clicked => { root.profile-activate(row.name); }
+                                                }
+                                                PillButton {
+                                                    text: "删除";
+                                                    height: 26px;
+                                                    min-width: 54px;
+                                                    clicked => { root.profile-delete(row.name); }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                FoldSection {
+                                    title: "新建 / 覆盖方案";
+                                    note: "存下来的是表单里当前的值 ✓（先改好再存）";
+                                    open <=> root.profile-new-open;
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        InputField {
+                                            label: "方案名";
+                                            placeholder: "例如 家里 / 教室";
+                                            value <=> root.profile-new-name;
+                                            horizontal-stretch: 1;
+                                        }
+                                        InputField {
+                                            label: "匹配 Wi-Fi";
+                                            placeholder: "逗号分隔；留空 = 手动方案";
+                                            value <=> root.profile-new-ssids;
+                                            horizontal-stretch: 2;
+                                        }
+                                    }
+                                    HorizontalLayout {
+                                        spacing: 10px;
+                                        PillButton {
+                                            text: "保存为方案";
+                                            primary: true;
+                                            clicked => { root.profile-save(); }
+                                        }
+                                        Rectangle { horizontal-stretch: 1; }
+                                    }
+                                }
+                            }
+                            // 弹簧：把余量吸走 ⇒ 卡片保持自己的高度 ✓（main.slint 同一手法 ✓）
+                            Rectangle { vertical-stretch: 1; }
                         }
-                        Text {
-                            text: row.active ? "使用中 ✓" : "";
-                            font-size: 11px;
-                            color: Theme.ok;
-                            vertical-alignment: center;
-                        }
-                        PillButton {
-                            text: "应用";
-                            primary: row.active;
-                            clicked => { root.profile-activate(row.name); }
-                        }
-                        PillButton {
-                            text: "删除";
-                            clicked => { root.profile-delete(row.name); }
+
+                        // ———— 右栏（辅）：节奏 / 运行方式 / 升级 / 守卫（进阶折叠 ✓）————
+                        VerticalLayout {
+                            width: 350px;
+                            height: root.body-h;
+                            spacing: 14px;
+                            alignment: start;
+
+                            Card {
+                                content-padding: 16px;
+                                vertical-stretch: 0;
+                                height: 197px;
+                                SectionTitle {
+                                    text: "检查节奏";
+                                    note: "连续失败会自动退避（5 → 60 分钟）✓";
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    Text {
+                                        text: "间隔";
+                                        width: 32px;
+                                        font-size: 12px;
+                                        color: Theme.text-2;
+                                        vertical-alignment: center;
+                                    }
+                                    for choice in root.interval-choices : PillButton {
+                                        text: choice;
+                                        primary: root.interval-text == choice;
+                                        height: 28px;
+                                        min-width: 38px;
+                                        clicked => { root.interval-text = choice; }
+                                    }
+                                    Text {
+                                        text: "分钟";
+                                        font-size: 12px;
+                                        color: Theme.text-dim;
+                                        vertical-alignment: center;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                InputField {
+                                    label: "等网络超时（秒）";
+                                    placeholder: "例如 60";
+                                    value <=> root.wait-text;
+                                }
+                            }
+
+                            Card {
+                                content-padding: 16px;
+                                vertical-stretch: 0;
+                                height: 202px;
+                                SectionTitle {
+                                    text: "无人登录也自动登录";
+                                    note: root.service-line;
+                                }
+                                // 提示可能是三四行长文 ✓：给死 64px（4 行）—— 再长就裁掉 ✗，
+                                // 反正下面按钮的说明文字已经点明了「怎么装 / 失败了怎么办」✓
+                                Text {
+                                    text: root.service-hint;
+                                    height: 64px;
+                                    font-size: 11px;
+                                    color: Theme.text-3;
+                                    wrap: word-wrap;
+                                }
+                                PillButton {
+                                    text: root.service-installed ? "关掉服务" : "注册成服务";
+                                    primary: !root.service-installed;
+                                    horizontal-stretch: 1;
+                                    clicked => { root.service-toggle(); }
+                                }
+                            }
+
+                            Card {
+                                content-padding: 16px;
+                                vertical-stretch: 0;
+                                height: 134px;
+                                SectionTitle {
+                                    text: "升级";
+                                    note: "预览版只走 preview 通道；通道见右上角 ✓";
+                                }
+                                ToggleSwitch {
+                                    label: "自动升级";
+                                    checked <=> root.auto-update;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+
+                            // 守卫是进阶项：2.x 里就是一条**折叠行**（不占整张卡 ✓）
+                            FoldSection {
+                                title: "网络位置守卫（进阶）";
+                                note: "只在校园网内登录 · Wi-Fi 名 / 网段白名单";
+                                open <=> root.guard-open;
+                                ToggleSwitch {
+                                    label: "开启守卫";
+                                    checked <=> root.guard-enabled;
+                                }
+                                InputField {
+                                    label: "允许的 Wi-Fi";
+                                    placeholder: "例如 Campus-WiFi,Dorm-WiFi";
+                                    hint: "逗号分隔；读不到 Wi-Fi 名时一律放行 ✓";
+                                    value <=> root.guard-ssids;
+                                }
+                                InputField {
+                                    label: "允许的网段";
+                                    placeholder: "例如 172.16.0.0/12,10.0.0.0/8";
+                                    hint: "逗号分隔 CIDR；宿舍有线也适用 ✓";
+                                    value <=> root.guard-subnets;
+                                }
+                            }
+                            // 弹簧：同上 ✓
+                            Rectangle { vertical-stretch: 1; }
                         }
                     }
                 }
             }
         }
-        FormRow {
-            label: "新方案名";
-            value <=> root.profile-new-name;
-            hint: "存下来的是**上面表单里当前的值** ✓（先改好再存）";
-        }
-        FormRow {
-            label: "匹配 Wi-Fi";
-            value <=> root.profile-new-ssids;
-            hint: "逗号分隔；留空 = 手动方案（只在点「应用」时生效 ✓）";
+
+        // ── 底部保存条（整宽 ✓：左边状态、右边按钮 —— 2.x 的 save-bar ✓）──
+        // （正文只在「折起来的东西展开后」才可能超过视口，Flickable 支持滚轮拖动 ✓；
+        //   不画自定义滚动条 ✗ —— 位置/长度都要靠比例算，得不偿失 ✓）
+        Rectangle {
+            height: 1px;
+            background: Theme.hairline;
         }
         HorizontalLayout {
-            spacing: Theme.gap-sm;
-            PillButton {
-                text: "保存为方案";
-                primary: true;
-                clicked => { root.profile-save(); }
-            }
-            Rectangle { horizontal-stretch: 1; }
-        }
-
-        // —— 运行方式：无人登录也自动登录（= 注册成系统服务 ✓）——
-        Rectangle {
-            height: 2px;
-            background: Theme.card-stroke;
-        }
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            Text {
-                text: "无人登录也自动登录";
-                font-size: 14px;
-                font-weight: 600;
-                color: Theme.text-primary;
-                vertical-alignment: center;
-            }
-            Text {
-                text: root.service-line;
-                font-size: 12px;
-                color: Theme.text-dim;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                wrap: word-wrap;
-            }
-            PillButton {
-                text: root.service-installed ? "关掉服务" : "注册成服务";
-                primary: root.service-installed;
-                clicked => { root.service-toggle(); }
-            }
-        }
-        Text {
-            text: root.service-hint;
-            font-size: 11px;
-            color: Theme.text-dim;
-            wrap: word-wrap;
-        }
-
-        // —— 提示 / 校验结果 ——
-        Rectangle {
-            vertical-stretch: 1;
-            border-radius: Theme.radius-sm;
-            background: Theme.card-bg;
-            border-width: 1px;
-            border-color: Theme.card-stroke;
-
+            padding-left: 22px;
+            padding-right: 22px;
+            padding-top: 10px;
+            padding-bottom: 14px;
+            spacing: 10px;
             VerticalLayout {
-                padding: Theme.gap-sm;
-                alignment: start;
-                spacing: 4px;
+                horizontal-stretch: 1;
+                spacing: 2px;
                 Text {
                     text: root.message;
-                    wrap: word-wrap;
+                    height: 32px;
                     font-size: 12px;
                     color: root.message-kind == "ok" ? Theme.ok
                         : root.message-kind == "danger" ? Theme.danger
                         : root.message-kind == "warn" ? Theme.warn
-                        : Theme.text-muted;
+                        : Theme.text-2;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
                 }
-            }
-        }
-
-        // —— 按钮区 ——
-        HorizontalLayout {
-            spacing: Theme.gap-sm;
-            PillButton {
-                text: "保存";
-                primary: true;
-                clicked => { root.save(); }
-            }
-            PillButton {
-                text: "测试连接";
-                clicked => { root.test-connection(); }
+                Text {
+                    text: "配置目录：" + root.data-dir;
+                    font-size: 11px;
+                    color: Theme.text-3;
+                    overflow: elide;
+                }
             }
             PillButton {
                 text: "重新读取";
                 clicked => { root.refresh-view(); }
             }
             PillButton {
-                text: "打开数据目录";
-                clicked => { root.open-data-dir(); }
+                text: "测试连接";
+                clicked => { root.test-connection(); }
             }
-            Rectangle { horizontal-stretch: 1; }
             PillButton {
                 text: "关闭";
                 clicked => { root.dismiss(); }
             }
-        }
-
-        Text {
-            text: "配置目录：" + root.data-dir;
-            font-size: 11px;
-            color: Theme.text-dim;
-            wrap: word-wrap;
+            PillButton {
+                text: "保存";
+                primary: true;
+                clicked => { root.save(); }
+            }
         }
     }
 }

@@ -464,3 +464,142 @@ export component ToggleSwitch inherits Rectangle {
         }
     }
 }
+
+// 表单字段 —— 2.x 配置页 `.field` 的画法：标签在上、控件居中、提示在底 ✓
+//
+// 为什么另起一个而不是改 FormRow ✗：FormRow 是「左标签 + 右控件」的老式一行
+// （设置窗口单栏时够用 ✗）；配置页按 2.x 改成上下结构，才能一行并两列
+// （网关 + 端口 / 账号 + 后缀 —— 2.x v2.1.2.0 的「两列表单」✓）。
+export component InputField inherits Rectangle {
+    in property <string> label: "";
+    in property <string> hint: "";
+    in property <string> placeholder: "";
+    in property <bool> secret: false;   // 密码框：password 类型输入 ✓
+    in-out property <string> value: "";
+
+    // 高度写死 ✓：提示最多两行（11px × 2 ≈ 30px），不依赖任何文字测量 ✓
+    height: root.hint == "" ? 56px : 86px;
+    background: transparent;
+
+    VerticalLayout {
+        spacing: 4px;
+        Text {
+            text: root.label;
+            height: 16px;
+            font-size: 12px;
+            color: Theme.text-2;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Rectangle {
+            height: 36px;
+            border-radius: Theme.r-sm;
+            background: Theme.card;
+            border-width: 1px;
+            border-color: field.has-focus ? Theme.accent : Theme.card-stroke;
+
+            field := TextInput {
+                x: 10px;
+                y: 0px;
+                width: parent.width - 20px;
+                height: parent.height;
+                text <=> root.value;
+                single-line: true;
+                input-type: root.secret ? password : text;
+                font-size: 14px;
+                color: Theme.text;
+                vertical-alignment: center;
+                edited => { root.value = self.text; }
+            }
+            // 占位提示：TextInput 自己没有 placeholder ✗（那是 std-widgets 的 LineEdit ✓），
+            // 照它的做法叠一层「有字就藏」的灰字 ✓（不参与布局 ⇒ 不会把输入框挤走 ✓）
+            Text {
+                x: 10px;
+                y: 0px;
+                width: parent.width - 20px;
+                height: parent.height;
+                text: root.placeholder;
+                visible: root.value == "";
+                font-size: 13px;
+                color: Theme.text-3;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        Text {
+            visible: root.hint != "";
+            text: root.hint;
+            height: 30px;
+            font-size: 11px;
+            color: Theme.text-3;
+            wrap: word-wrap;
+            vertical-alignment: top;
+        }
+    }
+}
+
+// 折叠区 —— 2.x 配置页的 `<details class="fold">`：主流程之外的进阶项默认收起 ✓
+// （2.x 的原话：不折起来「展开会顶掉半屏」✗）
+export component FoldSection inherits Rectangle {
+    in property <string> title: "";
+    in property <string> note: "";
+    in-out property <bool> open: false;
+    callback toggled();
+
+    // 不写 height ✓：收起时只剩头部、展开时正文参与布局 ⇒ 高度自然长出来 ✓
+    background: transparent;
+
+    VerticalLayout {
+        spacing: Theme.gap-sm;
+        Rectangle {
+            height: 38px;
+            border-radius: Theme.r-sm;
+            background: head.has-hover ? Theme.card-hover : Theme.card-soft;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 8px;
+                Text {
+                    text: root.open ? "▾" : "▸";
+                    font-size: 12px;
+                    color: Theme.text-2;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.title;
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: Theme.text;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: root.note;
+                    font-size: 11px;
+                    color: Theme.text-3;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.open ? "收起" : "展开";
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: Theme.accent;
+                    vertical-alignment: center;
+                }
+            }
+            head := TouchArea {
+                clicked => {
+                    root.open = !root.open;
+                    root.toggled();
+                }
+            }
+        }
+        VerticalLayout {
+            visible: root.open;
+            spacing: Theme.gap-sm;
+            @children
+        }
+    }
+}
