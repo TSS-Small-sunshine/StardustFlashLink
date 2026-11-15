@@ -108,14 +108,22 @@ gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/main/protectio
 
 保护内容（两条线一致）：必须有 PR；必需检查见上表；分支必须与目标分支同步（strict）；线性历史；禁止 force push / 删除；对话必须解决；**规则对管理员同样生效**（`enforce_admins=true`）。
 
-### 5.2 配置 dev 分支保护
+### 5.2 配置 dev 分支保护（ruleset）
 
-配置文件：`.github/branch-protection-dev.json`（必需检查为 `PR Gate` + `PR Bot` + 三个 `测试（…）`）。
+> 为什么用 ruleset 而不是 classic protection API：分支名 `dev/3.0-altair` 带 `/`，classic 端点的
+> `/branches/{branch}/protection` 在 gh / PowerShell 里会被路径解码成 `dev`，直接 404；
+> ruleset 走仓库级端点、没有这个问题，也是 GitHub 现在推荐的方式。
+
+配置文件：`.github/ruleset-dev.json`（必需检查 = `PR Gate` + `PR Bot` + 三个 `测试（…）`）。
 > macOS runner 用 `macos-latest`（`macos-14` 已被 GitHub 退役，2026-11 实测报 “configuration not supported”）。
 
 ```powershell
-gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/dev%2F3.0-altair/protection `
-  --input .github/branch-protection-dev.json
+gh api -X POST repos/TSS-Small-sunshine/StardustFlashLink/rulesets `
+  --input .github/ruleset-dev.json
+
+# 核对
+gh api repos/TSS-Small-sunshine/StardustFlashLink/rulesets `
+  --jq '.[] | select(.name=="dev-3.0-altair-protection") | {name, enforcement, conditions}'
 ```
 
 ### 5.3 应急通道（发版 / 安全修复被闸门卡住时，两条线通用）
@@ -123,11 +131,16 @@ gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/dev%2F3.0-alta
 只在确实需要时用，**用完立刻恢复**：
 
 ```powershell
-# 临时关闭 main 保护（GitHub 审计日志会记录）
+# main：临时关闭 classic 保护（GitHub 审计日志会记录）
 gh api -X DELETE repos/TSS-Small-sunshine/StardustFlashLink/branches/main/protection
 # 处理完立刻恢复
 gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/main/protection `
   --input .github/branch-protection.json
+
+# dev：ruleset 临时停用 / 恢复（$rid 从 rulesets 列表取）
+$rid = gh api repos/TSS-Small-sunshine/StardustFlashLink/rulesets --jq '.[] | select(.name=="dev-3.0-altair-protection") | .id'
+gh api -X PATCH repos/TSS-Small-sunshine/StardustFlashLink/rulesets/$rid -f enforcement=disabled
+gh api -X PATCH repos/TSS-Small-sunshine/StardustFlashLink/rulesets/$rid -f enforcement=active
 ```
 
 或者：先给 PR 加 `bot:override` 标签放行机器人（人再确认内容），再正常 merge。
