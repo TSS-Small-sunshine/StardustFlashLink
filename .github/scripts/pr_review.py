@@ -441,7 +441,8 @@ def main(argv=None):
 
     if not args.event:
         parser.error("--event 必填（或改用 --self-test）")
-    with open(args.event, "r", encoding="utf-8") as handle:
+    # utf-8-sig：容忍 BOM（本地用 PowerShell 生成的 fake event 可能带 BOM）
+    with open(args.event, "r", encoding="utf-8-sig") as handle:
         event = json.load(handle)
     pull = event.get("pull_request") or {}
     if not pull:
