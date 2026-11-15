@@ -4,9 +4,14 @@ on:
   push:
     branches: [ main, master ]
     paths-ignore:
+      # 只改文档 / CI / 发版模板的提交不重新打安装包：
+      # 既省 runner，也避免「发版 tag 被一次无关提交挪走」（产物本身不变）。
       - '**.md'
       - '.gitignore'
       - '.gitattributes'
+      - 'LICENSE'
+      - '.github/**'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       title:
