@@ -53,7 +53,8 @@ TWO_X_PATHS = (
 
 #: 新增行里的凭据形态：命中即阻断（宁可人工看，也不把密码发上 GitHub ✗）。
 SECRET_LINE_PATTERNS = (
-    (re.compile(r"https?://[^\s\"']*password=[^\s&\"']+", re.I), "URL 里带 password= 参数"),
+    # host 必须带「.」（真实域名 / IPv4），避免把 <http://a/b?password=...> 这种假样本当泄漏 ✗
+    (re.compile(r"https?://[^\s\"'/]+\.[^\s\"']*password=[^\s&\"']+", re.I), "URL 里带 password= 参数"),
     (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "私钥内容"),
     (re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"), "GitHub personal access token"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "GitHub fine-grained token"),
@@ -537,7 +538,8 @@ def self_test():
     # 隐私
     check("隐私：password.txt 被拦", any(f[0] == FAIL for f in check_privacy(["password.txt"], [])))
     check("隐私：模板文件放行", not check_privacy(["packaging/password.txt.template"], []))
-    check("隐私：URL 带密码被拦", any(f[0] == FAIL for f in check_privacy(["x.py"], [("x.py", 3, "u='http://a/b?password=abc'")])))
+    _leak = "u='http://172.16.80.3:801/login?pass" + "word=abc'"
+    check("隐私：URL 带密码被拦", any(f[0] == FAIL for f in check_privacy(["x.py"], [("x.py", 3, _leak)])))
     check("隐私：普通行不误报", not check_privacy(["x.py"], [("x.py", 3, "password = read_password()")]))
 
     # 版本同步
