@@ -22,7 +22,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14, windows-latest]
+        # macos-14 已被 GitHub 退役（报 'configuration not supported'）→ 用 macos-latest 跟随当前稳定版 ✗
+        os: [ubuntu-24.04, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -65,8 +66,8 @@ jobs:
           - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu,  label: linux-aarch64, apt: gcc-aarch64-linux-gnu, ui: false }
           - { os: ubuntu-24.04, target: armv7-unknown-linux-gnueabihf, label: linux-armv7, apt: gcc-arm-linux-gnueabihf, ui: false }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   label: windows-x86_64, apt: '', ui: true }
-          - { os: macos-14,      target: aarch64-apple-darwin,      label: macos-aarch64, apt: '', ui: true }
-          - { os: macos-14,      target: x86_64-apple-darwin,       label: macos-x86_64,  apt: '', ui: false }
+          - { os: macos-latest,  target: aarch64-apple-darwin,      label: macos-aarch64, apt: '', ui: true }
+          - { os: macos-latest,  target: x86_64-apple-darwin,       label: macos-x86_64,  apt: '', ui: false }
     steps:
       - uses: actions/checkout@v4
 
@@ -188,7 +189,7 @@ jobs:
           fi
 
           # —— macOS：.app 包体 + .dmg（hdiutil 系统自带 ✓），里面放一个 /Applications 快捷方式 ✓
-          if [ "${{ matrix.os }}" = "macos-14" ]; then
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
             GUEST="${CLI_NAME}"
             if [ -f "$STAGE/${APP_NAME}" ]; then
               GUEST="${APP_NAME}"
