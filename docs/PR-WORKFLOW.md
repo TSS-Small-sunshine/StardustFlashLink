@@ -6,7 +6,7 @@
 ## 0. 一句话规则
 
 1. 任何改动 → 开分支 → 开 PR（标题用 Conventional Commits）→ **机器人审核 + CI 冒烟** → squash 合并 → 自动删分支。
-2. **`main` 不允许直接 push**（分支保护已开）；3.0 线暂时仍允许直接 push（开发节奏快，等发布流程稳定再保护）。
+2. **`main` 与 `dev/3.0-altair` 都不允许直接 push**（分支保护均已开，且对管理员同样生效）。
 3. 两条线互不合：`dev/**` 不合 main、main 不往 `dev/**@@ 提 PR；2.x 代码只在 main 改，3.0 代码只在 dev 改。
 4. 发版从 main 走：合并 → CI `build-installer.yml` 自动出 `installer` + `v{版本}` 两条 release。
 
@@ -15,7 +15,7 @@
 | 分支 | 角色 | 谁能改 | 保护 |
 | --- | --- | --- | --- |
 | `main` | 2.x Vega 稳定线（正式发版） | 只能通过 PR | ✅ 已开（见 §5） |
-| `dev/3.0-altair` | 3.0 Altair 开发线（只发预览） | 直接 push 或 PR | ❌ 暂未开 |
+| `dev/3.0-altair` | 3.0 Altair 开发线（只发预览） | 只能通过 PR | ✅ 已开（见 §5） |
 | `feat/...` `fix/...` `docs/...` `ci/...` `hotfix/...` `release/...` | 临时分支 | 作者 | 合并后自动删除 |
 
 分支命名：`<type>/<简短描述>`，type ∈ `feat` / `fix` / `hotfix` / `docs` / `chore` / `refactor` / `test` / `ci` / `build` / `perf` / `style` / `revert`，全小写，用 `-` / `.` / `_` 分隔。
@@ -81,12 +81,14 @@ python .github/scripts/pr_review.py --dry-run --event fake-pr.json --base-ref ma
 
 ## 5. 必需状态检查与分支保护
 
-`main` 的合并要求：
+两条线的合并要求（必需检查）：
 
-| 检查 | 来源 | 大约耗时 |
-| --- | --- | --- |
-| **PR Gate** | `.github/workflows/pr-checks.yml`（Python 语法 + 两个冒烟） | ~1 分钟 |
-| **PR Bot** | `.github/workflows/pr-bot.yml`（机器人审核） | ~15 秒 |
+| 分支 | 必需检查 | 来源 | 大约耗时 |
+| --- | --- | --- | --- |
+| `main` | **PR Gate** | `.github/workflows/pr-checks.yml`（Python 语法 + 两个冒烟） | ~1 分钟 |
+| `main` | **PR Bot** | `.github/workflows/pr-bot.yml`（机器人审核） | ~15 秒 |
+| `dev/3.0-altair` | **PR Gate** + **PR Bot** | 同上 | ~1 分钟 |
+| `dev/3.0-altair` | **测试（ubuntu-24.04）** / **测试（macos-14）** / **测试（windows-latest）** | `.github/workflows/preview-3.0.yml` 的三平台 cargo test | ~2–5 分钟 |
 
 > **不要求人工 approve**：个人仓库只有一位维护者，自己不能批自己的 PR —— 机器人审核 + CI 就是闸门。
 > 涉及发布 / 安装器的 PR 请自觉在正文写清真机验证步骤。
@@ -104,9 +106,18 @@ gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/main/protectio
   --input .github/branch-protection.json
 ```
 
-保护内容：必须有 PR；必需检查 `PR Gate` + `PR Bot`；分支必须与 main 同步（strict）；线性历史；禁止 force push / 删除；对话必须解决；**规则对管理员同样生效**（`enforce_admins=true`）。
+保护内容（两条线一致）：必须有 PR；必需检查见上表；分支必须与目标分支同步（strict）；线性历史；禁止 force push / 删除；对话必须解决；**规则对管理员同样生效**（`enforce_admins=true`）。
 
-### 5.2 应急通道（发版 / 安全修复被闸门卡住时）
+### 5.2 配置 dev 分支保护
+
+配置文件：`.github/branch-protection-dev.json`（必需检查为 `PR Gate` + `PR Bot` + 三个 `测试（…）`）。
+
+```powershell
+gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/dev%2F3.0-altair/protection `
+  --input .github/branch-protection-dev.json
+```
+
+### 5.3 应急通道（发版 / 安全修复被闸门卡住时，两条线通用）
 
 只在确实需要时用，**用完立刻恢复**：
 
@@ -160,7 +171,10 @@ cargo test --workspace
 cargo build -p drcom-ui
 git add <逐个文件>
 git commit -m "feat(3.0-m3): …"
-git push origin dev/3.0-altair     # 3.0 线暂不保护，可直接推
+git push -u origin feat/3.0-m3-xxx
+gh pr create --base dev/3.0-altair --title "feat(3.0-m3): …" --body-file pr-body.md
+gh pr checks --watch               # PR Gate + PR Bot + 三平台 cargo test
+gh pr merge --squash --delete-branch
 ```
 
 （也可以开 PR：机器人会按 `dev/` 规则审核，`PR Gate` 仍会跑 2.x 冒烟，确保没碰坏根目录代码。）

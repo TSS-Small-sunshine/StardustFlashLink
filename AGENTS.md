@@ -194,6 +194,6 @@ git status --short && git diff --cached
 
 - 提交信息前缀用 `feat(3.0-mX)` / `fix(3.0)` / `docs(3.0)` / `ci(3.0-mX)` ✓
 - **逐文件 `git add`**，`git add -A` 只在确认工作区干净时用 ✓
-- 每完成一块就推 `dev/3.0-altair`，并确认 CI **六行全绿** ✓
+- 每完成一块开 PR 合入 `dev/3.0-altair`（**dev 已开分支保护，不能再直接 push**），合并后确认 CI **六行全绿** ✓
 
 
