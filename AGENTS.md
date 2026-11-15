@@ -20,6 +20,7 @@
 | 改完必跑 | `python _smoke_static.py` + `python _smoke_http.py`（两个都必须 0 失败） |
 | 隐私 | 真机 `password.txt` / `config.json` / `logs\` / 真机截图 **永不入库**（见 §5） |
 | 提交 | 逐文件 `git add`，**禁止 `git add .`**（`tools\` / `python\` / `logs\` / `packaging\output\` 都在工作区里） |
+| PR / 合并 | 一律走 PR + 机器人审核（main 有分支保护）；策略见 [`docs/PR-WORKFLOW.md`](docs/PR-WORKFLOW.md) |
 
 ## 1. 动手前必读
 
@@ -28,6 +29,7 @@
 3. [`docs/VERSIONING.md`](docs/VERSIONING.md)：改版本号时才需要，但**同步清单必须逐条对齐**
 4. [`CHANGELOG.md`](CHANGELOG.md)：这个坑以前有没有栽过（历史修复都在里面）
 5. `packaging/setup.iss`：安装 / 卸载 / 升级行为都在这里，改文件清单别漏 `[Files]`
+6. [`docs/PR-WORKFLOW.md`](docs/PR-WORKFLOW.md)：PR 与合并策略（2026-11 起强制：机器人审核 + 必需检查 + squash-only）
 
 ## 2. 硬约束（不变量，改前先想清楚）
 

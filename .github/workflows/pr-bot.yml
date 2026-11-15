@@ -1,0 +1,46 @@
+name: PR Bot
+
+# 机器人审核（策略见 docs/PR-WORKFLOW.md）。
+#
+# 触发：PR 打开 / 更新 / 重新打开 / 编辑标题正文 / 草稿标记为 Ready。
+# 它只做「确定性规则检查」，把结论贴回 PR 的一条评论；**不改代码、不 approve、不合并、不发版**。
+# 有阻断项时脚本退出码非 0 → job 变红 → main 的分支保护把 PR 挡在合并外 ✓。
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read          # 只读代码（审核需要看 diff / 文件内容）
+  pull-requests: write    # 贴 / 更新审核评论
+  issues: write           # PR 评论走 Issues API
+
+# 同一条 PR 的新提交会取消上一轮审核，省 runner
+concurrency:
+  group: pr-bot-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: PR Bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 需要完整历史：要拿 base 分支做 diff，也要读 HEAD 上的文件内容
+          fetch-depth: 0
+
+      - name: 取基线分支（用于 diff）
+        run: git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+
+      - name: 自动审核
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/pr_review.py \
+            --event "$GITHUB_EVENT_PATH" \
+            --repo "$GITHUB_REPOSITORY" \
+            --token "$GITHUB_TOKEN" \
+            --base-ref "${{ github.base_ref }}"
