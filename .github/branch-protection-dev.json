@@ -1,7 +1,13 @@
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["PR Gate", "PR Bot"]
+    "contexts": [
+      "PR Gate",
+      "PR Bot",
+      "测试（ubuntu-24.04）",
+      "测试（macos-latest）",
+      "测试（windows-latest）"
+    ]
   },
   "enforce_admins": true,
   "required_pull_request_reviews": null,

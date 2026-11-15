@@ -88,7 +88,7 @@ python .github/scripts/pr_review.py --dry-run --event fake-pr.json --base-ref ma
 | `main` | **PR Gate** | `.github/workflows/pr-checks.yml`（Python 语法 + 两个冒烟） | ~1 分钟 |
 | `main` | **PR Bot** | `.github/workflows/pr-bot.yml`（机器人审核） | ~15 秒 |
 | `dev/3.0-altair` | **PR Gate** + **PR Bot** | 同上 | ~1 分钟 |
-| `dev/3.0-altair` | **测试（ubuntu-24.04）** / **测试（macos-14）** / **测试（windows-latest）** | `.github/workflows/preview-3.0.yml` 的三平台 cargo test | ~2–5 分钟 |
+| `dev/3.0-altair` | **测试（ubuntu-24.04）** / **测试（macos-latest）** / **测试（windows-latest）** | `.github/workflows/preview-3.0.yml` 的三平台 cargo test | ~2–5 分钟 |
 
 > **不要求人工 approve**：个人仓库只有一位维护者，自己不能批自己的 PR —— 机器人审核 + CI 就是闸门。
 > 涉及发布 / 安装器的 PR 请自觉在正文写清真机验证步骤。
@@ -111,6 +111,7 @@ gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/main/protectio
 ### 5.2 配置 dev 分支保护
 
 配置文件：`.github/branch-protection-dev.json`（必需检查为 `PR Gate` + `PR Bot` + 三个 `测试（…）`）。
+> macOS runner 用 `macos-latest`（`macos-14` 已被 GitHub 退役，2026-11 实测报 “configuration not supported”）。
 
 ```powershell
 gh api -X PUT repos/TSS-Small-sunshine/StardustFlashLink/branches/dev%2F3.0-altair/protection `
