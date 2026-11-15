@@ -1,6 +1,7 @@
 name: PR Checks
 
-# A1：给 PR 装一道「自动检查闸门」。
+# PR Gate：给 PR 装一道「自动检查闸门」（main 合并前必须过）。
+# 机器人审核（标题 / 正文 / 双线隔离 / 隐私 / 版本同步…）见 pr-bot.yml 与 docs/PR-WORKFLOW.md。
 #
 # 与 build-installer.yml 的分工（这是重点）：
 #   - build-installer.yml：只在 push→main 时跑，干的是**编译 + 发布 release**（发布后
@@ -9,8 +10,8 @@ name: PR Checks
 #
 # 检查项都是仓库里已有的东西（纯 Python 标准库，无需安装依赖）：
 #   1) compileall     —— 全部 .py 语法能不能过；
-#   2) _smoke_static.py —— 101 条静态/行为断言（安全项、版本一致性、升级链路、隐私守卫）；
-#   3) _smoke_http.py   —— 9 条请求拦截层断言（Host 白名单 / 写接口自定义头 / Origin / 品牌路由）。
+#   2) _smoke_static.py —— 静态/行为断言（安全项、版本一致性、升级链路、隐私守卫）；
+#   3) _smoke_http.py   —— 请求拦截层断言（Host 白名单 / 写接口自定义头 / Origin / 品牌路由）。
 #
 # 它拦不住的：需要真机 + 真实 NSSM 服务/安装器才会现形的缺陷（例如"installer 被 nssm 的
 # Job 连坐杀死"），那类仍然只能靠真机验证。
@@ -21,9 +22,16 @@ on:
 permissions:
   contents: read
 
+# 同一条 PR 的新提交会取消上一轮检查，省 runner
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
-    name: 语法 + 冒烟
+    name: PR Gate
+    # 这个 job 名就是分支保护的必需检查上下文（"PR Gate"）—— 改名要同步改 .github/branch-protection.json ✗
+    timeout-minutes: 15
     # 目标平台是 Windows（代码里有 winreg / nssm 相关路径），且测试会起本地 HTTP 服务，
     # 用同类环境最省心（公开仓免费，一次约 1 分钟）。
     runs-on: windows-latest

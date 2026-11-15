@@ -475,6 +475,7 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | --- | --- |
 | 本 `README.md` | 功能、架构、协议、快速开始、常见问题 |
 | [`packaging/README.md`](packaging/README.md) | 开发者构建安装包的步骤、安装 / 卸载流程、安装包目录结构、已知限制 |
+| [`docs/PR-WORKFLOW.md`](docs/PR-WORKFLOW.md) | PR 与合并策略：分支模型、机器人审核规则、必需检查、分支保护与应急通道 |
 
 ---
 
