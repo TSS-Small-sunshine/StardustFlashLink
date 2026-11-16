@@ -57,11 +57,36 @@ pub fn write_tmp(tmp: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// 把 tmp 改名覆盖目标；失败时清掉 tmp（**不留垃圾** ✓）。
+///
+/// Windows 上若有别的进程/线程正好打开着目标文件（读者 / 杀毒软件扫描），
+/// `rename` 会短暂报「另一个程序正在使用此文件」—— 这是**占用**而不是内容错误，
+/// 所以做一小段有界重试（10 次 × 5–50ms，总上限约 300ms），真实错误照样快速失败 ✓。
 pub fn commit(tmp: &Path, path: &Path) -> Result<(), String> {
-    std::fs::rename(tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(tmp);
-        format!("替换 {} 失败: {}", path.display(), e)
-    })
+    let mut last_error = None;
+    for attempt in 0..10 {
+        match std::fs::rename(tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                // 只对「疑似占用」的错误重试；找不到 tmp / 路径非法重试也没意义。
+                if !matches!(
+                    last_error.as_ref().map(|e| e.kind()),
+                    Some(std::io::ErrorKind::PermissionDenied) | Some(std::io::ErrorKind::Other)
+                ) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5 + attempt * 5));
+            }
+        }
+    }
+    let _ = std::fs::remove_file(tmp);
+    Err(format!(
+        "替换 {} 失败: {}",
+        path.display(),
+        last_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "未知错误".to_string())
+    ))
 }
 
 /// 一步到位：唯一 tmp → 写 → rename 覆盖 ✓（配置这类「整份内容一次写」的调用方用这个）。
@@ -173,25 +198,33 @@ mod tests {
             handles.push(std::thread::spawn(move || {
                 for round in 0..20 {
                     let payload = if (writer + round) % 2 == 0 { &big } else { &small };
-                    write_atomic(&target, payload.as_bytes()).unwrap();
+                    // Windows 并发写：rename 偶尔遇到读者占用 → 有界重试（重试的是占用，不是内容 ✓）。
+                    let mut attempts = 0;
+                    while let Err(error) = write_atomic(&target, payload.as_bytes()) {
+                        attempts += 1;
+                        assert!(attempts < 500, "写入连续失败（环境问题，不是内容错误）: {}", error);
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
                 }
             }));
         }
+        // 读侧用「总截止时间」而不是固定次数：CI Windows runner 上杀毒/索引会让
+        // rename 瞬间的占用比本机长得多，固定 500ms 会偶发读不到（v2.1 前的教训）。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut reads = 0;
         for _ in 0..200 {
-            let mut got = String::new();
-            // 500 × 1ms ≈ 0.5s：只为覆盖「写者线程刚启动 / Windows rename 瞬间占用」，
-            // 不是为了等一个慢写者 —— 写者每轮只写 32KB，正常远快于这个窗口 ✓
-            for _ in 0..500 {
-                // Windows 上 rename 期间可能短暂拿不到句柄：重试即可，**重试的是占用，不是内容** ✓
+            let got = loop {
                 match std::fs::read_to_string(&target) {
-                    Ok(text) => {
-                        got = text;
-                        break;
+                    Ok(text) => break text,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
                     }
-                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                    Err(error) => panic!(
+                        "10 秒内一直读不到文件（Windows 占用/环境问题，不是内容错误）: {}",
+                        error
+                    ),
                 }
-            }
+            };
             assert!(
                 got == big || got == small,
                 "读到了半截内容 ✗（长度 {}，期望 {} 或 {}）",

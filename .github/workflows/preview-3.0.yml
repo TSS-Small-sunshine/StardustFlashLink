@@ -8,6 +8,15 @@ on:
   pull_request:
     branches: ['dev/**']
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '发布预览版 Release（prerelease；发布前先把 APP_CHANNEL_SEQ +1）'
+        type: boolean
+        default: false
+      allow_republish:
+        description: '允许覆盖同版本预览 Release（默认否）'
+        type: boolean
+        default: false
 
 concurrency:
   group: preview-${{ github.ref }}
@@ -225,3 +234,106 @@ jobs:
             desktop/target/${{ matrix.target }}/release/stardust-flash-link-app.exe
           if-no-files-found: warn
           retention-days: 14
+
+  # ⑦ 预览版发布：仅手动触发（workflow_dispatch + publish_release=true）✓
+  #    - 只发 prerelease：正式用户的自动升级收不到 ✓（R6）
+  #    - 资产名沿用 CI 产物名 stardust-flash-link-<版本>-<目标>.zip/.deb/.dmg，
+  #      与 3.0 更新模块 pick_asset 的匹配规则逐字对应 ✓
+  publish-preview:
+    name: 发布预览版 Release
+    needs: [test, build]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # 创建 prerelease + 上传资产
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读取版本 / 通道号（严格按 lib.rs 解析，失败即红）
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB="desktop/crates/drcom-core/src/lib.rs"
+          VERSION=$(sed -n 's/^pub const APP_VERSION: &str = "\([0-9.]*\)";/\1/p' $LIB)
+          SEQ=$(sed -n 's/^pub const APP_CHANNEL_SEQ: u32 = \([0-9]\+\);/\1/p' $LIB)
+          test -n $VERSION || { echo "::error::解析不到 APP_VERSION"; exit 1; }
+          test -n $SEQ || { echo "::error::解析不到 APP_CHANNEL_SEQ"; exit 1; }
+          FULL=${VERSION}-preview.${SEQ}
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "seq=$SEQ" >> "$GITHUB_OUTPUT"
+          echo "full=$FULL" >> "$GITHUB_OUTPUT"
+          echo "tag=v$FULL" >> "$GITHUB_OUTPUT"
+          echo "预览版本：$FULL（tag: v$FULL）"
+
+      - name: 收集六目标产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stardust-flash-link-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: 整理可发布资产（只留 zip/deb/dmg，扁平化 + 生成 SHA256SUMS）
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          find artifacts -type f \( -name '*.zip' -o -name '*.deb' -o -name '*.dmg' \) -print0 \
+            | xargs -0 -I{} cp -v {} release-assets/
+          COUNT=$(find release-assets -type f | wc -l)
+          echo "资产数量：$COUNT"
+          test "$COUNT" -ge 6 || { echo "::error::资产数量不足（$COUNT < 6），拒绝发布"; exit 1; }
+          ( cd release-assets && sha256sum ./* > SHA256SUMS && cat SHA256SUMS )
+          ls -l release-assets
+
+      - name: 生成预览版发布说明
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > PREVIEW-NOTES.md <<EOF
+          ## 3.0 预览版 ${{ steps.ver.outputs.full }}
+
+          > ⚠️ **这是 3.0「Altair」的开发预览版，不是正式版**：接口与行为仍可能变化；
+          > 正式用户的自动升级**收不到**它（prerelease），只有把配置里 \`update_channel\` 改成
+          > \`preview\` 才会收到。
+
+          - 版本：\`${{ steps.ver.outputs.full }}\`（通道：preview）
+          - 提交：\`${{ github.sha }}\`
+          - 构建：[#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          - 产物：Windows / Linux（x86_64、aarch64、armv7）/ macOS（x86_64、aarch64）的 ZIP / deb / dmg，见下方 assets
+          - 校验：下载 asset \`SHA256SUMS\` 后 \`sha256sum -c\`（Windows 用 \`Get-FileHash\` 对照）
+
+          ### 怎么升级到 3.0 预览
+          - 命令行：\`stardust-flash-link update check --channel preview\` → \`update download <目录>\`（下载后手动替换/安装）；
+          - 3.0 目前**不做自我替换**，GUI 更新入口也在后续里程碑。
+
+          ### 已知限制
+          - 3.0 仍处 DEV：没有托盘、没有 Windows 安装器、没有自动安装；
+          - 详细差异见仓库 \`docs/PLATFORMS.md\` 与 \`desktop/README.md\`。
+
+          本发布由 CI 自动创建（\`.github/workflows/preview-3.0.yml\` 的 publish-preview job）。
+          EOF
+
+      - name: 创建 / 覆盖预览 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "${{ inputs.allow_republish }}" != "true" ]; then
+              echo "::error::$TAG 已存在。请先在 PR 里把 desktop/crates/drcom-core/src/lib.rs 的 APP_CHANNEL_SEQ +1，或勾选 allow_republish 重跑。"
+              exit 1
+            fi
+            echo "覆盖模式：删除已有 release 与 tag 后按当前提交重建（allow_republish=true）"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          fi
+          gh release create "$TAG" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "3.0 预览版 ${{ steps.ver.outputs.full }}" \
+            --notes-file PREVIEW-NOTES.md \
+            --prerelease \
+            --latest=false
+          echo "已发布：${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"

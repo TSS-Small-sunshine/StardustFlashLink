@@ -116,6 +116,22 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
    Release 列表里一眼能分清 ✓；
 4. 正式版**必须**在 `main` 上；预览版**只**在 `dev/**` 上 —— 想发正式版就得先合回 main ✓。
 
+## 4.6 3.0 预览版发布流程（手动、可审计）
+
+预览版**不自动发布**（避免每次 push 都刷 Release），由维护者手动跑一次 CI：
+
+1. **先递增通道号**：PR 里把 `desktop/crates/drcom-core/src/lib.rs` 的 `APP_CHANNEL_SEQ` +1
+   （例如 preview.1 → preview.2）—— 通道号只增不减；忘了递增时 CI 会拒绝覆盖（除非显式勾 `allow_republish`）。
+2. **触发构建 + 发布**：Actions →「3.0 预览构建（跨平台矩阵）」→ Run workflow：
+   - 分支选 `dev/3.0-altair`；
+   - 勾 `publish_release`（默认关）；
+   - 同版本重发才勾 `allow_republish`（会删旧 release + tag 后按当前提交重建）。
+3. CI 行为：三平台测试 + 六目标构建全绿后，`publish-preview` job 读取 `APP_VERSION` / `APP_CHANNEL_SEQ`，
+   创建 **prerelease** `v3.0.0.0-preview.N`，上传六个目标的 `.zip` / `.deb` / `.dmg` 与一份 `SHA256SUMS`。
+4. **验证**：`stardust-flash-link update check --channel preview` 应能发现该版本并按平台挑到正确资产；
+   正式通道（`release`）必须看不见它 ✓。
+5. **不要**给预览版打「正式版」标记、**不要**把 3.0 往 `main` 合（R6）；正式版另行走 2.x 的发布链路。
+
 ---
 
 ## 5. 发布时的命名约定
