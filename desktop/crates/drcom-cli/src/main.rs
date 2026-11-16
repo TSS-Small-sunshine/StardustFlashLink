@@ -239,7 +239,8 @@ fn login(args: &[String]) -> i32 {
     }
     let password = match take_opt(args, "--password") {
         Some(p) => p,
-        None => read_password_file(),
+        // 唯一实现：drcom_core::password（# 开头是密码原文、剥 BOM、剥提示行 ✓）
+        None => drcom_core::password::read(),
     };
 
     let errors = cfg.validate();
@@ -281,7 +282,7 @@ fn login(args: &[String]) -> i32 {
     }
     if password.is_empty() {
         eprintln!(
-            "密码为空：请写入 {}（一行密码，`#` 开头的行会被跳过）",
+            "密码为空：请写入 {}（一行密码；以 `#` 开头的密码也照原样读取）",
             platform::password_path().display()
         );
         return 1;
@@ -931,7 +932,8 @@ fn one_check(cfg: &Config) -> (drcom_core::metrics::Kind, String) {
     if !cfg.account_configured() {
         return (Kind::Skip, "账号未设置，已跳过检查".to_string());
     }
-    let password = read_password_file();
+    // 唯一实现：drcom_core::password（CLI 不再自己复制一份读法 ✗）
+    let password = drcom_core::password::read();
     if password.is_empty() {
         return (Kind::Fail, "密码是空的（去密码文件里写一行）".to_string());
     }
@@ -1100,19 +1102,6 @@ fn profile_cmd(args: &[String]) -> i32 {
         }
     }
 }
-/// 读密码文件：跳过空行与 `#` 注释行，取第一条有效内容 ✓（与 2.x 一致）。
-fn read_password_file() -> String {
-    let text = match std::fs::read_to_string(platform::password_path()) {
-        Ok(text) => text,
-        Err(_) => return String::new(),
-    };
-    text.lines()
-        .map(|line| line.trim())
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .unwrap_or("")
-        .to_string()
-}
-
 /// 取 `--key value` 形式的值（零依赖参数解析 ✓）。
 fn take_opt(args: &[String], key: &str) -> Option<String> {
     let idx = args.iter().position(|a| a == key)?;

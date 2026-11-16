@@ -68,18 +68,6 @@ pub fn collect() -> Dashboard {
     }
 }
 
-/// 读密码文件（跳过空行与 `#` 注释 ✓，与 CLI / 2.x 一致）。
-pub fn read_password() -> String {
-    std::fs::read_to_string(platform::password_path())
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .map(|l| l.trim().to_string())
-                .find(|l| !l.is_empty() && !l.starts_with('#'))
-        })
-        .unwrap_or_default()
-}
-
 /// 「打开数据目录」：三平台各用系统命令（不引第三方 crate ✓）。
 pub fn open_data_dir() -> Result<(), String> {
     let dir = platform::data_dir();
@@ -160,18 +148,19 @@ pub fn run_check() -> (String, String) {
         return (
             "warn".to_string(),
             format!(
-                "账号还没填 —— 请在 {} 里写 account\n（密码写到 {}，一行密码，`#` 开头是注释）",
+                "账号还没填 —— 请在 {} 里写 account\n（密码写到 {}，一行密码；只有安装包模板提示行算注释）",
                 cfg_path.display(),
                 platform::password_path().display()
             ),
         );
     }
-    let password = read_password();
+    // 唯一实现：drcom_core::password（UI 不再自己复制一份读法 ✗）
+    let password = password::read();
     if password.is_empty() {
         return (
             "danger".to_string(),
             format!(
-                "密码文件是空的：{}\n（一行密码；`#` 开头的行会被跳过）",
+                "密码文件是空的：{}\n（一行密码；以 `#` 开头的密码也照原样读取）",
                 platform::password_path().display()
             ),
         );

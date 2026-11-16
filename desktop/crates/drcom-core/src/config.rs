@@ -166,11 +166,10 @@ impl Config {
                 .map_err(|e| format!("建不了配置目录 {}: {}", parent.display(), e))?;
         }
         let text = self.to_json()?;
-        // 先写临时文件再改名：避免写一半崩掉把好配置毁了 ✗
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(|e| format!("写不了 {}: {}", tmp.display(), e))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败: {}", path.display(), e))?;
-        Ok(())
+        // 同目录**唯一** tmp 名 → 写完 sync → rename 覆盖：`config.json.tmp` 这种固定名在
+        // 「GUI + 服务同时在线」时两个写者会往同一个文件里交错写，rename 出去的就是半截 JSON ✗
+        // （2.x v2.0.6.2 的同款修法 ✓，见 crate::atomicfile）
+        crate::atomicfile::write_atomic(path, text.as_bytes())
     }
 
     /// 一次报全部问题（空 = 通过）。
@@ -240,6 +239,7 @@ pub fn split_csv(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn partial_json_uses_defaults_instead_of_failing() {
@@ -319,9 +319,28 @@ mod tests {
         assert_eq!(split_csv("Campus-WiFi"), vec!["Campus-WiFi"]);
     }
 
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("sfl-cfg-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn tmp_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| name.ends_with(".tmp"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn save_and_load_round_trip_in_temp_dir() {
-        let dir = std::env::temp_dir().join(format!("sfl-cfg-test-{}", std::process::id()));
+        let dir = temp_dir("roundtrip");
         let path = dir.join("config.json");
         let mut cfg = Config::default();
         cfg.host = "10.20.30.40".to_string();
@@ -329,7 +348,83 @@ mod tests {
         cfg.save(&path).expect("写盘");
         let back = Config::load(&path).expect("读回");
         assert_eq!(back, cfg);
-        assert!(path.with_extension("json.tmp").exists() == false, "临时文件要改掉 ✗");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "固定 tmp 名不许再用 ✗（并发写会落出半截 JSON ✓）"
+        );
+        assert!(
+            tmp_leftovers(&dir).is_empty(),
+            "临时文件要改掉，不该留垃圾 ✗: {:?}",
+            tmp_leftovers(&dir)
+        );
+        // 每次 save 的 tmp 名都必须是**同目录下唯一**的（不是 config.json.tmp ✓）
+        let a = crate::atomicfile::unique_tmp_path(&path);
+        let b = crate::atomicfile::unique_tmp_path(&path);
+        assert_ne!(a, b, "两次生成的 tmp 名必须不同 ✓");
+        assert_eq!(a.parent(), Some(dir.as_path()), "tmp 要落在目标同目录 ✓");
+        assert!(a
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("config.json."));
+        assert_ne!(a.file_name().unwrap().to_string_lossy(), "config.json.tmp");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_saves_never_publish_a_half_written_config() {
+        let dir = temp_dir("concurrent");
+        let path = dir.join("config.json");
+        let mut cfg_a = Config::default();
+        cfg_a.host = "10.1.1.1".to_string();
+        let mut cfg_b = Config::default();
+        cfg_b.host = "10.2.2.2".to_string();
+        cfg_b
+            .profiles
+            .insert("宿舍".to_string(), serde_json::json!({"ssid": "Campus-WiFi"}));
+        cfg_a.save(&path).expect("首次写盘");
+
+        let mut handles = Vec::new();
+        for writer in 0..2 {
+            let path = path.clone();
+            let cfg = if writer == 0 { cfg_a.clone() } else { cfg_b.clone() };
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..30 {
+                    cfg.save(&path).expect("并发写盘");
+                }
+            }));
+        }
+        // 边写边读：读到的必须永远是一份**完整且合法**的配置 ✓
+        for _ in 0..100 {
+            let mut loaded = None;
+            // 500 × 1ms：覆盖「写者线程刚启动」与 Windows rename 的瞬间占用 ✓
+            for _ in 0..500 {
+                // Windows 上 rename 瞬间可能短暂占用：重试的是占用，不是内容 ✓
+                match Config::load(&path) {
+                    Ok(cfg) => {
+                        loaded = Some(cfg);
+                        break;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                }
+            }
+            let cfg = loaded.expect("并发写期间配置读不出来（半截 JSON？）✗");
+            assert!(
+                cfg == cfg_a || cfg == cfg_b,
+                "读到的配置既不是 A 也不是 B（被写坏了）✗: host={}",
+                cfg.host
+            );
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let final_cfg = Config::load(&path).expect("并发写完之后必须能读 ✓");
+        assert!(final_cfg == cfg_a || final_cfg == cfg_b);
+        assert!(
+            tmp_leftovers(&dir).is_empty(),
+            "并发写之后不该留下 tmp 垃圾 ✗: {:?}",
+            tmp_leftovers(&dir)
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

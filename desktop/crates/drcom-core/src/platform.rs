@@ -154,7 +154,8 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
 
-/// 密码文件（与 2.x 同名同格式：纯文本一行，`#` 开头是注释 ✓）。
+/// 密码文件（与 2.x 同名同格式：纯文本一行；**只有安装包模板提示行算注释** ✓ ——
+/// `#` 开头也可能是密码原文，见 [`crate::password`] ✓）。
 pub fn password_path() -> PathBuf {
     data_dir().join("password.txt")
 }
