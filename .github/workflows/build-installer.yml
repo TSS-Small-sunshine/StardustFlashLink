@@ -30,6 +30,12 @@ on:
 permissions:
   contents: write
 
+# 审计 P2-5：发布是「先删后建」，两次构建并发会互相踩（删掉对方刚建的 tag / 重复同名 release）。
+# 同一 ref 串行；不取消进行中的那次（发布动作不能半路掐断）。
+concurrency:
+  group: build-installer-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
@@ -248,6 +254,11 @@ jobs:
             exit 0
           }
 
+          if ("${{ github.ref }}" -ne "refs/heads/main") {
+            Write-Host "::warning::非 main 的构建只产出安装包 artifact，不发布 release（审计 P2-6；ref=${{ github.ref }}）"
+            exit 0
+          }
+
           $title = (Get-Content $titleFile -Raw).Trim()
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
@@ -293,6 +304,11 @@ jobs:
           if ("${{ github.event.inputs.dry_run }}" -eq "true") {
             Write-Host "===== dry_run：渲染结果（不创建 / 不覆盖 release）====="
             Get-Content $notesFile -Raw
+            exit 0
+          }
+
+          if ("${{ github.ref }}" -ne "refs/heads/main") {
+            Write-Host "::warning::非 main 的构建只产出安装包 artifact，不发布正式版 release（审计 P2-6；ref=${{ github.ref }}）"
             exit 0
           }
 
