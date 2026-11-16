@@ -112,8 +112,11 @@ stardust-flash-link update download out.zip          # 检查 + 下载 + SHA256 
   （Windows 上若吊销检查服务器被校园网挡住，会自动重试一次 `--ssl-no-revoke`，
   证书链与域名仍然校验 ✓。）
 - **已知限制**：GitHub API 匿名限流 **60 次/小时**（403 会提示「过一会儿再试」）；
-  预览版目前只挂 CI artifact、**还没有 Release 资产**，所以预览通道多数时候是「已是最新」；
   2.x 的 `*.exe` 资产不会被 3.0 认（前缀 / 平台标签都对不上 ✓）。
+- **预览版 Release**：由 CI 手动发布（Actions →「3.0 预览构建」→ Run workflow → 勾选 `publish_release`），
+  产物是 prerelease `v3.0.0.0-preview.N`，资产名与 `pick_asset` 的匹配规则逐字对应 ✓；
+  发布前需先把 `APP_CHANNEL_SEQ` +1（步骤见 `docs/VERSIONING.md` §4.6）。
+  正式用户的自动更新**收不到**预览版（R6 / `is_prerelease`）✓。
 
 ### 排障：一键脱敏诊断包
 
