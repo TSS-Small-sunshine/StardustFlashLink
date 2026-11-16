@@ -56,3 +56,11 @@ jobs:
 
       - name: HTTP 冒烟（Host 白名单 / 自定义头 / Origin / 品牌路由）
         run: python _smoke_http.py
+
+      # 机器人规则与发布说明渲染器自己的自测也在这里跑（审计 D-17）——
+      # 它们以前只在「用到时」才被调用，改坏了要等下一次 PR / 发版才现形。
+      - name: PR Bot 规则自测（pr_review.py --self-test）
+        run: python .github/scripts/pr_review.py --self-test
+
+      - name: 发布说明渲染器自测（render_release_notes.py --self-test）
+        run: python .github/scripts/render_release_notes.py --self-test

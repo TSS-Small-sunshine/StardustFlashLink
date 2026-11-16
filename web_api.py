@@ -23,11 +23,13 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import zipfile
+import zlib
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler
 
@@ -53,6 +55,9 @@ CONFIG_IMPORT_MAX_MEMBER_BYTES = 4 * 1024 * 1024          # 单个成员上限
 def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
             # 字典（直接挂到本模块 globals，API 代码用原名访问）
             state, state_lock, pwd_lock,
+            # v2.x 维护：config.json「读-改-写」互斥锁（不传则本模块自建一把，
+            # 保证单独挂 web_api 做冒烟时也不会 AttributeError）
+            config_lock=None,
             config_file, password_file, upgrade_log_file,
             default_config,
             allowed_suffixes, allowed_intervals, allowed_update_intervals,
@@ -87,6 +92,9 @@ def _attach(*, logger, run_lock, base_dir, log_file, log_dir,
     g["BACKOFF"] = state.get  # 占位，web_api 不直接读 BACKOFF
     g["RUN_LOCK"] = run_lock
     g["PWD_LOCK"] = pwd_lock
+    # v2.x 维护（审计 C-06）：配置「读 → 改 → 写」整段互斥；服务层注入的是 RLock，
+    # 单独挂 web_api 跑冒烟时自建一把（不影响行为）。
+    g["CONFIG_LOCK"] = config_lock if config_lock is not None else threading.RLock()
     # 路径常量
     g["BASE_DIR"] = base_dir
     g["CONFIG_FILE"] = config_file
@@ -178,6 +186,22 @@ SECURITY_HEADERS = (
 )
 MAX_JSON_BODY_BYTES = 1024 * 1024        # JSON 端点 1 MB 上限（zip 导入另有 CONFIG_IMPORT_MAX_BYTES）
 BODY_DRAIN_MAX_BYTES = 4 * 1024 * 1024   # 拒收时最多「排空」这么多字节（见 _drain_body 的注释）
+# v2.x 维护（审计 C-06）：config.json「读 → 改 → 写」互斥；服务启动时 _attach() 会
+# 注入服务层那把（RLock，与 profiles 共用），这里先给一个默认值，保证单独挂 web_api
+# 做冒烟 / 预览时裸名引用不会 NameError。
+CONFIG_LOCK = threading.RLock()
+
+# 配置页表单能提交的键（页面 collectConfig 的范围）。
+# 审计 P1-1：保存时**只覆盖这些键**，其余键（profiles / active_profile /
+# profiles_auto_switch / 升级设置…）保持原值 —— 旧实现直接 _save_config(payload)，
+# 内部按 DEFAULT_CONFIG 补缺失键，于是"改个检查间隔再保存"会把方案全部清空 ✗。
+_CONFIG_FORM_KEYS = (
+    "host", "port", "account", "suffix",
+    "auto_check_enabled", "auto_check_interval_min", "network_wait_timeout_sec",
+    "network_guard_enabled", "guard_allowed_ssids", "guard_allowed_subnets",
+    "ui_port",
+    "auto_update_enabled", "update_check_interval_hours", "update_min_free_disk_mb",
+)
 
 
 def _add_security_headers(handler):
@@ -432,24 +456,25 @@ def api_post_credentials(payload):
         # 部分更新：**基于现有配置**改这两个键 ✓ ——
         # 绝不能只把 {account, suffix} 丢给 _save_config：它会用 DEFAULT_CONFIG 把
         # 其它字段补成默认值，等于把网关 / 端口 / 间隔一起重置 ✗。
+        # 整段持 CONFIG_LOCK：与「配置页保存 / 方案自动切换」互斥（审计 C-06 丢更新）。
         try:
-            cfg = dict(_load_config() or {})
-        except Exception as exc:  # noqa: BLE001
-            return 500, {"ok": False, "error": "读取配置失败：{}".format(exc)}
-        if account is not None:
-            cfg["account"] = account
-        if suffix is not None:
-            cfg["suffix"] = suffix
-        errors = _validate_config(cfg)
-        if errors:
-            return 400, {"ok": False, "error": "；".join(errors)}
-        try:
-            _save_config(cfg)
+            with CONFIG_LOCK:
+                cfg = dict(_load_config() or {})
+                if account is not None:
+                    cfg["account"] = account
+                if suffix is not None:
+                    cfg["suffix"] = suffix
+                errors = _validate_config(cfg)
+                if errors:
+                    return 400, {"ok": False, "error": "；".join(errors)}
+                _save_config(cfg)
         except ValueError as exc:
             return 400, {"ok": False, "error": str(exc)}
         except OSError as exc:
             _log("写 config.json 失败: %s", exc, level=logging.ERROR)
             return 500, {"ok": False, "error": "写文件失败"}
+        except Exception as exc:  # noqa: BLE001
+            return 500, {"ok": False, "error": "读取配置失败：{}".format(exc)}
         saved_account = cfg.get("account", "")
         saved_suffix = cfg.get("suffix", "")
     else:
@@ -553,20 +578,33 @@ def api_get_config():
 
 
 def api_post_config(payload):
+    """配置页保存 = **部分更新**：只合并表单键，其它键原样保留（审计 P1-1）。"""
     try:
         cfg_in = _read_json_body_safe(payload)
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
     if not isinstance(cfg_in, dict):
         return 400, {"ok": False, "error": "请求体必须是 JSON 对象"}
+    if not cfg_in:
+        # 审计 P2-2：空 body 以前会被当成"保存默认配置"，把 host / account 清空 ✗
+        return 400, {"ok": False, "error": "请求体不能为空（没有要更新的字段）"}
     try:
-        _save_config(cfg_in)
+        with CONFIG_LOCK:
+            cur = dict(_load_config() or {})
+            changed = 0
+            for key in _CONFIG_FORM_KEYS:
+                if key in cfg_in:
+                    cur[key] = cfg_in[key]
+                    changed += 1
+            if changed == 0:
+                return 400, {"ok": False, "error": "请求体里没有任何可保存的配置字段"}
+            _save_config(cur)
     except ValueError as exc:
         return 400, {"ok": False, "error": str(exc)}
     except OSError as exc:
-        logger.error("写 config.json 失败: %s", exc)
-        return 500, {"ok": False, "error": "写文件失败"}
-    logger.info("配置已更新")
+        _log("写 config.json 失败: %s", exc, level=logging.ERROR)
+        return 500, {"ok": False, "error": "写配置文件失败（文件可能被其它程序占用，请稍后重试）"}
+    _log("配置已更新")
     return 200, {"ok": True}
 
 
@@ -964,9 +1002,10 @@ def api_post_update_toggle(payload):
     if not isinstance(enabled, bool):
         return 400, {"ok": False, "error": "enabled 必须是布尔值"}
     try:
-        cfg = _load_config()
-        cfg["auto_update_enabled"] = enabled
-        _save_config(cfg)
+        with CONFIG_LOCK:
+            cfg = _load_config()
+            cfg["auto_update_enabled"] = enabled
+            _save_config(cfg)
     except (ValueError, OSError) as exc:
         return 400, {"ok": False, "error": str(exc)}
     _auto_update_mod._log_upgrade("INFO", "auto_update_enabled 改为 {}".format(enabled))
@@ -1290,7 +1329,12 @@ def api_post_config_import(handler):
         _send_json(handler, 400, {"ok": False, "error": "empty body"})
         return
     if length > CONFIG_IMPORT_MAX_BYTES:
-        _send_json(handler, 413, {"ok": False, "error": "body too large (>{} bytes)".format(CONFIG_IMPORT_MAX_BYTES)})
+        # 审计 P1-3：直接回 413 会让 Windows 在客户端仍在发 body 时关连接 → RST 把 413 冲掉，
+        # 客户端只看到一个"连接被中止"。必须先有界排空再关连接（与 JSON 端点同一套做法）。
+        _drain_body(handler, length)
+        _send_json(handler, 413, {"ok": False,
+                                  "error": "请求体过大（上限 {} 字节）".format(CONFIG_IMPORT_MAX_BYTES)},
+                   close=True)
         return
     raw = handler.rfile.read(length)
     if not raw:
@@ -1336,26 +1380,46 @@ def api_post_config_import(handler):
             if errors:
                 _send_json(handler, 400, {"ok": False, "error": "config 校验失败: " + "; ".join(errors)})
                 return
-            _save_config(cfg_data)
-            applied.append("config")
+            # 审计 P2-3：**先写密码、最后写配置** —— 密码写失败就整体失败，
+            # 不会出现"配置已换、密码没换"的半应用（旧实现先写配置，密码失败后
+            # 界面报"导入失败"，但配置其实已经生效 ✗）。
+            pwd_to_write = None
             if "password.txt" in names:
                 pwd_bytes = zf.read("password.txt")
                 if pwd_bytes.strip():
-                    pwd_path = os.path.join(BASE_DIR, "password.txt")
-                    # v2.0.4.5：tmp 名带 pid（同 _save_password_to_disk），避免并发写交错
-                    tmp = "{}.{}.tmp".format(pwd_path, os.getpid())
-                    with open(tmp, "wb") as f:
-                        f.write(pwd_bytes)
-                    os.replace(tmp, pwd_path)
-                    applied.append("password")
+                    pwd_to_write = pwd_bytes
                 else:
-                    logger.warning("import password.txt is empty, skipped")
-    except (zipfile.BadZipFile, json.JSONDecodeError, UnicodeDecodeError, OSError,
+                    _log("导入包里的 password.txt 是空的，已跳过", level=logging.WARNING)
+            if pwd_to_write is not None:
+                pwd_path = os.path.join(BASE_DIR, "password.txt")
+                # 审计 C-01：唯一 tmp 名（pid 级名字同进程多线程会互相踩）
+                _fd, _tmp = tempfile.mkstemp(prefix="password.", suffix=".tmp", dir=BASE_DIR)
+                try:
+                    with os.fdopen(_fd, "wb") as _fh:
+                        _fh.write(pwd_to_write)
+                        _fh.flush()
+                        os.fsync(_fh.fileno())
+                    os.replace(_tmp, pwd_path)
+                finally:
+                    try:
+                        if os.path.exists(_tmp):
+                            os.unlink(_tmp)
+                    except OSError:
+                        pass
+                applied.append("password")
+            with CONFIG_LOCK:
+                _save_config(cfg_data)
+            applied.append("config")
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, zlib.error,
+            json.JSONDecodeError, UnicodeDecodeError, OSError,
             ValueError, TypeError, KeyError) as exc:
-        # v2.0.14.0（P1-6）：把 ValueError / TypeError / KeyError 一起收进来 ——
-        # zip 里塞任何奇怪类型的字段都不该变成 500（参数不合法就是 400）✓
-        logger.exception("config import failed: %s", exc)
-        _send_json(handler, 400, {"ok": False, "error": "import failed: {}".format(exc)})
+        # v2.0.14.0（P1-6）+ 审计 P1-2：把 ValueError / TypeError / KeyError 一起收进来；
+        # 另补 RuntimeError（加密 zip）/ NotImplementedError（未知压缩方法）/ EOFError /
+        # zlib.error —— 这些以前逃逸成 500，还把英文异常原文回显给界面 ✗。
+        # 用户只该看到一句能懂的话；技术细节进日志。
+        _log("config import failed: %s", exc, level=logging.ERROR)
+        _send_json(handler, 400, {"ok": False,
+                                  "error": "导入的 zip 无法解析（可能已加密、损坏，或压缩方式不受支持）"})
         return
     _send_json(handler, 200, {"ok": True, "applied": applied, "need_restart": True})
 
@@ -1559,8 +1623,14 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             _send_json(self, 404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
-            logger.exception("GET %s 异常: %s", path, exc)
-            _send_json(self, 500, {"error": "internal: {}".format(exc)})
+            # 审计 P2-1：这里以前裸用 logger —— 模块级没有 logger，只在 _attach() 里注入；
+            # 在"只挂 web_api、没跑 _attach"的场景（冒烟 / 预览）会先 NameError 再把真正的
+            # 异常盖住，客户端只看到连接被重置。do_POST 早已改用 _log，这里补齐。
+            _log("GET %s 异常: %s", path, exc, level=logging.ERROR)
+            try:
+                _send_json(self, 500, {"error": "internal: {}".format(exc)})
+            except (ConnectionError, OSError):
+                pass
 
     def do_POST(self):
         if not self._check_request():

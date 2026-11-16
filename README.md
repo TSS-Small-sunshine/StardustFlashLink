@@ -71,10 +71,10 @@
 
 - **开机自动登录**：以 Windows 系统服务（NSSM）托管，系统启动时自动触发一次认证
 - **Web UI 配置界面**：浏览器打开 `http://127.0.0.1:8848`，不用改源码、不用记配置项就能改账号 / 密码 / 间隔
-- **周期自检 + 智能离线识别**：定时检测在线状态；不在校园网时静默跳过，失败后指数退避 `5 → 10 → 20 → 40 → 60` 分钟封顶
+- **周期自检 + 智能离线识别**：定时检测在线状态；网关不可达或登录失败按指数退避 `5 → 10 → 20 → 40 → 60` 分钟封顶（守卫不命中 / 账号密码未设置不进退避，见「状态与退避」）
 - **网络位置守卫**（v2.0.5.0，默认关闭）：配好 Wi-Fi 名 / 网段白名单后，只在校园网里才执行检查 —— 带回家、连热点、挂 VPN 不再白跑
 - **托盘图标 + 断线通知**（v2.0.6.0）：通知区小图标，掉线 / 恢复 / 服务未响应时弹气泡；右键可「打开配置页 / 立即登录 / 打开日志 / 退出」
-- **密码与代码分离**：密码只存在 `password.txt` 中，源码内**零硬编码凭据**
+- **密码与代码分离**：密码只存在文本文件里（`password.txt`，或方案专属的 `password.<方案名>.txt`），源码内**零硬编码凭据**
 - **零第三方 Python 依赖**：全部使用 Python 标准库，受限网络环境也能跑
 - **一键安装 / 一键卸载**：`install.bat` / `uninstall.bat` 全程自动
 - **可选打包安装程序**：用 Inno Setup 6 打成 `.exe` 安装向导（`packaging\build.bat`）
@@ -110,8 +110,8 @@
 
 | 版本线 | 版本 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| **2.x（稳定线）** | `v2.1.3.0 "Vega"`（织女星，2026-09-29） | 🟢 积极维护 | **你现在用的这条**：Windows 10/11 —— [Release](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/latest) 与自动升级通道都以它为准 ✓ |
-| **3.0（DEV 线）** | `3.0.0.0-preview.1` | 🚧 开发中（**仅预览**，M3 收尾中） | **跨平台重写：Rust 核心 + Slint 原生界面**，Windows / Linux / macOS 同源 ✓。已完成 M0–M2（完整命令行 + 主窗口 / 设置窗口 / **配置方案页** / 单实例 / 开机自启 / 门户检测）+ M3 的**服务化**与**打包**（ZIP + `SHA256SUMS`，CI 六行全绿 ✓）；**186 项测试** ✓。只发预览版 —— **正式用户的自动升级收不到它** ✓ → [看进展](#开发中30-跨平台版dev-线) |
+| **2.x（稳定线）** | `v2.1.3.1 "Vega"`（织女星，2026-11-16） | 🟢 积极维护 | **你现在用的这条**：Windows 10/11 —— [Release](https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/latest) 与自动升级通道都以它为准 ✓ |
+| **3.0（DEV 线）** | `3.0.0.0-preview.1` | 🚧 开发中（**仅预览**，M3 收尾中） | **跨平台重写：Rust 核心 + Slint 原生界面**，Windows / Linux / macOS 同源 ✓。已完成 M0–M2（完整命令行 + 主窗口 / 设置窗口 / **配置方案页** / 单实例 / 开机自启 / 门户检测）+ M3 的**服务化**与**打包**（ZIP + `SHA256SUMS`，CI 六行全绿 ✓）；**210 项测试** ✓。只发预览版 —— **正式用户的自动升级收不到它** ✓ → [看进展](#开发中30-跨平台版dev-线) |
 
 > 版本线（`MAJOR.MINOR`）都有代号，规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
@@ -144,8 +144,8 @@
 
 ## 🧱 模块划分
 
-v2.0.2 起由单文件拆成 6 个纯标准库模块（**内嵌 Python 运行时下同样是这 6 个文件**），
-v2.0.6.0 起另加一个**用户会话**里的托盘小程序：
+v2.0.2 起由单文件拆成 6 个纯标准库模块，之后又加了 3 个 —— `tray.py`（v2.0.6.0，**用户会话**里的托盘小程序）、`metrics.py`（v2.0.8.0）、`profiles.py`（v2.0.9.0）；
+现在随包分发 **9 个** .py（**内嵌 Python 运行时下同样是这 9 个文件**）：
 
 | 文件 | 职责 | 关键符号 |
 | --- | --- | --- |
@@ -154,10 +154,14 @@ v2.0.6.0 起另加一个**用户会话**里的托盘小程序：
 | `web_api.py` | HTTP 路由层：`/`（内联单页）、`/branding/*`、全部 `/api/*`、Host / Origin / 自定义头校验 | `_Handler`、`api_get_status`、`api_post_config`、`api_post_password`、`api_post_login`、`api_post_restart`、`api_get_log_tail`、`_HTML_PAGE` |
 | `auto_update.py` | 自动升级：GitHub 探测、下载与 SHA256 校验、静默安装、升级熔断、启动钩子、**升级看门狗**（v2.0.10.0 起探 `/api/health`）、**整目录备份与回滚**（v2.0.11.0） | `_check_github_latest`、`_download_installer`、`_do_update_now`、`_auto_update_loop`、`_post_upgrade_startup`、`_ensure_nssm_appexit_sane`、`_build_update_wrapper`、`_build_health_probe_script`、`_backup_modules`、`_build_rollback_script`、`api_get_rollback`、`api_post_rollback` |
 | `eula.py` | EULA 与 CHANGELOG 读取 | `api_get_changelog` |
+| `metrics.py` | **连接质量统计**（v2.0.8.0）：从 `campus_login.log` 现算近 N 天在线率 / 掉线重登 / 失败 / 延迟（**不落第二份状态文件**，重启与升级都不丢） | `build_metrics`、`api_get_metrics`、`collect_lines`、`measure_latency` |
+| `profiles.py` | **配置方案**（v2.0.9.0）：位置相关字段的快照 / 切换 / 按 SSID 自动切；纯逻辑，读写配置由注入的 `_load_config` / `_save_config` 完成 | `PROFILE_KEYS`、`MAX_PROFILES`、`snapshot`、`apply_to_config`、`auto_switch` |
 | `version.py` | **版本号 + 代号唯一来源** | `VERSION`、`CODENAME`、`CODENAME_CN`、`VERSION_FULL` |
 | `tray.py` | **托盘小程序**（v2.0.6.0）：随登录启动，轮询本机 `/api/status` 弹断线通知；`ctypes` 直调 Win32（`Shell_NotifyIcon`），无第三方依赖 | `classify`、`decide_events`、`status_text`、`TrayApp`、`--check`、`--self-test` |
 
-> 依赖方向：`联网_service.py` → 其余 5 个模块；其余模块之间**不互相 import**（共享对象由 `_attach()` 注入）。
+> 依赖方向：`联网_service.py` → `protocol` / `web_api` / `auto_update` / `eula` / `metrics` / `profiles`（后两个是**可选模块**，缺文件只丢对应面板，不会拖垮服务）+ `version`；
+> `web_api.py` → `eula` + `version`（对 `metrics` / `profiles` / `protocol` 只在函数内兜底导入）；`auto_update.py` / `eula.py` 只 import `version`。
+> 除这些边之外，模块之间**不互相 import**，共享对象由 `_attach()` 注入。
 > `tray.py` 更独立：**不 import 任何业务模块**，只通过本机 HTTP 接口跟服务说话 ——
 > 所以它跑在用户会话（非管理员）里也完全没问题。
 
@@ -187,10 +191,14 @@ Windows 服务（NSSM）启动
         │
         ├── 线程 A：startup-trigger  ── 等待 3 秒 ──► run_once("startup")
         ├── 线程 B：periodic-check   ── 按自检间隔 ─► run_once("periodic")
+        ├── 线程 C：auto-update      ── 启动 30 秒后首查，之后按 update_check_interval_hours ─►
+        │                               检查更新 / 发现新版即静默升级（检查与升级全程持 UPDATE_LOCK）
         └── 主线程：HTTP Server 监听 127.0.0.1:8848
                         ▲
                         └── 浏览器 Web UI / 手动「立即登录」 ──► run_once("manual")
 ```
+
+> 升级任务是**串行**的：检查 / 下载 / 安装全程持 `UPDATE_LOCK`，同一时刻只跑一个；忙时点「立即检查更新 / 立即升级」会回 409 + 当前进度。
 
 ### 一次检查的执行流程
 
@@ -198,12 +206,14 @@ Windows 服务（NSSM）启动
 run_once(原因)
    │
    ├─ 1. 读取 config.json（每次实时读，改配置无需重启）
+   ├─ 1.5 网络位置守卫（开启时）：Wi-Fi 名 / 本机网段不在白名单 → 静默跳过本次，不计失败、不进退避
    ├─ 2. wait_network：每 2 秒探测 网关:端口，最长 network_wait_timeout_sec 秒
-   │         └─ 超时不可达 → 判定「不在校园网」→ 静默返回，不计失败
+   │         └─ 超时不可达 → 记 last_error=校园网不可达 → 进入退避（计一次失败）
    ├─ 3. is_online：GET /drcom/chkstatus 查在线状态
    │         ├─ 已在线   → 重置退避，结束
    │         └─ 未在线   → 继续
-   └─ 4. login：POST 账号+密码 到 /eportal/portal/login
+   ├─ 4. 账号 / 密码未设置 → 记 last_error，静默跳过（不计失败、不进退避）
+   └─ 5. login：POST 账号+密码 到 /eportal/portal/login
              ├─ 成功 → 记录 last_login_at，重置退避
              └─ 失败 → 记录 ERROR，进入指数退避
 ```
@@ -213,10 +223,11 @@ run_once(原因)
 | 项 | 说明 |
 | --- | --- |
 | 退避档位 | `5 → 10 → 20 → 40 → 60` 分钟（`BACKOFF_LEVELS`），60 分钟封顶 |
-| 触发条件 | 登录失败、连续检测异常、**网关不可达**（视为「不在校园网」，同样计入退避） |
+| 触发条件 | 登录失败、连续检测异常（`run_once` 抛异常）、**网关不可达**（记 `last_error=校园网不可达`，同样计入退避） |
 | 重置条件 | 检测到已在线 / 登录成功 |
 | 实际等待 | 周期线程取 **`min(自检间隔, 剩余退避时间)`**：退避已到期 → 立即重试；退避小于间隔 → 按退避等待；退避大于间隔 → 仍按自检间隔（不会被退避无限推迟）。v2.0.2 之前误用 `max`，表现为开机后 30 分钟没有任何登录尝试 |
-| 密码未设置 | 记 `last_error=密码未设置`，**不计入退避**（属于用户操作问题，不是网络问题） |
+| 守卫不命中 | 网络位置守卫白名单不命中 → 静默跳过本次检查，**不计入退避**（不算失败） |
+| 密码 / 账号未设置 | 记 `last_error=密码未设置` / `账号未设置`，**不计入退避**（属于用户操作问题，不是网络问题） |
 
 ### 数据与持久化
 
@@ -224,6 +235,7 @@ run_once(原因)
 | --- | --- | --- |
 | 配置 | `<脚本目录>\config.json` | 缺失时自动生成默认值；**升级 / 重装不会覆盖**（安装器 `onlyifdoesntexist`） |
 | 密码 | `<脚本目录>\password.txt` | UTF-8 单行纯文本；除空行与安装包自带的模板提示行外，**整行都是密码原文（可以包含 `#`）** |
+| 方案专属密码 | `<脚本目录>\password.<方案名>.txt` | v2.1.3.0：某个配置方案带自己的密码时用这个文件（格式同 `password.txt`，一行密码）；该方案没设专属密码时回落到公共 `password.txt` |
 | 业务日志 | `<脚本目录>\logs\campus_login.log` | 认证过程日志；**超过 5 MB 自动轮转**（`campus_login.log.1`~`.3`，合计 ≤ 20 MB），不需要手动清理；面板统计会把归档一起读，轮转不断档 |
 | 诊断包 | 内存中生成，不落盘 | 「关于 → 日志与诊断 → 下载诊断包」= 版本 / 环境 / 服务状态 + 脱敏配置 + 各日志尾部（每个 ≤ 512 KB）。账号与 MAC 已打码、**不含密码**；内网 IP 与 Wi-Fi 名保留（排障必需） |
 | 升级日志 | `<脚本目录>\logs\upgrade.log` | 每次检查 / 下载 / 安装 / 熔断的流水；Web UI「查看升级历史」看的就是它。**超过 2 MB 自动轮转**（`.1` / `.2`） |
@@ -287,31 +299,46 @@ GET http://{HOST}:801/eportal/portal/login?callback=dr{随机数}&login_method=1
 ## 目录结构
 
 ```
-DrcomAutoLogin-Windows/
+StardustFlashLink/             # 远端仓库名（默认 clone 目录名）
 ├── 联网_service.py            # 入口：配置 / 密码 / 状态 / 退避 / 线程调度 / main()
 ├── protocol.py                # 认证协议：等网络 → 查在线 → 登录、网络发现
 ├── web_api.py                 # HTTP 路由 + 内联单页 Web UI（HTML/CSS/JS 全在 _HTML_PAGE）
 ├── auto_update.py             # 自动升级：探测 / 下载 / 校验 / 静默安装 / 熔断 / 启动钩子
 ├── eula.py                    # EULA 与 CHANGELOG 读取
 ├── version.py                 # 版本号 + 版本代号（唯一来源）
+├── metrics.py                 # 连接质量统计：从业务日志现算（v2.0.8.0）
+├── profiles.py                # 配置方案：位置相关字段快照 + 按 SSID 自动切（v2.0.9.0）
+├── tray.py                    # 用户会话里的托盘小程序：断线通知 / 立即重连（v2.0.6.0）
 ├── install.bat                # 一键安装：注册并启动 Windows 服务
 ├── uninstall.bat              # 一键卸载：停止并移除服务
 ├── README.md                  # 本文件
 ├── CHANGELOG.md               # 逐版本变更（README 只留摘要）
 ├── LICENSE                    # MIT 许可证
-├── docs/
-│   ├── VERSIONING.md          # 版本号规则 / 版本线代号表
-│   ├── screenshot-webui.png       # Web UI 截图（亮色）
-│   └── screenshot-webui-dark.png  # Web UI 截图（暗色）
 ├── AGENTS.md                  # AI / 协作者编辑规范（改代码前请读）
 ├── _smoke_static.py           # 静态冒烟测试（python _smoke_static.py）
 ├── _smoke_http.py             # HTTP 层冒烟测试（python _smoke_http.py）
-├── .github/workflows/build-installer.yml  # 自动构建安装程序并发布 Release
+├── docs/
+│   ├── VERSIONING.md          # 版本号规则 / 版本线代号表
+│   ├── PR-WORKFLOW.md         # PR 与合并策略（机器人审核 / 必需检查 / 分支保护）
+│   ├── RELEASING.md           # 两条 Release 通道 / 发布说明「模板 + 渲染器」
+│   ├── STORAGE.md             # 配置 / 密码 / 历史存储选型（暂不实施 SQLite）
+│   ├── screenshot-webui.png       # Web UI 截图（亮色）
+│   └── screenshot-webui-dark.png  # Web UI 截图（暗色）
+├── .github/
+│   ├── scripts/
+│   │   ├── pr_review.py       # PR 机器人审核规则（纯标准库）
+│   │   └── render_release_notes.py  # 发布说明渲染器（纯标准库）
+│   └── workflows/
+│       ├── build-installer.yml    # 构建安装包并发布两条 Release
+│       ├── pr-bot.yml             # PR Bot：跑 pr_review.py 并贴评论
+│       └── pr-checks.yml          # PR Gate：语法检查 + 两个冒烟
 └── packaging/                 # 【可选】打包成安装程序
     ├── build.bat              # 构建入口（双击运行）
     ├── build.ps1              # 构建逻辑（自动准备 NSSM / Inno Setup）
     ├── setup.iss              # Inno Setup 6 脚本
-    ├── RELEASE-NOTES.md       # Release 说明模板（CI 渲染占位符）
+    ├── stop-tray.ps1          # 升级前请走托盘（按「tray.py + 安装目录」精确匹配，v2.0.8.1）
+    ├── RELEASE-NOTES.md       # 正式版 Release 说明模板（CI 渲染占位符）
+    ├── RELEASE-NOTES-installer.md  # 固定下载通道（tag installer）的短模板
     ├── LICENSE.txt            # 安装包内附的许可证
     ├── config.json.template   # 默认配置模板（安装时复制为 config.json，已存在则不覆盖）
     ├── password.txt.template  # 密码文件占位模板（内容为空）
@@ -319,7 +346,7 @@ DrcomAutoLogin-Windows/
     └── README.md              # 打包与安装包使用说明
 ```
 
-> 运行时才会生成、**不在仓库中**：`config.json`、`password.txt`、`logs\`、`tools\`（NSSM）、`python\`（CI 构建时下载的内嵌 Python 运行时，打进安装包）、`packaging\output\`。
+> 运行时才会生成、**不在仓库中**：`config.json`、`password.txt`、`password.<方案名>.txt`、`logs\`、`tools\`（NSSM）、`python\`（CI 构建时下载的内嵌 Python 运行时，打进安装包）、`packaging\output\`。
 
 ---
 
@@ -342,14 +369,14 @@ DrcomAutoLogin-Windows/
    - 注册并启动 Windows 服务 `DrcomAutoLogin`
    - 在桌面和开始菜单创建「Dr.COM 配置」快捷方式
 4. 打开浏览器访问 **`http://127.0.0.1:8848`**
-5. 在「配置」标签页填入**账号**，选择**运营商后缀**，点「💾 保存配置」；密码在「状态」页的「账户与登录密码」卡里设置（点「保存账号与密码」一次存下账号 + 运营商 + 密码）
+5. 在「状态」页的「账户与登录密码」卡里填**账号**、选**运营商**、填**密码**（两次），点「保存账号与密码」一次存下三样；其余配置项在「配置」页改完点「💾 保存配置」
 6. 回到「状态」标签页点「🔄 立即登录」验证；成功后开机将自动登录
 
 ### 📦 路径 B：打包成安装程序（可选）
 
 1. 安装 **Inno Setup 6**（`build.bat` 会检测，缺失时可自动下载安装）
 2. 双击运行 `packaging\build.bat`（会自动准备 NSSM 并调用 `ISCC.exe` 编译）
-3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.1.3.0.exe`
+3. 构建产物：`packaging\output\StardustFlashLink-Setup-v2.1.3.1.exe`
 4. 把该 `.exe` 分发出去，双击即按向导安装（可勾选「创建桌面快捷方式」「安装后立即启动服务」）
 
 ---
@@ -371,9 +398,10 @@ DrcomAutoLogin-Windows/
 
 | 约定 | 说明 |
 | --- | --- |
-| **每个版本一个分支** | 版本分支命名 `hotfix/v{版本}`（如 `hotfix/v2.0.2.4`）。本版全部改动只落在该分支上；**不要**把新版本的改动提交到旧版本分支 |
+| 分支命名 | `<type>/<简短描述>`，type ∈ `feat` / `fix` / `hotfix` / `docs` / `chore` / `refactor` / `test` / `ci` / `build` / `perf` / `style` / `revert`（完整规则见 [`docs/PR-WORKFLOW.md`](docs/PR-WORKFLOW.md)）。历史版本分支把版本号写进描述：`feat/v{版本}`（功能版，如 `feat/v2.1.3.0`）、`fix/v{版本}`（修复版，如 `fix/v2.0.7.1`）、`hotfix/v{版本}`（紧急修复，如 `hotfix/v2.0.9.1`） |
+| 合入与发版 | 任何改动 → 开分支 → PR（机器人审核 + `PR Gate`）→ squash 合 `main`；**合并到 main 的 push 自动触发** `build-installer.yml` 发版（纯文档 / `.github/**` / `docs/**` 改动不触发，见 workflow 的 `paths-ignore`） |
 | 版本号单一来源 | `version.py` 的 `VERSION`；`packaging/setup.iss` 的 `MyAppVersion`、NSSM 服务描述、`install.bat` 描述、模块 docstring 必须同步 |
-| 从版本分支发版 | 工作流的自动触发只监听 `main`/`master`，版本分支用 `workflow_dispatch` 手动触发：<br>`gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLink --ref hotfix/v2.0.2.4` |
+| 手动重跑 / 演练 | 需要重跑或只验证发布说明时用 `workflow_dispatch`（`dry_run=true` 只渲染、不发 release）：<br>`gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLink --ref main` |
 | 一次构建出两条发布 | ① tag `installer`（**prerelease**，固定下载链接）；② tag `v{版本}`（**非 prerelease** —— `/releases/latest` 只认它，是自动升级通道） |
 | 产物名固定 | `StardustFlashLink-Setup-v{版本}.exe`（不变量 I9，存量下载链接依赖它） |
 
@@ -389,7 +417,7 @@ DrcomAutoLogin-Windows/
 | 标签 | 用途 |
 | --- | --- |
 | 📊 **状态** | 查看「网关是否可达 / 是否在线 / 上次登录时间与结果 / 下次检查倒计时」；提供「🔄 立即登录」手动触发一次认证 |
-| ⚙️ **配置** | 修改守护网关、账号、运营商后缀、自检开关与间隔、网络等待超时、UI 端口；点「💾 保存配置」立即生效（UI 端口需重启服务）。另有「修改密码」按钮单独改密码 |
+| ⚙️ **配置** | 修改认证网关与端口、自检开关与间隔、网络等待超时、UI 端口、网络位置守卫与配置方案（含选中方案的账号 / 专属密码）；点「💾 保存配置」立即生效（UI 端口需重启服务）。顶层的账号 / 运营商 / 密码在「状态」页的「账户与登录密码」卡里改 |
 | 📝 **日志** | 实时查看 `campus_login.log` 尾部，支持关键字过滤、自动滚动、下载完整日志 |
 | ℹ️ **关于** | 显示程序版本、服务启动时间与运行时长、配置 / 密码 / 日志文件位置；提供「🔁 重启服务」与「🗑 卸载服务」提示 |
 
@@ -429,7 +457,7 @@ DrcomAutoLogin-Windows/
 先确认服务在运行（`tools\nssm.exe status DrcomAutoLogin`）。若 `8848` 被别的程序占用，改 `config.json` 的 `ui_port` 或卸载重装后改端口，然后**重启服务**。注意 Web UI 只监听本机，手机等其它设备访问不了。
 
 **Q5：怎么改密码？**
-Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保存。也可直接编辑 `password.txt`（UTF-8 单行，前后不要空格）后重启服务。
+Web UI →「状态」页 →「账户与登录密码」卡 → 在「账户登录密码」与「再次输入密码」里各填一次新密码 → 点「保存账号与密码」（同一张卡也顺手保存账号 / 运营商；密码留空 = 不改密码）。密码写到当前生效的密码文件（当前方案有自己的密码就是 `password.<方案名>.txt`，否则公共 `password.txt`）。也可直接编辑 `password.txt`（UTF-8 单行，前后不要空格）后重启服务。
 
 **Q6：怎么卸载？**
 - **脚本方式**：管理员运行 `uninstall.bat`。它会停止并移除 Windows 服务、删除桌面与开始菜单快捷方式；随后**询问**是否一并删除 `config.json`、`password.txt` 与 `logs\`（**默认保留**，直接回车即保留）。注意 `tools\`（NSSM）不会被自动删除，需要彻底清理可手动删掉整个目录。
@@ -439,8 +467,8 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 
 ## 安全说明
 
-- **密码只在 `password.txt`**：UTF-8 编码的单行纯文本文件，与其它配置分离；源码中**没有任何硬编码凭据**
-- **凭据不入库**：`password.txt` 与 `config.json` 均已写入 `.gitignore`，不会被提交到仓库
+- **密码只在文本文件里**：公共密码在 `password.txt`、方案专属密码在 `password.<方案名>.txt`（均为 UTF-8 编码的单行纯文本文件，与其它配置分离）；源码中**没有任何硬编码凭据**
+- **凭据不入库**：`password.txt` / `password.*.txt` 与 `config.json` 均已写入 `.gitignore`，不会被提交到仓库
 - **需自行创建 `password.txt`**：本仓库不含该文件，请在使用前于脚本目录下自行创建并写入密码
 - **Web UI 只监听 `127.0.0.1`**：不对局域网 / 外网开放，其它设备无法访问
 - **接口不返回密码**：状态接口只返回 `password_status`（`set` / `missing`），永不返回密码原文
@@ -449,9 +477,9 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 - **请求体上限（v2.0.13.0 / v2.0.14.0）**：JSON 端点 1 MB（超限回 413，且**先把已到达的字节有界排空再干净关连接** —— 否则未读数据会让 Windows 发 RST，把 413 本身冲掉）；zip 配置导入 4 MB，且**解压后**还会再查一遍（全部成员合计 ≤ 8 MB、单成员 ≤ 4 MB，挡 zip 炸弹）
 - **运行时单实例锁（v2.0.13.0）**：命名互斥体 `Local\DrcomAutoLoginService`；第二个实例**什么都不做**直接退出（以前会先把线程/周期自检跑起来，直到绑端口失败才退）。升级/重启时对旧进程宽容：最多等 20 秒
 - **日志脱敏**：密码不写入任何日志文件；`config.json` 也不保存密码
-- **权限建议**：`password.txt` 所在目录建议只授予本机账户访问权限（服务以系统账户运行，注意共享机器的风险）
+- **权限建议**：密码文件所在目录建议只授予本机账户访问权限（服务以系统账户运行，注意共享机器的风险）
 - **提交前的自动隐私守卫**：`python _smoke_static.py` 会把本机 `password.txt` / `config.json` 里的账号拿去和**所有入库文件**比对，命中即测试失败。想连安装目录一起查，先设 `$env:DRCOM_DATA_DIR = 'D:\Program Files\DrcomAutoLogin'`（CI 上没有这些文件，该项自动跳过）；`logs\*`、`update_attempt.json`、`installer-silent.log`、`config-export-*.zip` 等运行期产物全部在 `.gitignore` 内
-- **截图必须脱敏**：README 截图由 `_ui_redesign/preview.py` 的假数据渲染（账号打码成 `2023******`），**禁止**提交真机界面截图 —— 规则见 [`AGENTS.md`](AGENTS.md)
+- **截图必须脱敏**：README 截图由**仓库外**的本地渲染工具（`_ui_redesign\preview.py`，不入库、按需自备）用假数据渲染（账号打码成 `2023******`），**禁止**提交真机界面截图 —— 工具与重拍步骤见 [`AGENTS.md`](AGENTS.md)「截图规范」
 
 ---
 
@@ -476,21 +504,25 @@ Web UI →「配置」标签页 → 点「修改密码」→ 输入新密码保�
 | 本 `README.md` | 功能、架构、协议、快速开始、常见问题 |
 | [`packaging/README.md`](packaging/README.md) | 开发者构建安装包的步骤、安装 / 卸载流程、安装包目录结构、已知限制 |
 | [`docs/PR-WORKFLOW.md`](docs/PR-WORKFLOW.md) | PR 与合并策略：分支模型、机器人审核规则、必需检查、分支保护与应急通道 |
+| [`docs/VERSIONING.md`](docs/VERSIONING.md) | 版本号与代号规则、改版本要同步哪些字面量、发版 checklist |
+| [`docs/RELEASING.md`](docs/RELEASING.md) | 两条 Release 通道、发布说明「模板 + 渲染器」规则、dry_run 验证与隐私检查 |
+| [`docs/STORAGE.md`](docs/STORAGE.md) | 「配置 / 密码与历史该不该上 SQLite」的选型分析与结论（暂不实施） |
 
 ---
 
 ## 版本记录
 
-> 这里只留**版本线**（`MAJOR.MINOR`）级别的摘要，逐版本、逐条目的完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+> 这里只留**主要版本**的摘要（不是逐版本齐全），逐版本、逐条目的完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 > 版本线代号的命名规则与候选表见 [`docs/VERSIONING.md`](docs/VERSIONING.md)。
 
 | 版本线 | 代号 | 摘要 |
 | --- | --- | --- |
 | **v1.0 – v1.4.0** | — | 功能成型期：NSSM 服务托管、Web UI 配置、周期自检与指数退避、一键安装 / 卸载、可选 Inno Setup 打包、内嵌 Python 运行时、GitHub Actions 自动构建、静默自动升级、配置导入导出、日志分级，并重命名为「星尘闪连」。 |
 | **v2.0.0 – v2.0.3.0** | — | 2.0 时代：品牌视觉（Blue Archive 渐变 + `app.ico` / `wizard.bmp`）与 EULA；随后是稳定性与安全加固（4 个 `NameError` 升级按钮、SHA256 校验 fail-closed、Host / Origin / 自定义头校验、`password.txt` 模板行）；v2.0.3.0 把 Web UI 整体重做为 Apple 风格亚克力玻璃界面，并修掉 logo / favicon 404。 |
-| **v2.1.0.0 – v2.1.3.0（当前）** | `Vega` 织女星 | **开 2.1 线（代号 `Sirius` → `Vega`）** + P7 技术债清算：**① 登录异常不再泄漏密码**（P7-2）—— 登录是 GET、密码就在 URL 里，旧实现直接 `_log("…: %s", exc)`，某些异常会把整条 URL 带进日志 ✗ → 现在过 `_safe_error_text()`（只留类型 / HTTP 状态码，并擦除 URL 与 `password=`）✓；**② `next_check_at` 改单写者**（P7-4）—— 消除 `run_periodic` / `run_once` 双写竞争（界面倒计时不再跳），只有退避生效时才由 `run_once` 改写；**③ `os._exit(0)` 语义写明白**（P7-1）：**先落盘 → 再显式放锁 → 才退出**；**④ 批处理细节**（P7-3）：`install.bat` 不再硬编码 `C:\Python314`（改用 `py -3` + 常见安装位置）、`uninstall.bat` 的 `choice` 补 `/D N /T 30`（无人值守不挂死、默认保留数据）、两个脚本都写明「安装路径不能含 `!`」的限制。随后：**v2.1.1.0** 把「刚连上 Wi-Fi 要干等到下个周期」治掉了（长等待拆成 5 秒一小步、地址或 Wi-Fi 名一变就检查；配置页能点选 Wi-Fi 名；账号与后缀进方案 = 多网络多账号）；**v2.1.2.0** 是**界面重做版** —— 状态 / 配置 / 日志 / 关于四页的信息架构全部重排（状态页状态与动作合卡 + 两条统计条 + 右栏凭据；配置页只留「本机怎么上网」，升级整块搬到「关于 → 更新」；日志页改终端窗口），新增「星尘风」主题并作为默认主题，全站字体统一到 MiSans，顺手把长路径折行、统计条日期折行、间距不统一这些排版问题一并修掉；**v2.1.3.0** 把**多网络多账号**真正落到界面 —— 方案可以带**自己的账号与密码**（配置页新增「选中方案的账号与密码」，切方案时连密码一起换 ✓；以前密码只在服务启动时读过一次，方案带了专属密码也不生效 ✗），并修掉 v2.1.2.0 搬家时留下的毛病：**状态页那张凭据卡的按钮只存密码**，账号 / 运营商改了没有任何按钮能保存 ✗ → 现在一次存三样 ✓。 |
+| **v2.1.0.0 – v2.1.3.1（当前）** | `Vega` 织女星 | **开 2.1 线（代号 `Sirius` → `Vega`）** + P7 技术债清算：**① 登录异常不再泄漏密码**（P7-2）—— 登录是 GET、密码就在 URL 里，旧实现直接 `_log("…: %s", exc)`，某些异常会把整条 URL 带进日志 ✗ → 现在过 `_safe_error_text()`（只留类型 / HTTP 状态码，并擦除 URL 与 `password=`）✓；**② `next_check_at` 改单写者**（P7-4）—— 消除 `run_periodic` / `run_once` 双写竞争（界面倒计时不再跳），只有退避生效时才由 `run_once` 改写；**③ `os._exit(0)` 语义写明白**（P7-1）：**先落盘 → 再显式放锁 → 才退出**；**④ 批处理细节**（P7-3）：`install.bat` 不再硬编码 `C:\Python314`（改用 `py -3` + 常见安装位置）、`uninstall.bat` 的 `choice` 补 `/D N /T 30`（无人值守不挂死、默认保留数据）、两个脚本都写明「安装路径不能含 `!`」的限制。随后：**v2.1.1.0** 把「刚连上 Wi-Fi 要干等到下个周期」治掉了（长等待拆成 5 秒一小步、地址或 Wi-Fi 名一变就检查；配置页能点选 Wi-Fi 名；账号与后缀进方案 = 多网络多账号）；**v2.1.2.0** 是**界面重做版** —— 状态 / 配置 / 日志 / 关于四页的信息架构全部重排（状态页状态与动作合卡 + 两条统计条 + 右栏凭据；配置页只留「本机怎么上网」，升级整块搬到「关于 → 更新」；日志页改终端窗口），新增「星尘风」主题并作为默认主题，全站字体统一到 MiSans，顺手把长路径折行、统计条日期折行、间距不统一这些排版问题一并修掉；**v2.1.3.0** 把**多网络多账号**真正落到界面 —— 方案可以带**自己的账号与密码**（配置页新增「选中方案的账号与密码」，切方案时连密码一起换 ✓；以前密码只在服务启动时读过一次，方案带了专属密码也不生效 ✗），并修掉 v2.1.2.0 搬家时留下的毛病：**状态页那张凭据卡的按钮只存密码**，账号 / 运营商改了没有任何按钮能保存 ✗ → 现在一次存三样 ✓。**v2.1.3.1** 是**可靠性 / 数据安全修复版**（2026-11 代码审计）：并发写盘不再落半截配置、UTF-8 带 BOM 的 config.json 不再被重置（且损坏先备份成 `.bad-<时间戳>`）、配置页保存不再清空配置方案、密码文件读失败不再清空内存密码、配置导入的加密/未知压缩包与超限上传改为 400/413 且给中文原因、托盘「服务未响应」通知恢复、登录错误文案彻底擦除凭据、自动升级线程不再被一次异常打死、发布说明改「模板 + 渲染器」并由 CI 做残留占位符/隐私闸门。接口、配置结构、服务名、安装路径都没动 ✓。 |
 | v2.0.14.0 | `Sirius` 天狼星 | 把 P1 / P3 两条线上最后几个「边界上不对」的口子补齐（都不是新功能）：**① 配置导入连「解压后」体积一起管**（P1-6）—— 旧实现只看上传的 4 MB，几十 KB 的 zip 能解出几十 GB ✗，现在**在任何 `read()` 之前**先扫 `infolist()`（单成员 ≤4 MB / 合计 ≤8 MB），且 `schema_version` 传 `"abc"` 这类怪类型由 **500 改 400**（异常类型补齐 ValueError/TypeError/KeyError）；**② 空账号不再挡住整份配置保存**（P1-7）—— 旧校验要求 `account.isdigit()`，新装机连「自动升级」开关都存不下去 ✗，现在允许留空、协议层跳过登录并提示「账号未设置」（不计退避）；**③ 周期自检线程遇到异常不再静默死掉**（P3-2）—— 整圈包 try/except + 60 秒冷却，线程必须活着，顺带把 `cfg["auto_check_interval_min"]` 换成 `.get(..., 30)`。 |
 | v2.0.13.0 | `Sirius` 天狼星 | Web 层加固三件（P3-6 / P3-7）：**① 安全响应头** —— CSP `default-src 'none'`（页面全内联，只放宽 `script-src/style-src 'unsafe-inline'`）+ `frame-ancestors 'none'` / `X-Frame-Options: DENY` / `X-Content-Type-Options: nosniff` / `Referrer-Policy: no-referrer` / `Permissions-Policy`，HTML 与 JSON / zip 响应**统一带**；**② 请求体上限** —— JSON 端点 1 MB，超限回 413 且**先把已到达的字节有界排空（≤4 MB）再干净关连接**（不排空的话 Windows 会因未读数据发 RST，把 413 本身冲掉 ✗，这条是实测踩出来的）；**③ 运行时单实例锁** —— 命名互斥体 `Local\DrcomAutoLoginService`，第二个实例**什么都不做**直接退出（旧行为会先把线程/周期自检跑起来，直到绑端口失败才退 ✗），对升级 / 重启路径宽容（最多等旧进程 20 秒）。 |
+| v2.0.12.0 | `Sirius` 天狼星 | 补日常运维两件小事：**① 日志自动轮转** —— 业务日志 `campus_login.log` 改 5 MB × 3 份、升级日志 `upgrade.log` 改 2 MB × 2 份（统计从 `.3 → .1 → 当前` 拼接入账，轮转不断档）；**② 一键脱敏诊断包** —— 新增 `GET /api/logs`（占用明细）与 `GET /api/diagnostics`（内存生成 zip），包内账号 / MAC 打码、`password.txt` **永不入包**。 |
 | v2.0.11.0 | `Sirius` 天狼星 | 给「升坏了」补退路：**整目录备份 + 自动/手动回滚**（P6-6 / 路线图 #16）。升级前把**随包分发的 9 个代码文件**备份到 `{app}\backup\<旧版本>\` 并写 `manifest.json`（逐个 sha256）；执行器在两轮健康探测都不通过时**自动**「停服务 → 校验并还原这些文件 → 起服务 → 再探」，Web UI「配置 → 自动升级 → 版本回滚」也能手动一键回退（跑的是**同一份**回滚脚本，手测到的就是自动会跑的）。回滚三铁律：① **只还原代码**，`config.json` / 密码 / 方案一律不动；② **fail-closed**（清单缺失、备份被改坏、拿错版本、文件名带路径分隔符 → 全部拒绝，且 all-or-nothing）；③ 备份保留 7 天但**至少留最新 2 份**。顺带修掉一个「换备份方案才会暴露」的陷阱：启动钩子原先「%TEMP% 里没有旧式备份就 return」，会把尝试确认 / 执行器结果 / AppExit 自愈 / 托盘自启**整段静默跳过** ✗。 |
 | v2.0.10.0 | `Sirius` 天狼星 | 把 v2.0.9.1 里自己写下的待办做完：升级**收尾判定改探 HTTP**。执行器跑完安装器后用随包内嵌的 Python 探 `http://127.0.0.1:<ui_port>/api/health` —— 拿到 `{"ok":true}` 才算「服务真的活了」（此前只看 `sc query`，而那是 nssm 的 wrapper：`AppExit=Ignore` 下里面的 Python 崩了它照样 RUNNING ✗，v2.0.8.0 / v2.0.9.0 两次事故就是这么「升完才发现」的）。探不到先**自动「停 + 起」重启一次**再探一次；结论写进 `%TEMP%\drcom_apply_update.rc`（`health=OK\|FAIL`）与 `logs\upgrade.log`（中文告警 —— 服务真起不来时 Web UI 也打不开，那行日志就是唯一告警面，托盘右键「打开日志目录」即可看到）。探针自包含、只用标准库、**不 import 项目模块**、禁用系统代理，缺件时退回旧判据（`health=SKIP`）。顺手修掉一个从 v2.0.4.2 起就在的老坑：执行器的 `installer_rc=` 因为 `echo …=0>"…"` 被 cmd 当成「句柄 0 重定向」而**从来没落盘**（rc 文件是空文件）→「安装器非 0 退出码就告警」一直是死代码 ✗，现改为把重定向写在前面的写法 ✓。 |
 | v2.0.9.1 | `Sirius` 天狼星 | 🔴 **紧急修复**：v2.0.9.0 在 `main()` 里多写了一句 `import protocol as _protocol_mod` ✗ —— **函数内的 import 会让该名字在整个函数里变成局部变量**，于是同一函数里更早的 `_protocol_mod._attach(...)` 直接 `UnboundLocalError` → 服务启动即退、Web UI 端口消失 ✗。已删掉该行（模块顶部本来就导入过 ✓），并加**静态守卫**：服务里出现「函数内 import 模块别名」一律判失败 ✗。 |

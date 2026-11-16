@@ -174,9 +174,19 @@ _proto_code = "\n".join(l for l in _src_proto.splitlines() if not l.strip().star
 check("v2.0.4.5 run_once 改为非阻塞抢锁", "_RUN_LOCK.acquire(blocking=False)" in _src_proto)
 check("v2.0.4.5 不再先持锁再判 login_in_progress（死逻辑已除）", "with _RUN_LOCK:" not in _proto_code)
 check("v2.0.4.5 手工抢到的锁会被释放", "_RUN_LOCK.release()" in _src_proto)
-check("v2.0.4.5 config 写盘用唯一 tmp 名", '"{}.{}.tmp"' in src_svc and "CONFIG_FILE, os.getpid()" in src_svc)
-check("v2.0.4.5 password 写盘用唯一 tmp 名",
-      "os.getpid()" in src_svc and "os.replace(tmp, path)" in src_svc)
+# v2.x 维护（审计 C-01）：写盘从「pid 级固定 tmp 名」升级为 tempfile.mkstemp 唯一名 +
+# CONFIG_LOCK —— 同进程多线程并发写不再互相踩（pid 名只挡得住跨进程）。
+check("v2.x 维护 config 写盘走唯一 tmp 名（mkstemp，不再用 os.getpid）",
+      "def _atomic_write_text(" in src_svc
+      and "tempfile.mkstemp(" in src_svc
+      and "_atomic_write_text(CONFIG_FILE, text)" in src_svc
+      and '"{}.{}.tmp".format(CONFIG_FILE' not in src_svc)
+check("v2.x 维护 password 写盘走同一套原子写",
+      '_atomic_write_text(path, password.rstrip(' in src_svc
+      and '"{}.{}.tmp".format(path' not in src_svc)
+check("v2.x 维护 config.json 的读-改-写有 CONFIG_LOCK（RLock，可重入）",
+      "CONFIG_LOCK = threading.RLock()" in src_svc
+      and "with CONFIG_LOCK:" in src_svc)
 check("v2.0.4.5 installer 不再用弃用的 IsTaskSelected",
       "WizardIsTaskSelected('desktopicon')" in _iss_src
       and "if IsTaskSelected('desktopicon')" not in _iss_src)
@@ -1206,6 +1216,12 @@ check("v2.0.14.0 导入上限覆盖「解压后」体积（zip 炸弹）",
       and "zf.infolist()" in src_web)
 check("v2.0.14.0 导入异常类型补全（ValueError / TypeError / KeyError 也算参数不合法）",
       "ValueError, TypeError, KeyError) as exc" in src_web)
+# v2.x 维护（审计 P1-2）：加密 zip / 未知压缩方法（RuntimeError / NotImplementedError）
+# 与截断流（EOFError / zlib.error）也必须归到 400，且不再回显英文异常原文。
+check("v2.x 维护 导入异常补收 RuntimeError / NotImplementedError / EOFError / zlib.error",
+      "RuntimeError, NotImplementedError, EOFError, zlib.error" in src_web
+      and "导入的 zip 无法解析" in src_web
+      and 'import failed: {}".format(exc)' not in src_web)
 check("v2.0.14.0 空账号合法（默认配置本身就能通过校验）",
       svc._validate_config(svc._default_config()) == []
       and svc._validate_config(dict(svc._default_config(), account="")) == []
@@ -1700,19 +1716,64 @@ check("v2.1.0.0 P7-3：两个批处理都写明了「路径不能含 !」的限�
 
 # v2.1.0.0 补丁：发布说明里的代号必须由 CI 从 version.py 填 —— 头部不许再硬编码星名 ✗
 # （事故：换了版本线到 Vega，发布页首行还写着 "Sirius"，因为模板里是死的字面量。）
+# 2026-11 维护：发布说明改为「模板 + 渲染器」—— 机器事实（版本/大小/SHA/对比链接/日期）
+# 一律由 .github/scripts/render_release_notes.py 注入，两个 release 通道共用一套逻辑。
 _rel_head = pathlib.Path("packaging/RELEASE-NOTES.md").read_text(
     encoding="utf-8", errors="replace").splitlines()[0]
 _wf_src = pathlib.Path(".github/workflows/build-installer.yml").read_text(
     encoding="utf-8", errors="replace")
+_render_rel = ".github/scripts/render_release_notes.py"
 _ver_mod = importlib.import_module("version")   # 本文件后段才 import version，这里自带 ✓
 check("v2.1.0.0 补丁：RELEASE-NOTES 头部用 {{CODENAME}} 占位（不再硬编码星名）",
       "{{CODENAME}}" in _rel_head and "{{CODENAME_CN}}" in _rel_head
       and "Sirius" not in _rel_head and _ver_mod.CODENAME not in _rel_head,
       _rel_head[:100])
-check("v2.1.0.0 补丁：CI 从 version.py 读代号并替换这两个占位符",
+check("发布说明：CI 从 version.py 读代号并交给渲染器（不再手写 Replace）",
       "APP_CODENAME=$cn" in _wf_src
-      and "$body.Replace('{{CODENAME}}', $env:APP_CODENAME)" in _wf_src
-      and _wf_src.count("{{CODENAME}}") >= 2 and _wf_src.count("{{CODENAME_CN}}") >= 2)
+      and '"--codename", "$env:APP_CODENAME"' in _wf_src
+      and '"--codename-cn", "$env:APP_CODENAME_CN"' in _wf_src)
+check("发布说明：两条 release 通道都走同一个渲染器",
+      _wf_src.count("render_release_notes.py") >= 2
+      and '"--channel", "installer"' in _wf_src
+      and '"--channel", "versioned"' in _wf_src)
+check("发布说明：旧的逐条 $body.Replace 已移除（单一事实来源）",
+      "$body.Replace('{{" not in _wf_src)
+check("发布说明：安装器通道有独立模板",
+      pathlib.Path("packaging/RELEASE-NOTES-installer.md").is_file())
+check("发布说明：渲染器文件存在",
+      pathlib.Path(_render_rel).is_file())
+
+# —— 行为断言（不是 grep 源码）：真跑一遍渲染器，覆盖残留占位符 / 隐私 / 标题 / 时区 ——
+import subprocess as _subprocess   # noqa: E402
+_rc = _subprocess.run([sys.executable, _render_rel, "--self-test"],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+check("发布说明：渲染器自测全绿（含两套模板 + 标题占位符 + 上海时区）",
+      _rc.returncode == 0,
+      ((_rc.stdout or "").strip().splitlines() or ["<no stdout>"])[-1]
+      + " | " + ((_rc.stderr or "").strip().splitlines() or [""])[-1])
+_dry = _subprocess.run(
+    [sys.executable, _render_rel,
+     "--template", "packaging/RELEASE-NOTES.md", "--repo", "o/r",
+     "--channel", "versioned", "--version", "9.9.9.9",
+     "--codename", "Vega", "--codename-cn", "织女星",
+     "--asset", "x.exe", "--size", "1024", "--sha256", "ab" * 32,
+     "--commit", "c" * 40, "--run", "1", "--prev-tag", "v9.9.9.8", "--dry-run"],
+    capture_output=True, text=True, encoding="utf-8", errors="replace")
+check("发布说明：真实模板可端到端渲染（无 {{...}} 残留）",
+      _dry.returncode == 0 and "{{" not in _dry.stdout,
+      (_dry.stdout or "")[-300:] + (_dry.stderr or "")[-200:])
+
+# —— 发布 / 分支保护闸门（审计 P1-1 / P1-2 / D-17）——
+check("发布流程：同名版本默认不覆盖正式版 release（版本号必须先递增）",
+      "allow_republish" in _wf_src and "已跳过正式版发布" in _wf_src)
+_bp_json = json.loads(pathlib.Path(".github/branch-protection.json").read_text(encoding="utf-8"))
+check("分支保护：main 的配置要求走 PR（required_pull_request_reviews 非 null）",
+      isinstance(_bp_json.get("required_pull_request_reviews"), dict)
+      and _bp_json.get("required_status_checks", {}).get("strict") is True)
+_pr_checks_wf = pathlib.Path(".github/workflows/pr-checks.yml").read_text(encoding="utf-8")
+check("CI：PR Gate 会跑 PR 机器人 / 发布说明渲染器的自测",
+      "pr_review.py --self-test" in _pr_checks_wf
+      and "render_release_notes.py --self-test" in _pr_checks_wf)
 
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
@@ -2028,6 +2089,273 @@ check("v2.1.2.0 密码徽标在主页也要能更新（不能只在 loadConfig �
       "c.password_status" in _page and "setPwdBadge(c.password_status)" in _page)
 
 
+# ============================================================
+# v2.x 维护（2026-11 代码审计）—— 行为级回归断言
+# 每条对应一个真实复现过的缺陷；断言测行为，不 grep 源码。
+# ============================================================
+
+# —— M-1：config.json 带 BOM 不再被重置；损坏时先备份再写默认值（审计 C-02/C-07）——
+_m1_dir = tempfile.mkdtemp(prefix="drcom_m1_")
+_m1_cfg = os.path.join(_m1_dir, "config.json")
+_m1_saved_cfg_file = svc.CONFIG_FILE
+svc.CONFIG_FILE = _m1_cfg
+pathlib.Path(_m1_cfg).write_bytes(b"\xef\xbb\xbf" + json.dumps({
+    "host": "10.9.9.9", "port": 80, "account": "2023000001", "suffix": "",
+    "ui_port": 9999, "profiles": {"宿舍": {"values": {"host": "10.9.9.9"}}},
+    "active_profile": "宿舍",
+}, ensure_ascii=False).encode("utf-8"))
+_m1_read = svc._load_config()
+check("维护 M-1：config.json 带 BOM 仍能读出原值（不再回退默认）",
+      _m1_read.get("account") == "2023000001" and _m1_read.get("ui_port") == 9999
+      and "宿舍" in (_m1_read.get("profiles") or {}),
+      repr({k: _m1_read.get(k) for k in ("account", "ui_port")}))
+pathlib.Path(_m1_cfg).write_text("{ 这不是 JSON", encoding="utf-8")
+svc._load_config()
+_m1_bads = sorted(p.name for p in pathlib.Path(_m1_dir).glob("config.json.bad-*"))
+check("维护 M-1：损坏的 config.json 先备份成 config.json.bad-*（不再直接覆盖）",
+      len(_m1_bads) == 1, repr(_m1_bads))
+svc.CONFIG_FILE = _m1_saved_cfg_file
+
+# —— M-2：同进程多线程并发写 config.json 不再落盘坏 JSON（审计 C-01）——
+_m2_dir = tempfile.mkdtemp(prefix="drcom_m2_")
+_m2_cfg = os.path.join(_m2_dir, "config.json")
+_m2_saved_cfg_file = svc.CONFIG_FILE
+svc.CONFIG_FILE = _m2_cfg
+_m2_errors = []
+
+
+def _m2_writer():
+    try:
+        for i in range(40):
+            c = svc._default_config()
+            c["account"] = "202300%04d" % i
+            svc._save_config(c)
+    except Exception as exc:  # noqa: BLE001
+        _m2_errors.append(repr(exc))
+
+
+_m2_threads = [threading.Thread(target=_m2_writer) for _ in range(3)]
+for _t in _m2_threads:
+    _t.start()
+for _t in _m2_threads:
+    _t.join()
+try:
+    _m2_final = json.loads(pathlib.Path(_m2_cfg).read_text(encoding="utf-8-sig"))
+    _m2_valid = str(_m2_final.get("account", "")).startswith("2023")
+except (ValueError, OSError) as exc:
+    _m2_final, _m2_valid = repr(exc), False
+check("维护 M-2：3 线程 × 40 轮并发保存 → 最终文件仍是合法 JSON（审计 C-01）",
+      not _m2_errors and _m2_valid, repr((_m2_errors[:2], _m2_final))[:300])
+svc.CONFIG_FILE = _m2_saved_cfg_file
+
+# —— M-3：profiles.py 仍是可选模块（审计 C-03：不能有第二段无条件 import）——
+_m3_code = "\n".join(_l for _l in src_svc.splitlines() if not _l.strip().startswith("#"))
+check("维护 M-3：profiles 只有一段受 ImportError 保护的 import（可选模块护栏）",
+      _m3_code.count("import profiles as _profiles_mod") == 1,
+      "代码里出现 %d 次" % _m3_code.count("import profiles as _profiles_mod"))
+# 审计 C-06：方案保存 / 切换的「读-改-写」必须与服务层 api_post_config 共用同一把锁
+_m3_prof = pathlib.Path("profiles.py").read_text(encoding="utf-8")
+check("维护 M-3b：profiles 的四个读-改-写入口都持同一把 CONFIG_LOCK",
+      "def _with_config_lock(fn)" in _m3_prof
+      and _m3_prof.count("@_with_config_lock") == 4
+      and "config_lock=None" in _m3_prof,
+      "装饰器 %d 个" % _m3_prof.count("@_with_config_lock"))
+
+# —— M-4：托盘「服务未响应」气泡可达（审计 C-04：旧判定是死逻辑）——
+_tr = importlib.import_module("tray")
+check("维护 M-4：托盘在刚跨过 down 阈值时弹一次、之后不重复、开机不吓人",
+      _tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY) != []
+      and _tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY + 1) == []
+      and _tr.decide_events(None, "down", 1) == []
+      and _tr.decide_events("ok", "ok", 0) == [],
+      repr((_tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY),
+            _tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY + 1))))
+
+# —— M-5：「账号未设置」不算进连接质量分母（审计 C-12）——
+_mt = importlib.import_module("metrics")
+check("维护 M-5：「账号未设置」归入 skip，不再把在线率拉成 0%",
+      any("账号未设置" in p for p in _mt.EV_SKIP), repr(_mt.EV_SKIP))
+
+# —— M-6：配置页保存是「部分更新」，空 body 不再重置配置（审计 P1-1/P2-2）——
+# web_api 的 _load_config / _save_config 正常由 _attach() 注入；本冒烟不 attach，
+# 所以这里用「有没有旧值」分别记录，结束后按原样恢复（不留测试用的假属性）。
+_m6_had_load = hasattr(_wa, "_load_config")
+_m6_had_save = hasattr(_wa, "_save_config")
+_m6_saved_load = getattr(_wa, "_load_config", None)
+_m6_saved_save = getattr(_wa, "_save_config", None)
+_m6_saved_lock = _wa.CONFIG_LOCK
+# 前面几段测试给 web_api 注入过替身 logger（只实现部分方法）—— 这里临时摘掉，
+# 让 _log 走「logger 未注入就静默」的分支，断言只关心配置合并行为。
+_m6_had_logger = hasattr(_wa, "logger")
+_m6_saved_logger = getattr(_wa, "logger", None)
+_wa.logger = None
+_m6_cur = dict(svc._default_config(), host="10.9.9.9", account="2023000001",
+               profiles={"宿舍": {"values": {"host": "10.9.9.9"}}},
+               active_profile="宿舍", profiles_auto_switch=True)
+
+
+def _m6_load():
+    return dict(_m6_cur)
+
+
+def _m6_save(cfg):
+    _m6_cur.clear()
+    _m6_cur.update(cfg)
+
+
+_wa._load_config = _m6_load
+_wa._save_config = _m6_save
+_wa.CONFIG_LOCK = threading.RLock()
+_st6, _b6 = _wa.api_post_config({"auto_check_interval_min": 60})
+check("维护 M-6：配置页保存只合并表单键（已建方案 / 自动切换不被清空）",
+      _st6 == 200 and _m6_cur.get("auto_check_interval_min") == 60
+      and _m6_cur.get("profiles") and _m6_cur.get("active_profile") == "宿舍"
+      and _m6_cur.get("profiles_auto_switch") is True,
+      repr({k: _m6_cur.get(k) for k in ("auto_check_interval_min", "profiles", "active_profile")})[:300])
+_st6b, _b6b = _wa.api_post_config({})
+check("维护 M-6：空 body 保存 → 400（不再把配置重置成默认值）",
+      _st6b == 400 and _m6_cur.get("host") == "10.9.9.9", repr((_st6b, _b6b)))
+if _m6_had_logger:
+    _wa.logger = _m6_saved_logger
+else:
+    del _wa.logger
+if _m6_had_load:
+    _wa._load_config = _m6_saved_load
+else:
+    del _wa._load_config
+if _m6_had_save:
+    _wa._save_config = _m6_saved_save
+else:
+    del _wa._save_config
+_wa.CONFIG_LOCK = _m6_saved_lock
+
+# —— M-7/M-8/M-9：导入端点健壮性 + do_GET 异常兜底（审计 P1-2/P1-3/P2-1）——
+# 同样先摘掉替身 logger：_log 在 logger 缺失时必须静默，不能反过来抛异常把响应吞掉。
+_m7_had_logger = hasattr(_wa, "logger")
+_m7_saved_logger = getattr(_wa, "logger", None)
+_wa.logger = None
+_p_m = 18969
+_ph_m = "127.0.0.1:%d" % _p_m
+_srv_m = _ThreadingHTTPServer(("127.0.0.1", _p_m), _wa._Handler)
+threading.Thread(target=_srv_m.serve_forever, daemon=True).start()
+
+
+def _post_import_m(body):
+    _c = http.client.HTTPConnection("127.0.0.1", _p_m, timeout=30)
+    _c.request("POST", "/api/config/import", body=body, headers={
+        "Host": _ph_m, "Content-Type": "application/zip",
+        "X-Requested-With": "DrcomUI", "Content-Length": str(len(body))})
+    _r = _c.getresponse()
+    _d = _r.read()
+    _conn = _r.getheader("Connection")
+    _c.close()
+    try:
+        return _r.status, json.loads(_d.decode("utf-8")), _conn
+    except ValueError:
+        return _r.status, {"_raw": _d[:120]}, _conn
+
+
+# 加密 zip：把 local header 与 central directory 的 general-purpose bit0 置上
+_m7 = bytearray(_mk_zip({"manifest.json": _good_manifest, "config.json": "{}"}))
+_i = 0
+while True:
+    _i = _m7.find(b"PK\x03\x04", _i)
+    if _i < 0:
+        break
+    _m7[_i + 6] |= 1
+    _i += 4
+_i = 0
+while True:
+    _i = _m7.find(b"PK\x01\x02", _i)
+    if _i < 0:
+        break
+    _m7[_i + 8] |= 1
+    _i += 4
+_st7, _b7, _ = _post_import_m(bytes(_m7))
+check("维护 M-7：加密 zip → 400 且给中文可读原因（不再 500 + 回显异常原文）",
+      _st7 == 400 and "无法解析" in _b7.get("error", "") and "internal" not in _b7.get("error", ""),
+      repr((_st7, _b7)))
+
+# 超限 body（4MB 上限 + 1MB）：必须先排空再关连接，客户端才收得到 413
+_st8, _b8, _conn8 = _post_import_m(b"\0" * (_wa.CONFIG_IMPORT_MAX_BYTES + 1024 * 1024))
+check("维护 M-8：导入超限 → 客户端真的收到 413（不是连接被重置）",
+      _st8 == 413 and (_conn8 or "").lower() == "close", repr((_st8, _b8, _conn8)))
+
+# do_GET 异常兜底：未 _attach（logger 未注入）时也必须回 500 JSON，而不是零响应断连
+_m9_saved = _wa.api_get_status
+_wa.api_get_status = lambda: (_ for _ in ()).throw(RuntimeError("boom-M9"))
+try:
+    _c9 = http.client.HTTPConnection("127.0.0.1", _p_m, timeout=10)
+    _c9.request("GET", "/api/status", headers={"Host": _ph_m})
+    _r9 = _c9.getresponse()
+    _d9 = _r9.read()
+    _c9.close()
+    _m9_ok = _r9.status == 500 and b"internal" in _d9
+    _m9_detail = (_r9.status, _d9[:80])
+except Exception as exc:  # noqa: BLE001
+    _m9_ok = False
+    _m9_detail = repr(exc)
+finally:
+    _wa.api_get_status = _m9_saved
+check("维护 M-9：GET 异常分支不再因裸 logger NameError 断连（回 500 JSON）",
+      _m9_ok, repr(_m9_detail))
+_srv_m.shutdown()
+
+# —— M-10：登录失败文案 / 兜底异常都必须擦掉 URL 与 password=（审计 C-10/C-17，I6）——
+class _M10Resp:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_m10_saved_open = _proto.urllib.request.urlopen
+
+
+def _m10_bad_status(req, timeout=None):
+    # BadStatusLine 的 str 会带上 req 的 URL —— 而登录 URL 里就有 user_password
+    raise http.client.BadStatusLine("bad status: " + getattr(req, "full_url", ""))
+
+
+_proto.urllib.request.urlopen = _m10_bad_status
+try:
+    _m10_ok, _m10_msg = _proto.login("10.0.0.1", "2023001234", "", "#Demo-Pwd-0000#", "10.0.0.2", "")
+finally:
+    _proto.urllib.request.urlopen = _m10_saved_open
+check("维护 M-10：登录遇到 HTTPException（BadStatusLine）也被安全化（无密码 / 无 URL）",
+      _m10_ok is False and "#Demo-Pwd-0000#" not in _m10_msg
+      and "password=" not in _m10_msg and "http://" not in _m10_msg,
+      repr(_m10_msg))
+
+
+def _m10_echo(req, timeout=None):
+    return _M10Resp(b'dr1({"result":0,"msg":"bad: user_password=#Demo-Pwd-0000# at http://10.0.0.1/x"})')
+
+
+_proto.urllib.request.urlopen = _m10_echo
+try:
+    _m10_ok2, _m10_msg2 = _proto.login("10.0.0.1", "2023001234", "", "#Demo-Pwd-0000#", "10.0.0.2", "")
+finally:
+    _proto.urllib.request.urlopen = _m10_saved_open
+check("维护 M-10：服务端 msg 回显密码参数时被擦除（I6：日志/界面零明文凭据）",
+      _m10_ok2 is False and "#Demo-Pwd-0000#" not in _m10_msg2
+      and "password=***" in _m10_msg2 and "http://" not in _m10_msg2,
+      repr(_m10_msg2))
+
+
+if _m7_had_logger:
+    _wa.logger = _m7_saved_logger
+else:
+    del _wa.logger
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -2116,7 +2444,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.0", version.VERSION == "2.1.3.0", version.VERSION)
+check("版本 = 2.1.3.1", version.VERSION == "2.1.3.1", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

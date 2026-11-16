@@ -242,12 +242,32 @@ def describe(values):
 # ============================================================
 # 运行时引用注入（由 联网_service.py 在 main() 里调用）
 # ============================================================
+import functools
+
+
+def _with_config_lock(fn):
+    """让「读配置 → 改 → 写盘」整段持同一把锁（v2.x 维护 / 审计 C-06）。
+
+    锁由服务层注入（与 web_api 的 CONFIG_LOCK 是同一把 RLock）；未注入（单测 / 冒烟）
+    就直接执行 —— 本模块仍不 import 服务模块，依赖方向不变。
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        lock = globals().get("_CONFIG_LOCK")
+        if lock is None:
+            return fn(*args, **kwargs)
+        with lock:
+            return fn(*args, **kwargs)
+    return wrapper
+
+
 def _attach(*, logger=None, load_config=None, save_config=None, validate_config=None,
-            load_password_from_disk=None):
+            load_password_from_disk=None, config_lock=None):
     """注入共享对象，与 web_api / auto_update / metrics 的 `_attach` 策略一致。
 
     `load_password_from_disk`（v2.1.3.0 起）：切方案后要重读密码文件 —— 方案可以带
     自己的 `password.<方案名>.txt`，不重读就会继续用上一个方案的密码 ✗。
+    `config_lock`（v2.x 维护）：config.json「读-改-写」互斥锁，服务层注入同一把 RLock。
     """
     g = globals()
     if logger is not None:
@@ -260,6 +280,8 @@ def _attach(*, logger=None, load_config=None, save_config=None, validate_config=
         g["_validate_config"] = validate_config
     if load_password_from_disk is not None:
         g["load_password_from_disk"] = load_password_from_disk
+    if config_lock is not None:
+        g["_CONFIG_LOCK"] = config_lock
     return g
 
 
@@ -291,6 +313,7 @@ def list_profiles():
             "count": len(items), "items": items}
 
 
+@_with_config_lock
 def save_profile(name, values, match_ssids=None):
     """新建 / 覆盖一个方案并落盘。返回 ``{ok, error}``。"""
     loader = globals().get("_load_config")
@@ -310,6 +333,7 @@ def save_profile(name, values, match_ssids=None):
     return {"ok": True, "name": normalize_name(name), "count": len(profiles)}
 
 
+@_with_config_lock
 def update_profile_values(name, values):
     """读配置 → **合并**改某个方案的 values → 落盘。返回 ``{ok, error, name, values}``。
 
@@ -333,6 +357,7 @@ def update_profile_values(name, values):
             "values": (profiles.get(normalize_name(name)) or {}).get("values") or {}}
 
 
+@_with_config_lock
 def activate(name):
     """应用一个方案并落盘。返回 ``{ok, error, applied, desc}``。
 
@@ -372,6 +397,7 @@ def activate(name):
             "desc": describe(values)}
 
 
+@_with_config_lock
 def remove(name):
     """删掉一个方案（删的是当前方案时只清空标记，**配置值保持不动** ✓）。"""
     loader = globals().get("_load_config")

@@ -40,7 +40,9 @@ EV_LOGIN_OK = "登录成功:"
 EV_LOGIN_FAIL = "登录失败:"
 EV_UNREACHABLE = "仍不可达"
 EV_REACHABLE = "网络已可达（第 "
-EV_SKIP = ("网络位置不在白名单", "密码未设置，跳过登录")
+# 「不该算进在线率分母」的跳过类事件（v2.x 维护 / 审计 C-12）：
+# 以前漏了「账号未设置」—— 新装机每个周期都记一条 unknown 并计入分母，在线率恒 0%。
+EV_SKIP = ("网络位置不在白名单", "密码未设置，跳过登录", "账号未设置")
 
 OUTCOME_ONLINE = "online"
 OUTCOME_RELOGIN = "relogin"

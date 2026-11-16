@@ -68,6 +68,15 @@ FORBIDDEN_NAMES = {"password.txt", "config.json", "secrets.json", ".env", "crede
 FORBIDDEN_EXTS = {".p12", ".pfx", ".pem", ".key", ".jks", ".keystore"}
 ALLOW_TEMPLATE_SUFFIXES = (".template",)
 
+#: 运行时目录：本来就被 .gitignore 覆盖；万一被 `git add -f` 带进来，机器人要拦住。
+#: （审计 P1-3：以前只认文件名，logs/ 与方案专属密码文件都能混过去。）
+FORBIDDEN_DIR_PREFIXES = ("logs/", "tools/", "python/", "packaging/output/")
+
+
+def _is_profile_password_file(name):
+    """方案专属密码文件 `password.<方案名>.txt`（v2.1.3.0 起，I6/I12）。"""
+    return name.startswith("password.") and name.endswith(".txt")
+
 #: 版本字面量同步清单（AGENTS.md §2 I2 / docs/VERSIONING.md §2）。
 VERSION_SYNC_FILES = (
     "packaging/setup.iss",
@@ -198,6 +207,10 @@ def check_privacy(paths, added_lines):
         name = lower.rsplit("/", 1)[-1]
         if name in FORBIDDEN_NAMES and not lower.endswith(ALLOW_TEMPLATE_SUFFIXES):
             findings.append((FAIL, "privacy", f"{path} 是运行时凭据文件，永不入库（I6/I12）；模板请用 .template 后缀"))
+        if any(lower.startswith(prefix) for prefix in FORBIDDEN_DIR_PREFIXES):
+            findings.append((FAIL, "privacy", f"{path} 在运行时目录里（已 .gitignore，永不入库）"))
+        if _is_profile_password_file(name) and not lower.endswith(ALLOW_TEMPLATE_SUFFIXES):
+            findings.append((FAIL, "privacy", f"{path} 是方案专属密码文件，永不入库（I6/I12）"))
         suffix = "." + name.rsplit(".", 1)[-1] if "." in name else ""
         if suffix in FORBIDDEN_EXTS:
             findings.append((FAIL, "privacy", f"{path} 是私钥 / 证书文件，永不入库"))
@@ -539,6 +552,10 @@ def self_test():
     # 隐私
     check("隐私：password.txt 被拦", any(f[0] == FAIL for f in check_privacy(["password.txt"], [])))
     check("隐私：模板文件放行", not check_privacy(["packaging/password.txt.template"], []))
+    check("隐私：方案专属密码文件被拦", any(f[0] == FAIL for f in check_privacy(["password.宿舍.txt"], [])))
+    check("隐私：logs/ 下的文件被拦", any(f[0] == FAIL for f in check_privacy(["logs/campus_login.log"], [])))
+    check("隐私：打包产物被拦", any(f[0] == FAIL for f in check_privacy(["packaging/output/x.exe"], [])))
+    check("隐私：普通根目录文件不误报", not check_privacy(["profiles.py", "docs/RELEASING.md"], []))
     _leak = "u='http://172.16.80.3:801/login?pass" + "word=abc'"
     check("隐私：URL 带密码被拦", any(f[0] == FAIL for f in check_privacy(["x.py"], [("x.py", 3, _leak)])))
     check("隐私：普通行不误报", not check_privacy(["x.py"], [("x.py", 3, "password = read_password()")]))

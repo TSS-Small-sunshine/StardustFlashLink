@@ -7,7 +7,7 @@
 
 1. 任何改动 → 开分支 → 开 PR（标题用 Conventional Commits）→ **机器人审核 + CI 冒烟** → squash 合并 → 自动删分支。
 2. **`main` 与 `dev/3.0-altair` 都不允许直接 push**（分支保护均已开，且对管理员同样生效）。
-3. 两条线互不合：`dev/**` 不合 main、main 不往 `dev/**@@ 提 PR；2.x 代码只在 main 改，3.0 代码只在 dev 改。
+3. 两条线互不合：`dev/**` 不合 main、main 不往 `dev/**` 提 PR；2.x 代码只在 main 改，3.0 代码只在 dev 改。
 4. 发版从 main 走：合并 → CI `build-installer.yml` 自动出 `installer` + `v{版本}` 两条 release。
 
 ## 1. 分支模型
@@ -16,9 +16,15 @@
 | --- | --- | --- | --- |
 | `main` | 2.x Vega 稳定线（正式发版） | 只能通过 PR | ✅ 已开（见 §5） |
 | `dev/3.0-altair` | 3.0 Altair 开发线（只发预览） | 只能通过 PR | ✅ 已开（见 §5） |
-| `feat/...` `fix/...` `docs/...` `ci/...` `hotfix/...` `release/...` | 临时分支 | 作者 | 合并后自动删除 |
+| `feat/...` `fix/...` `hotfix/...` `docs/...` `ci/...` `chore/...` 等 | 临时分支 | 作者 | 合并后自动删除 |
 
 分支命名：`<type>/<简短描述>`，type ∈ `feat` / `fix` / `hotfix` / `docs` / `chore` / `refactor` / `test` / `ci` / `build` / `perf` / `style` / `revert`，全小写，用 `-` / `.` / `_` 分隔。
+
+> 命名惯例来自 git 历史：版本发布期（v2.0.4.0–v2.1.3.0）是**一条版本分支承载该版全部改动** ——
+> `feat/v{版本}`（功能版，如 `feat/v2.1.2.0`）、`fix/v{版本}`（修复版，如 `fix/v2.0.4.5`）、
+> `hotfix/v{版本}`（紧急修复，如 `hotfix/v2.0.9.1`）；非版本类用 `docs/` / `ci/` / `refactor/` / `chore/`
+> （如 `docs/storage-options`、`ci/pr-checks`、`refactor/v2.0.2-decouple`）。
+> 2026-11 起不再要求「一版一条分支」：任何改动开 `<type>/<描述>` → PR → squash 进 `main`，合并即触发构建（纯文档 / CI 改动不触发，见 §7）。
 
 ## 2. PR 要求
 
@@ -44,7 +50,7 @@
 | --- | --- |
 | 标题 | 不符合 Conventional Commits / 带 WIP / 超过 100 字符 |
 | 正文 | 太短（<80 字符）、缺 `## 这是什么` 或 `## 怎么验证` |
-| 双线隔离 | `dev/**` 往 main 提；main 往 `dev/**@@ 合；main 的 PR 碰 `desktop/`；dev 的 PR 碰根目录 2.x 代码 / `packaging/` |
+| 双线隔离 | `dev/**` 往 main 提；main 往 `dev/**` 合；main 的 PR 碰 `desktop/`；dev 的 PR 碰根目录 2.x 代码 / `packaging/` |
 | 隐私 | 提交 `password.txt` / `config.json` / `logs/` / 私钥 / `.p12` / token 形态；URL 带 `password=` |
 | 版本同步 | 改 `version.py` 但没同步 `setup.iss` / 批处理 / `build.ps1` / CHANGELOG |
 | 发布模板 | 改 `packaging/RELEASE-NOTES.md` 但首行缺 `{{CODENAME}}` 占位，或出现渲染器不认识的占位符 |
@@ -162,7 +168,7 @@ gh api -X PATCH repos/TSS-Small-sunshine/StardustFlashLink/rulesets/$rid -f enfo
 ### 2.x 修 bug / 发版
 
 ```powershell
-cd 01-基线-日常维护
+# 在 main 检出（2.x）的仓库根目录执行
 git switch -c fix/v2.1.4.1
 # …改代码 + 补断言…
 python _smoke_static.py
@@ -178,7 +184,7 @@ gh pr merge --squash --delete-branch
 ### 3.0 功能
 
 ```powershell
-cd 02-DEV-开发测试
+# 在 dev 检出（3.0）的仓库根目录执行
 git switch -c feat/3.0-m3-xxx
 # …改 desktop/…
 cargo test --workspace

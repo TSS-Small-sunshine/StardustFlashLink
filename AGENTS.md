@@ -11,7 +11,7 @@
 | 前端 | **全部内联在 `web_api.py` 的 `_HTML_PAGE`**：无 CDN、无构建步骤、无新增静态文件 |
 | 版本 | 唯一来源 `version.py`；规则见 [`docs/VERSIONING.md`](docs/VERSIONING.md) |
 | 改完必跑 | `python _smoke_static.py` + `python _smoke_http.py`（两个都必须 0 失败） |
-| 隐私 | 真机 `password.txt` / `config.json` / `logs\` / 真机截图 **永不入库**（见 §5） |
+| 隐私 | 真机 `password.txt` / `password.<方案名>.txt` / `config.json` / `logs\` / 真机截图 **永不入库**（见 §5） |
 | 提交 | 逐文件 `git add`，**禁止 `git add .`**（`tools\` / `python\` / `logs\` / `packaging\output\` 都在工作区里） |
 | PR / 合并 | 一律走 PR + 机器人审核（main 有分支保护）；策略见 [`docs/PR-WORKFLOW.md`](docs/PR-WORKFLOW.md) |
 
@@ -33,7 +33,7 @@
 | I3 | 前端继续内联在 `web_api.py`；不引入 npm / CDN / 外部字体 / 新静态文件 |
 | I4 | 不新增 Python 依赖（含「顺便用一下」的第三方包） |
 | I5 | 既有 API 路径与字段名**只增不改不删**（Web UI 与自动升级客户端都依赖） |
-| I6 | 密码只存在 `password.txt`；源码 / 注释 / 日志 / API 响应零明文凭据 |
+| I6 | 密码只存在文本文件（`password.txt`，或方案专属的 `password.<方案名>.txt`）；源码 / 注释 / 日志 / API 响应零明文凭据 |
 | I7 | NSSM `AppExit` 单一口径 = `Default Ignore` + `0 Ignore`，**不写 `Restart`** |
 | I8 | `password.txt` / `config.json` 安装时 `onlyifdoesntexist`，升级**不得覆盖**用户数据 |
 | I9 | 安装包产物名固定 `StardustFlashLink-Setup-v{VERSION}.exe`（存量下载链接依赖） |
@@ -60,7 +60,7 @@
 
 ## 5. 隐私红线（P0，违反即回滚）
 
-1. **绝不**把真机 `password.txt` / `config.json` 的内容写进源码、注释、docstring、测试夹具、CHANGELOG、commit message、Release notes、截图。
+1. **绝不**把真机 `password.txt` / `password.<方案名>.txt` / `config.json` 的内容写进源码、注释、docstring、测试夹具、CHANGELOG、commit message、Release notes、截图。
 2. 测试夹具用**一眼假的合成值**：例如 `#Demo-Pwd-0000#`、`pwd_with_bom`，不要照抄真机密码。
 3. 日志 / API 响应永不返回密码（状态接口只回 `password_status: set|missing`）。
 4. 提交前跑 `python _smoke_static.py` —— 里面的**隐私守卫**会把本机 `password.txt` / `config.json` 的账号拿去和所有入库文件比对，命中即失败。
@@ -70,14 +70,17 @@
 
 ## 6. 截图规范
 
-README 的截图必须由**假数据渲染**，账号一律打码。工具在仓库外的 `_ui_redesign\`（本地开发工具，不入库）：
+README 的截图必须由**假数据渲染**，账号一律打码。渲染工具在**仓库外**（本地开发工具 `_ui_redesign\preview.py`，不入库、**按需自备**；路径随工作区迁移，跑之前先 `Test-Path` 确认）：
 
 ```powershell
-cd d:\Student_Workstation\Using_Workstation
-# 第二个参数 = 要预览的检出目录。本仓库是多 worktree 开发（主检出 + 各版本线的 worktree），
-# 拍哪条线就指哪个 worktree，截图也要落到那个 worktree 的 docs\（否则拍出来的是另一条线的页面）。
-$repo = 'd:\Student_Workstation\Using_Workstation\_wt_2x'
-$srv  = Start-Process -FilePath 'python' -ArgumentList '_ui_redesign\preview.py','18899',$repo -PassThru -WindowStyle Hidden
+# 1) 工具在仓库外：把 <截图工具目录> 换成本机实际路径，先确认它存在
+$tool = '<截图工具目录>\_ui_redesign\preview.py'
+Test-Path $tool
+
+# 2) $repo = 要预览的检出根目录（本仓库可能同时有多份检出；在哪份检出里拍，截图就落到它的 docs\，
+#    否则拍出来的是另一条线的页面）。
+$repo = (Get-Location).Path
+$srv  = Start-Process -FilePath 'python' -ArgumentList $tool,'18899',$repo -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 3
 $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 $docs = "$repo\docs"
@@ -96,13 +99,13 @@ Stop-Process -Id $srv.Id -Force
 ```
 # 1) 版本字面量同步（§2 I2 + docs/VERSIONING.md §2 清单）
 # 2) 写 CHANGELOG.md 新段落 + 更新 packaging/RELEASE-NOTES.md
-# 3) 本地自检
-cd DrcomAutoLogin-Windows
+# 3) 本地自检（在仓库根目录执行）
 python _smoke_static.py
 python _smoke_http.py
 # 4) 逐文件提交（禁止 git add .）
 git status --short && git diff --cached
-# 5) 推分支 → PR → 合并 main → CI 构建（版本分支用 workflow_dispatch）
+# 5) 推分支 → PR → 合并 main → CI 自动构建并发版（合并 main 的 push 即触发）
+#    需要手动重跑 / 只演练发布说明时用 workflow_dispatch（dry_run=true 不发 release）
 gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLink --ref main
 # 6) CI 产出两条 release：installer（prerelease，固定链接）+ v{VERSION}（非 prerelease，升级通道）
 ```
