@@ -1700,19 +1700,52 @@ check("v2.1.0.0 P7-3：两个批处理都写明了「路径不能含 !」的限�
 
 # v2.1.0.0 补丁：发布说明里的代号必须由 CI 从 version.py 填 —— 头部不许再硬编码星名 ✗
 # （事故：换了版本线到 Vega，发布页首行还写着 "Sirius"，因为模板里是死的字面量。）
+# 2026-11 维护：发布说明改为「模板 + 渲染器」—— 机器事实（版本/大小/SHA/对比链接/日期）
+# 一律由 .github/scripts/render_release_notes.py 注入，两个 release 通道共用一套逻辑。
 _rel_head = pathlib.Path("packaging/RELEASE-NOTES.md").read_text(
     encoding="utf-8", errors="replace").splitlines()[0]
 _wf_src = pathlib.Path(".github/workflows/build-installer.yml").read_text(
     encoding="utf-8", errors="replace")
+_render_rel = ".github/scripts/render_release_notes.py"
 _ver_mod = importlib.import_module("version")   # 本文件后段才 import version，这里自带 ✓
 check("v2.1.0.0 补丁：RELEASE-NOTES 头部用 {{CODENAME}} 占位（不再硬编码星名）",
       "{{CODENAME}}" in _rel_head and "{{CODENAME_CN}}" in _rel_head
       and "Sirius" not in _rel_head and _ver_mod.CODENAME not in _rel_head,
       _rel_head[:100])
-check("v2.1.0.0 补丁：CI 从 version.py 读代号并替换这两个占位符",
+check("发布说明：CI 从 version.py 读代号并交给渲染器（不再手写 Replace）",
       "APP_CODENAME=$cn" in _wf_src
-      and "$body.Replace('{{CODENAME}}', $env:APP_CODENAME)" in _wf_src
-      and _wf_src.count("{{CODENAME}}") >= 2 and _wf_src.count("{{CODENAME_CN}}") >= 2)
+      and '"--codename", "$env:APP_CODENAME"' in _wf_src
+      and '"--codename-cn", "$env:APP_CODENAME_CN"' in _wf_src)
+check("发布说明：两条 release 通道都走同一个渲染器",
+      _wf_src.count("render_release_notes.py") >= 2
+      and '"--channel", "installer"' in _wf_src
+      and '"--channel", "versioned"' in _wf_src)
+check("发布说明：旧的逐条 $body.Replace 已移除（单一事实来源）",
+      "$body.Replace('{{" not in _wf_src)
+check("发布说明：安装器通道有独立模板",
+      pathlib.Path("packaging/RELEASE-NOTES-installer.md").is_file())
+check("发布说明：渲染器文件存在",
+      pathlib.Path(_render_rel).is_file())
+
+# —— 行为断言（不是 grep 源码）：真跑一遍渲染器，覆盖残留占位符 / 隐私 / 标题 / 时区 ——
+import subprocess as _subprocess   # noqa: E402
+_rc = _subprocess.run([sys.executable, _render_rel, "--self-test"],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+check("发布说明：渲染器自测全绿（含两套模板 + 标题占位符 + 上海时区）",
+      _rc.returncode == 0,
+      ((_rc.stdout or "").strip().splitlines() or ["<no stdout>"])[-1]
+      + " | " + ((_rc.stderr or "").strip().splitlines() or [""])[-1])
+_dry = _subprocess.run(
+    [sys.executable, _render_rel,
+     "--template", "packaging/RELEASE-NOTES.md", "--repo", "o/r",
+     "--channel", "versioned", "--version", "9.9.9.9",
+     "--codename", "Vega", "--codename-cn", "织女星",
+     "--asset", "x.exe", "--size", "1024", "--sha256", "ab" * 32,
+     "--commit", "c" * 40, "--run", "1", "--prev-tag", "v9.9.9.8", "--dry-run"],
+    capture_output=True, text=True, encoding="utf-8", errors="replace")
+check("发布说明：真实模板可端到端渲染（无 {{...}} 残留）",
+      _dry.returncode == 0 and "{{" not in _dry.stdout,
+      (_dry.stdout or "")[-300:] + (_dry.stderr or "")[-200:])
 
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")

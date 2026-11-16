@@ -49,7 +49,8 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
 | `install.bat` / `uninstall.bat` | 标题行 |
 | `packaging/build.ps1` | banner |
 | `CHANGELOG.md` | 在最上方新增本版段落 |
-| `packaging/RELEASE-NOTES.md` | 本版说明（CI 渲染） |
+| `packaging/RELEASE-NOTES.md` | 本版说明的**模板**（CI 用 `render_release_notes.py` 渲染；规则见 [RELEASING.md](RELEASING.md)） |
+| `packaging/RELEASE-NOTES-installer.md` | 固定下载通道（tag `installer`）的短模板（同一渲染器） |
 
 ---
 

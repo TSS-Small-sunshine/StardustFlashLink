@@ -15,9 +15,13 @@ on:
   workflow_dispatch:
     inputs:
       title:
-        description: '版本化 release 的标题（留空 = 沿用现有标题，仍为空则用 v{版本}）'
+        description: '版本化 release 的标题（留空 = 用模板里的 RELEASE-TITLE，仍为空则用 v{版本}）'
         required: false
         default: ''
+      dry_run:
+        description: 'true = 只渲染并打印发布说明，不创建/覆盖 release（验证 workflow 改动用）'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -118,6 +122,8 @@ jobs:
 
       - name: Resolve version
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ("${{ github.ref_type }}" -eq "tag") {
             $v = "${{ github.ref_name }}" -replace '^v',''
@@ -156,6 +162,24 @@ jobs:
           "APP_CODENAME_CN=$cnCn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "APP_CODENAME = $cn / $cnCn"
 
+          # 上一版 tag（发布页「与上一版对比」链接用）：取最近的非 installer 版本 tag，
+          # 并排除本次要发的版本（重建同一版本时，对比基线应是它的前一版）。
+          $prevTag = ""
+          $releases = gh release list --exclude-drafts --limit 30 --json tagName 2>$null | ConvertFrom-Json
+          foreach ($rel in $releases) {
+            if ($rel.tagName -match '^v[0-9]' -and $rel.tagName -ne "v$v") { $prevTag = $rel.tagName; break }
+          }
+          "APP_PREV_TAG=$prevTag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "APP_PREV_TAG = $prevTag"
+
+      - name: Self-test release notes renderer
+        shell: pwsh
+        run: |
+          # 渲染器自带 20+ 项断言（占位符残留 / 隐私规则 / 两套模板可渲染 / 日期时区）。
+          # 放在构建之前：模板或脚本写坏了就立刻红，不必等装完包才发现发布页是坏的 ✗
+          python .github/scripts/render_release_notes.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw "发布说明渲染器自测失败" }
+
       - name: Build installer with ISCC
         shell: pwsh
         run: |
@@ -188,34 +212,44 @@ jobs:
           $tag = "installer"
           $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
 
-          # 发布说明 = 仓库模板 packaging/RELEASE-NOTES.md（UTF-8 读 + 占位符替换 + --notes-file）。
-          # 注意：here-string 里**不要**用反引号转义 $ —— `` `$ `` 会让变量不展开，
-          # 页面上就会直接显示 $env:APP_VERSION / $sha（旧版 bug）。
-          $tpl = "packaging\RELEASE-NOTES.md"
-          if (Test-Path $tpl) {
-            $body = (Get-Content $tpl -Raw -Encoding utf8).Trim()
-          } else {
-            $body = "Windows 安装程序 v$env:APP_VERSION（Inno Setup 自动构建）。"
-          }
-          $body = $body.Replace('{{VERSION}}', $env:APP_VERSION)
-          $body = $body.Replace('{{CODENAME}}', $env:APP_CODENAME)
-          $body = $body.Replace('{{CODENAME_CN}}', $env:APP_CODENAME_CN)
-          $body = $body.Replace('{{ASSET}}', $exe.Name)
-          $body = $body.Replace('{{SIZE}}', "$($exe.Length)")
-          $body = $body.Replace('{{SIZE_MB}}', ([math]::Round($exe.Length / 1MB, 2)).ToString())
-          $body = $body.Replace('{{SHA256}}', $sha)
-          $body = $body.Replace('{{SHA}}', "${{ github.sha }}")
-          $body = $body.Replace('{{RUN}}', "${{ github.run_number }}")
-          $body = $body.Replace('{{DATE}}', (Get-Date -Format 'yyyy-MM-dd'))
+          # 发布说明统一由 .github/scripts/render_release_notes.py 渲染：
+          # 机器事实（版本 / 大小 / SHA256 / 对比链接 / 上海时区日期）全部由 CI 注入；
+          # 渲染后若残留 {{...}} 或命中隐私规则 → 脚本非 0 退出 → 构建直接红 ✗
+          # （旧实现是两个 step 各写一遍 $body.Replace(...)，改一处漏一处）
           $notesFile = Join-Path $env:RUNNER_TEMP "release-notes-installer.md"
-          [IO.File]::WriteAllText($notesFile, $body, (New-Object Text.UTF8Encoding($false)))
+          $titleFile = Join-Path $env:RUNNER_TEMP "release-title-installer.txt"
+          $renderArgs = @(
+            ".github/scripts/render_release_notes.py",
+            "--repo", "${{ github.repository }}",
+            "--template", "packaging/RELEASE-NOTES-installer.md",
+            "--channel", "installer",
+            "--version", "$env:APP_VERSION",
+            "--codename", "$env:APP_CODENAME",
+            "--codename-cn", "$env:APP_CODENAME_CN",
+            "--asset", $exe.Name,
+            "--size", "$($exe.Length)",
+            "--sha256", $sha,
+            "--commit", "${{ github.sha }}",
+            "--run", "${{ github.run_number }}",
+            "--prev-tag", "$env:APP_PREV_TAG",
+            "--out-file", $notesFile,
+            "--title-out", $titleFile
+          )
+          & python @renderArgs
+          if ($LASTEXITCODE -ne 0) { throw "发布说明渲染失败（详见上面的 [错误] 行）" }
 
+          if ("${{ github.event.inputs.dry_run }}" -eq "true") {
+            Write-Host "===== dry_run：渲染结果（不创建 / 不覆盖 release）====="
+            Get-Content $notesFile -Raw
+            exit 0
+          }
+
+          $title = (Get-Content $titleFile -Raw).Trim()
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag
           }
-          # 标题带版本号：与版本化 release 一起出现在发布列表里时能看出归属
-          gh release create $tag $exe.FullName --title "Windows 安装程序 v$env:APP_VERSION（跟随最新构建 · 固定下载链接）" --notes-file $notesFile --prerelease --target "$env:GITHUB_SHA"
+          gh release create $tag $exe.FullName --title $title --notes-file $notesFile --prerelease --target "$env:GITHUB_SHA"
           gh release view $tag --json url,tagName,name,isPrerelease,assets
 
       # P1-5：自动升级通道。`/releases/latest` 只返回**非 prerelease** release，
@@ -229,28 +263,38 @@ jobs:
           $tag = "v$env:APP_VERSION"
           $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
 
-          # 发布说明与 installer 同源：仓库模板 packaging/RELEASE-NOTES.md
-          $tpl = "packaging\RELEASE-NOTES.md"
-          if (Test-Path $tpl) {
-            $body = (Get-Content $tpl -Raw -Encoding utf8).Trim()
-          } else {
-            $body = "Windows 安装程序 v$env:APP_VERSION（Inno Setup 自动构建）。"
-          }
-          $body = $body.Replace('{{VERSION}}', $env:APP_VERSION)
-          $body = $body.Replace('{{CODENAME}}', $env:APP_CODENAME)
-          $body = $body.Replace('{{CODENAME_CN}}', $env:APP_CODENAME_CN)
-          $body = $body.Replace('{{ASSET}}', $exe.Name)
-          $body = $body.Replace('{{SIZE}}', "$($exe.Length)")
-          $body = $body.Replace('{{SIZE_MB}}', ([math]::Round($exe.Length / 1MB, 2)).ToString())
-          $body = $body.Replace('{{SHA256}}', $sha)
-          $body = $body.Replace('{{SHA}}', "${{ github.sha }}")
-          $body = $body.Replace('{{RUN}}', "${{ github.run_number }}")
-          $body = $body.Replace('{{DATE}}', (Get-Date -Format 'yyyy-MM-dd'))
+          # 发布说明与 installer 同源：同一个渲染器 + packaging/RELEASE-NOTES.md
           $notesFile = Join-Path $env:RUNNER_TEMP "release-notes-$tag.md"
-          [IO.File]::WriteAllText($notesFile, $body, (New-Object Text.UTF8Encoding($false)))
+          $titleFile = Join-Path $env:RUNNER_TEMP "release-title-$tag.txt"
+          $renderArgs = @(
+            ".github/scripts/render_release_notes.py",
+            "--repo", "${{ github.repository }}",
+            "--template", "packaging/RELEASE-NOTES.md",
+            "--channel", "versioned",
+            "--version", "$env:APP_VERSION",
+            "--codename", "$env:APP_CODENAME",
+            "--codename-cn", "$env:APP_CODENAME_CN",
+            "--asset", $exe.Name,
+            "--size", "$($exe.Length)",
+            "--sha256", $sha,
+            "--commit", "${{ github.sha }}",
+            "--run", "${{ github.run_number }}",
+            "--prev-tag", "$env:APP_PREV_TAG",
+            "--out-file", $notesFile,
+            "--title-out", $titleFile
+          )
+          & python @renderArgs
+          if ($LASTEXITCODE -ne 0) { throw "发布说明渲染失败（详见上面的 [错误] 行）" }
+
+          if ("${{ github.event.inputs.dry_run }}" -eq "true") {
+            Write-Host "===== dry_run：渲染结果（不创建 / 不覆盖 release）====="
+            Get-Content $notesFile -Raw
+            exit 0
+          }
+
           # 标题策略：优先 workflow_dispatch 的 title；其次沿用现有 release 的人工标题（避免 CI 覆盖）；
-          # 都没有才退回 v{版本}。这样发布列表里始终是可读的「vX.Y.Z — 简述」。
-          $title = "v$env:APP_VERSION"
+          # 都没有才用模板里的 RELEASE-TITLE（v{版本} — 简述）。
+          $title = (Get-Content $titleFile -Raw).Trim()
           $old = gh release view $tag --json name 2>$null | ConvertFrom-Json
           if ($old -and $old.name) { $title = $old.name }
           if ("${{ github.event.inputs.title }}" -ne "") { $title = "${{ github.event.inputs.title }}" }
@@ -259,4 +303,4 @@ jobs:
             gh release delete $tag --yes --cleanup-tag
           }
           gh release create $tag $exe.FullName --title $title --notes-file $notesFile --target "$env:GITHUB_SHA"
-          gh release view $tag --json url,tagName,isPrerelease,assets
+          gh release view $tag --json url,tagName,name,isPrerelease,assets
