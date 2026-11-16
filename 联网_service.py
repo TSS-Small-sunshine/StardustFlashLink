@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     logs/service_stderr.log — NSSM stderr（由 install.bat 配置）
 """
 
+import copy              # v2.x 维护：DEFAULT_CONFIG 深拷贝（嵌套 profiles 字典不能被共享）
 import ctypes            # v2.0.13.0：运行时单实例锁（命名互斥体）
 import json
 import logging
@@ -33,6 +34,7 @@ import os
 import re
 import signal
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
@@ -157,6 +159,10 @@ BACKOFF_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()  # 串行化 run_once 多次调用
 PWD_LOCK = threading.Lock()
 UPDATE_LOCK = threading.Lock()  # 保护 update_lock 字段的并发读写
+# v2.x 维护（审计 C-01/C-06）：config.json 的「读 → 改 → 写」整段要互斥。
+# 用 RLock 而不是 Lock：profiles.activate() 会在持锁时回调注入的 _save_config，
+# 而 _save_config_raw 自己也要持同一把锁（同一线程二次获取 = 死锁，见 PWD_LOCK 的教训）。
+CONFIG_LOCK = threading.RLock()
 
 
 # ============================================================
@@ -243,9 +249,12 @@ def _load_password_from_disk():
                     line = s
                     break
         except (OSError, UnicodeDecodeError) as exc:
-            logger.error("读取 %s 失败: %s", os.path.basename(path), exc)
-            _PWD_VALUE = None
-            return None
+            # 审计 C-13：读失败（文件被占用 / 磁盘抖动 / 编码坏）不该把内存里**已经生效**的
+            # 密码清空 —— 那会让界面突然显示「密码未设置」、自动登录直接停摆 ✗。
+            # 只有「文件确实不存在」才代表没设置（上面那个分支）。
+            logger.error("读取 %s 失败: %s（继续使用上一次读到的密码）",
+                         os.path.basename(path), exc)
+            return _PWD_VALUE
         pwd = line.strip()
         _PWD_VALUE = pwd if pwd else None
         return _PWD_VALUE
@@ -278,10 +287,8 @@ def _save_password_to_disk(password, profile=None):
             raise ValueError("方案名不合法：{!r}".format(profile))
     else:
         path = active_password_file()
-    tmp = "{}.{}.tmp".format(path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(password.rstrip("\r\n") + "\n")
-    os.replace(tmp, path)
+    # 审计 C-01：与 config.json 同一套原子写（唯一 tmp，不再用 pid 级名字）
+    _atomic_write_text(path, password.rstrip("\r\n") + "\n")
     if os.path.abspath(path) == os.path.abspath(active_password_file()):
         with PWD_LOCK:
             _PWD_VALUE = password
@@ -341,7 +348,9 @@ logger.addHandler(_file_handler)
 # 配置：载入 / 保存 / 校验 / 默认
 # ============================================================
 def _default_config():
-    return dict(DEFAULT_CONFIG)
+    # 审计 C-22：以前是浅拷贝 —— 嵌套的 profiles 字典与 DEFAULT_CONFIG 共享同一份对象，
+    # 任何一处原地修改都会污染"默认值"（下一次 _load_config 补键时把脏数据带进去）。
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def _validate_config(cfg):
@@ -449,7 +458,14 @@ def _validate_config(cfg):
 
 
 def _load_config():
-    """读 config.json；缺失/损坏 → 写默认值并返回。"""
+    """读 config.json；缺失 → 写默认值；损坏 → **先备份**再写默认值（绝不静默覆盖）。
+
+    v2.x 维护（审计 C-02/C-07）：
+      - 用 utf-8-sig 读 —— 记事本选「UTF-8 带 BOM」保存的 config.json 以前会
+        JSONDecodeError → 落到"损坏"分支 → 整份配置（账号 / 方案 / ui_port）被默认值覆盖；
+      - 真损坏时先把原文件改名成 config.json.bad-<时间戳> 再写默认值，
+        用户事后还能把账号 / 方案手工抄回来（以前是直接覆盖，无据可查）。
+    """
     if not os.path.isfile(CONFIG_FILE):
         cfg = _default_config()
         try:
@@ -459,12 +475,13 @@ def _load_config():
             logger.error("写入默认 config.json 失败: %s", exc)
         return cfg
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
         if not isinstance(cfg, dict):
             raise ValueError("config.json 根节点不是对象")
     except (json.JSONDecodeError, ValueError, OSError) as exc:
-        logger.error("config.json 损坏或读取失败 (%s)，已回退默认值", exc)
+        logger.error("config.json 损坏或读取失败 (%s)", exc)
+        _backup_broken_config()
         cfg = _default_config()
         try:
             _save_config_raw(cfg)
@@ -479,17 +496,59 @@ def _load_config():
     return merged
 
 
-def _save_config_raw(cfg):
-    """原子写：唯一 tmp 名 → replace。
+def _backup_broken_config():
+    """把损坏的 config.json 改名为 config.json.bad-<时间戳>；返回备份路径（失败返回空串）。"""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    bad = "{}.bad-{}".format(CONFIG_FILE, stamp)
+    try:
+        os.replace(CONFIG_FILE, bad)
+    except OSError as exc:
+        logger.error("备份损坏的 config.json 失败: %s", exc)
+        return ""
+    logger.error("损坏的 config.json 已备份为 %s；当前使用默认配置（原文件内容保留）",
+                 os.path.basename(bad))
+    return bad
 
-    v2.0.6.2：tmp 名带上 pid —— 原先固定用 `config.json.tmp`，两个写者（例如服务 + 手动
-    跑的实例，或两个并发 POST）会往同一个文件里交错写，最终可能落盘一个半截 JSON。
-    带上 pid + 原子 replace 后，并发只会是"最后写入者胜"，不会写出损坏文件。
+
+def _atomic_write_text(path, text):
+    """把 text 原子写到 path：同目录唯一 tmp → fsync → replace（Windows 被占用时重试）。
+
+    v2.x 维护（审计 C-01/C-05）：v2.0.6.2 的 tmp 名只带 pid —— 那挡得住"跨进程"，
+    挡不住**同进程多线程**（ThreadingHTTPServer 每请求一线程，叠加周期线程里自动切方案），
+    两个线程会往同一个 tmp 交错写，实测 200 轮双写有 56 次落盘半截 JSON。
+    这里 tmp 名交给 tempfile.mkstemp（必须同目录才能原子 replace），并且：
+      - 写完先 fsync 再 replace，崩溃也不会留下"看起来成功"的空文件；
+      - os.replace 被读句柄（托盘每 10s 读一次 config.json / 杀毒扫描）挡住时退避重试。
     """
-    tmp = "{}.{}.tmp".format(CONFIG_FILE, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2, sort_keys=True)
-    os.replace(tmp, CONFIG_FILE)
+    folder = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        last_exc = None
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError as exc:      # 目标被读句柄占用（Windows 共享锁）
+                last_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+        raise last_exc
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _save_config_raw(cfg):
+    """原子写 config.json（唯一 tmp + CONFIG_LOCK，见 _atomic_write_text 的说明）。"""
+    text = json.dumps(cfg, ensure_ascii=False, indent=2, sort_keys=True)
+    with CONFIG_LOCK:
+        _atomic_write_text(CONFIG_FILE, text)
 
 
 def _save_config(cfg):
@@ -632,7 +691,10 @@ else:
 # 配置方案（v2.0.9.0 / B5）已进 profiles.py
 #   —— 纯逻辑：方案 = 位置相关字段的快照；切换 = 合并进 config.json（先校验后写盘）
 # ============================================================
-import profiles as _profiles_mod
+# v2.x 维护（审计 C-03）：这里**绝对不要**再写一次 `import profiles as _profiles_mod` ✗
+# 早先确实有第二段无条件 import，把上面 619-626 的「可选模块」护栏整个击穿 ——
+# 安装目录缺 profiles.py 时（升级被回滚删掉文件），module 级 ModuleNotFoundError
+# 会让服务启动即退，正是 v2.0.8.1 真机事故（缺 metrics.py）的同一形态。
 
 # _profiles_mod._attach() 在 main() 里调用（需要 load_config / save_config / validate_config）。
 
@@ -934,6 +996,7 @@ def main():
         state=STATE,
         state_lock=STATE_LOCK,
         pwd_lock=PWD_LOCK,
+        config_lock=CONFIG_LOCK,
         config_file=CONFIG_FILE,
         password_file=PASSWORD_FILE,
         upgrade_log_file=UPGRADE_LOG_FILE,
@@ -977,6 +1040,7 @@ def main():
             load_config=_load_config,
             save_config=_save_config,
             validate_config=_validate_config,
+            config_lock=CONFIG_LOCK,
             # v2.1.3.0：方案可以带自己的密码文件 → 切方案后要重读密码 ✓
             load_password_from_disk=_load_password_from_disk,
         )

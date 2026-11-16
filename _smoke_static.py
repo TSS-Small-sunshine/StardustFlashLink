@@ -174,9 +174,19 @@ _proto_code = "\n".join(l for l in _src_proto.splitlines() if not l.strip().star
 check("v2.0.4.5 run_once 改为非阻塞抢锁", "_RUN_LOCK.acquire(blocking=False)" in _src_proto)
 check("v2.0.4.5 不再先持锁再判 login_in_progress（死逻辑已除）", "with _RUN_LOCK:" not in _proto_code)
 check("v2.0.4.5 手工抢到的锁会被释放", "_RUN_LOCK.release()" in _src_proto)
-check("v2.0.4.5 config 写盘用唯一 tmp 名", '"{}.{}.tmp"' in src_svc and "CONFIG_FILE, os.getpid()" in src_svc)
-check("v2.0.4.5 password 写盘用唯一 tmp 名",
-      "os.getpid()" in src_svc and "os.replace(tmp, path)" in src_svc)
+# v2.x 维护（审计 C-01）：写盘从「pid 级固定 tmp 名」升级为 tempfile.mkstemp 唯一名 +
+# CONFIG_LOCK —— 同进程多线程并发写不再互相踩（pid 名只挡得住跨进程）。
+check("v2.x 维护 config 写盘走唯一 tmp 名（mkstemp，不再用 os.getpid）",
+      "def _atomic_write_text(" in src_svc
+      and "tempfile.mkstemp(" in src_svc
+      and "_atomic_write_text(CONFIG_FILE, text)" in src_svc
+      and '"{}.{}.tmp".format(CONFIG_FILE' not in src_svc)
+check("v2.x 维护 password 写盘走同一套原子写",
+      '_atomic_write_text(path, password.rstrip(' in src_svc
+      and '"{}.{}.tmp".format(path' not in src_svc)
+check("v2.x 维护 config.json 的读-改-写有 CONFIG_LOCK（RLock，可重入）",
+      "CONFIG_LOCK = threading.RLock()" in src_svc
+      and "with CONFIG_LOCK:" in src_svc)
 check("v2.0.4.5 installer 不再用弃用的 IsTaskSelected",
       "WizardIsTaskSelected('desktopicon')" in _iss_src
       and "if IsTaskSelected('desktopicon')" not in _iss_src)
@@ -1206,6 +1216,12 @@ check("v2.0.14.0 导入上限覆盖「解压后」体积（zip 炸弹）",
       and "zf.infolist()" in src_web)
 check("v2.0.14.0 导入异常类型补全（ValueError / TypeError / KeyError 也算参数不合法）",
       "ValueError, TypeError, KeyError) as exc" in src_web)
+# v2.x 维护（审计 P1-2）：加密 zip / 未知压缩方法（RuntimeError / NotImplementedError）
+# 与截断流（EOFError / zlib.error）也必须归到 400，且不再回显英文异常原文。
+check("v2.x 维护 导入异常补收 RuntimeError / NotImplementedError / EOFError / zlib.error",
+      "RuntimeError, NotImplementedError, EOFError, zlib.error" in src_web
+      and "导入的 zip 无法解析" in src_web
+      and 'import failed: {}".format(exc)' not in src_web)
 check("v2.0.14.0 空账号合法（默认配置本身就能通过校验）",
       svc._validate_config(svc._default_config()) == []
       and svc._validate_config(dict(svc._default_config(), account="")) == []
@@ -2059,6 +2075,223 @@ check("v2.1.2.0 配置页不再为单个字段占一整张卡（管理页面端�
       and 'id="cfg-ui-port"' in _page and ">Web UI<" not in _page)
 check("v2.1.2.0 密码徽标在主页也要能更新（不能只在 loadConfig 里刷）",
       "c.password_status" in _page and "setPwdBadge(c.password_status)" in _page)
+
+
+# ============================================================
+# v2.x 维护（2026-11 代码审计）—— 行为级回归断言
+# 每条对应一个真实复现过的缺陷；断言测行为，不 grep 源码。
+# ============================================================
+
+# —— M-1：config.json 带 BOM 不再被重置；损坏时先备份再写默认值（审计 C-02/C-07）——
+_m1_dir = tempfile.mkdtemp(prefix="drcom_m1_")
+_m1_cfg = os.path.join(_m1_dir, "config.json")
+_m1_saved_cfg_file = svc.CONFIG_FILE
+svc.CONFIG_FILE = _m1_cfg
+pathlib.Path(_m1_cfg).write_bytes(b"\xef\xbb\xbf" + json.dumps({
+    "host": "10.9.9.9", "port": 80, "account": "2023000001", "suffix": "",
+    "ui_port": 9999, "profiles": {"宿舍": {"values": {"host": "10.9.9.9"}}},
+    "active_profile": "宿舍",
+}, ensure_ascii=False).encode("utf-8"))
+_m1_read = svc._load_config()
+check("维护 M-1：config.json 带 BOM 仍能读出原值（不再回退默认）",
+      _m1_read.get("account") == "2023000001" and _m1_read.get("ui_port") == 9999
+      and "宿舍" in (_m1_read.get("profiles") or {}),
+      repr({k: _m1_read.get(k) for k in ("account", "ui_port")}))
+pathlib.Path(_m1_cfg).write_text("{ 这不是 JSON", encoding="utf-8")
+svc._load_config()
+_m1_bads = sorted(p.name for p in pathlib.Path(_m1_dir).glob("config.json.bad-*"))
+check("维护 M-1：损坏的 config.json 先备份成 config.json.bad-*（不再直接覆盖）",
+      len(_m1_bads) == 1, repr(_m1_bads))
+svc.CONFIG_FILE = _m1_saved_cfg_file
+
+# —— M-2：同进程多线程并发写 config.json 不再落盘坏 JSON（审计 C-01）——
+_m2_dir = tempfile.mkdtemp(prefix="drcom_m2_")
+_m2_cfg = os.path.join(_m2_dir, "config.json")
+_m2_saved_cfg_file = svc.CONFIG_FILE
+svc.CONFIG_FILE = _m2_cfg
+_m2_errors = []
+
+
+def _m2_writer():
+    try:
+        for i in range(40):
+            c = svc._default_config()
+            c["account"] = "202300%04d" % i
+            svc._save_config(c)
+    except Exception as exc:  # noqa: BLE001
+        _m2_errors.append(repr(exc))
+
+
+_m2_threads = [threading.Thread(target=_m2_writer) for _ in range(3)]
+for _t in _m2_threads:
+    _t.start()
+for _t in _m2_threads:
+    _t.join()
+try:
+    _m2_final = json.loads(pathlib.Path(_m2_cfg).read_text(encoding="utf-8-sig"))
+    _m2_valid = str(_m2_final.get("account", "")).startswith("2023")
+except (ValueError, OSError) as exc:
+    _m2_final, _m2_valid = repr(exc), False
+check("维护 M-2：3 线程 × 40 轮并发保存 → 最终文件仍是合法 JSON（审计 C-01）",
+      not _m2_errors and _m2_valid, repr((_m2_errors[:2], _m2_final))[:300])
+svc.CONFIG_FILE = _m2_saved_cfg_file
+
+# —— M-3：profiles.py 仍是可选模块（审计 C-03：不能有第二段无条件 import）——
+_m3_code = "\n".join(_l for _l in src_svc.splitlines() if not _l.strip().startswith("#"))
+check("维护 M-3：profiles 只有一段受 ImportError 保护的 import（可选模块护栏）",
+      _m3_code.count("import profiles as _profiles_mod") == 1,
+      "代码里出现 %d 次" % _m3_code.count("import profiles as _profiles_mod"))
+# 审计 C-06：方案保存 / 切换的「读-改-写」必须与服务层 api_post_config 共用同一把锁
+_m3_prof = pathlib.Path("profiles.py").read_text(encoding="utf-8")
+check("维护 M-3b：profiles 的四个读-改-写入口都持同一把 CONFIG_LOCK",
+      "def _with_config_lock(fn)" in _m3_prof
+      and _m3_prof.count("@_with_config_lock") == 4
+      and "config_lock=None" in _m3_prof,
+      "装饰器 %d 个" % _m3_prof.count("@_with_config_lock"))
+
+# —— M-4：托盘「服务未响应」气泡可达（审计 C-04：旧判定是死逻辑）——
+_tr = importlib.import_module("tray")
+check("维护 M-4：托盘在刚跨过 down 阈值时弹一次、之后不重复、开机不吓人",
+      _tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY) != []
+      and _tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY + 1) == []
+      and _tr.decide_events(None, "down", 1) == []
+      and _tr.decide_events("ok", "ok", 0) == [],
+      repr((_tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY),
+            _tr.decide_events("down", "down", _tr.DOWN_STREAK_TO_NOTIFY + 1))))
+
+# —— M-5：「账号未设置」不算进连接质量分母（审计 C-12）——
+_mt = importlib.import_module("metrics")
+check("维护 M-5：「账号未设置」归入 skip，不再把在线率拉成 0%",
+      any("账号未设置" in p for p in _mt.EV_SKIP), repr(_mt.EV_SKIP))
+
+# —— M-6：配置页保存是「部分更新」，空 body 不再重置配置（审计 P1-1/P2-2）——
+# web_api 的 _load_config / _save_config 正常由 _attach() 注入；本冒烟不 attach，
+# 所以这里用「有没有旧值」分别记录，结束后按原样恢复（不留测试用的假属性）。
+_m6_had_load = hasattr(_wa, "_load_config")
+_m6_had_save = hasattr(_wa, "_save_config")
+_m6_saved_load = getattr(_wa, "_load_config", None)
+_m6_saved_save = getattr(_wa, "_save_config", None)
+_m6_saved_lock = _wa.CONFIG_LOCK
+# 前面几段测试给 web_api 注入过替身 logger（只实现部分方法）—— 这里临时摘掉，
+# 让 _log 走「logger 未注入就静默」的分支，断言只关心配置合并行为。
+_m6_had_logger = hasattr(_wa, "logger")
+_m6_saved_logger = getattr(_wa, "logger", None)
+_wa.logger = None
+_m6_cur = dict(svc._default_config(), host="10.9.9.9", account="2023000001",
+               profiles={"宿舍": {"values": {"host": "10.9.9.9"}}},
+               active_profile="宿舍", profiles_auto_switch=True)
+
+
+def _m6_load():
+    return dict(_m6_cur)
+
+
+def _m6_save(cfg):
+    _m6_cur.clear()
+    _m6_cur.update(cfg)
+
+
+_wa._load_config = _m6_load
+_wa._save_config = _m6_save
+_wa.CONFIG_LOCK = threading.RLock()
+_st6, _b6 = _wa.api_post_config({"auto_check_interval_min": 60})
+check("维护 M-6：配置页保存只合并表单键（已建方案 / 自动切换不被清空）",
+      _st6 == 200 and _m6_cur.get("auto_check_interval_min") == 60
+      and _m6_cur.get("profiles") and _m6_cur.get("active_profile") == "宿舍"
+      and _m6_cur.get("profiles_auto_switch") is True,
+      repr({k: _m6_cur.get(k) for k in ("auto_check_interval_min", "profiles", "active_profile")})[:300])
+_st6b, _b6b = _wa.api_post_config({})
+check("维护 M-6：空 body 保存 → 400（不再把配置重置成默认值）",
+      _st6b == 400 and _m6_cur.get("host") == "10.9.9.9", repr((_st6b, _b6b)))
+if _m6_had_logger:
+    _wa.logger = _m6_saved_logger
+else:
+    del _wa.logger
+if _m6_had_load:
+    _wa._load_config = _m6_saved_load
+else:
+    del _wa._load_config
+if _m6_had_save:
+    _wa._save_config = _m6_saved_save
+else:
+    del _wa._save_config
+_wa.CONFIG_LOCK = _m6_saved_lock
+
+# —— M-7/M-8/M-9：导入端点健壮性 + do_GET 异常兜底（审计 P1-2/P1-3/P2-1）——
+# 同样先摘掉替身 logger：_log 在 logger 缺失时必须静默，不能反过来抛异常把响应吞掉。
+_m7_had_logger = hasattr(_wa, "logger")
+_m7_saved_logger = getattr(_wa, "logger", None)
+_wa.logger = None
+_p_m = 18969
+_ph_m = "127.0.0.1:%d" % _p_m
+_srv_m = _ThreadingHTTPServer(("127.0.0.1", _p_m), _wa._Handler)
+threading.Thread(target=_srv_m.serve_forever, daemon=True).start()
+
+
+def _post_import_m(body):
+    _c = http.client.HTTPConnection("127.0.0.1", _p_m, timeout=30)
+    _c.request("POST", "/api/config/import", body=body, headers={
+        "Host": _ph_m, "Content-Type": "application/zip",
+        "X-Requested-With": "DrcomUI", "Content-Length": str(len(body))})
+    _r = _c.getresponse()
+    _d = _r.read()
+    _conn = _r.getheader("Connection")
+    _c.close()
+    try:
+        return _r.status, json.loads(_d.decode("utf-8")), _conn
+    except ValueError:
+        return _r.status, {"_raw": _d[:120]}, _conn
+
+
+# 加密 zip：把 local header 与 central directory 的 general-purpose bit0 置上
+_m7 = bytearray(_mk_zip({"manifest.json": _good_manifest, "config.json": "{}"}))
+_i = 0
+while True:
+    _i = _m7.find(b"PK\x03\x04", _i)
+    if _i < 0:
+        break
+    _m7[_i + 6] |= 1
+    _i += 4
+_i = 0
+while True:
+    _i = _m7.find(b"PK\x01\x02", _i)
+    if _i < 0:
+        break
+    _m7[_i + 8] |= 1
+    _i += 4
+_st7, _b7, _ = _post_import_m(bytes(_m7))
+check("维护 M-7：加密 zip → 400 且给中文可读原因（不再 500 + 回显异常原文）",
+      _st7 == 400 and "无法解析" in _b7.get("error", "") and "internal" not in _b7.get("error", ""),
+      repr((_st7, _b7)))
+
+# 超限 body（4MB 上限 + 1MB）：必须先排空再关连接，客户端才收得到 413
+_st8, _b8, _conn8 = _post_import_m(b"\0" * (_wa.CONFIG_IMPORT_MAX_BYTES + 1024 * 1024))
+check("维护 M-8：导入超限 → 客户端真的收到 413（不是连接被重置）",
+      _st8 == 413 and (_conn8 or "").lower() == "close", repr((_st8, _b8, _conn8)))
+
+# do_GET 异常兜底：未 _attach（logger 未注入）时也必须回 500 JSON，而不是零响应断连
+_m9_saved = _wa.api_get_status
+_wa.api_get_status = lambda: (_ for _ in ()).throw(RuntimeError("boom-M9"))
+try:
+    _c9 = http.client.HTTPConnection("127.0.0.1", _p_m, timeout=10)
+    _c9.request("GET", "/api/status", headers={"Host": _ph_m})
+    _r9 = _c9.getresponse()
+    _d9 = _r9.read()
+    _c9.close()
+    _m9_ok = _r9.status == 500 and b"internal" in _d9
+    _m9_detail = (_r9.status, _d9[:80])
+except Exception as exc:  # noqa: BLE001
+    _m9_ok = False
+    _m9_detail = repr(exc)
+finally:
+    _wa.api_get_status = _m9_saved
+check("维护 M-9：GET 异常分支不再因裸 logger NameError 断连（回 500 JSON）",
+      _m9_ok, repr(_m9_detail))
+_srv_m.shutdown()
+if _m7_had_logger:
+    _wa.logger = _m7_saved_logger
+else:
+    del _wa.logger
 
 
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----

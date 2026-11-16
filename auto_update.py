@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """auto_update.py — 自动升级（v1.3 新增）业务层。
 
 职责范围：
@@ -21,6 +21,7 @@
 
 import datetime as _dt  # noqa: F401  备用 datetime 别名
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -35,6 +36,12 @@ import urllib.request
 from datetime import datetime
 
 from version import VERSION
+
+# 网络层可重试的错误集合（v2.x 维护 / 审计 U-1）：
+# http.client.IncompleteRead / BadStatusLine / RemoteDisconnected 都是 HTTPException，
+# **不是 OSError** —— 以前三个 except 都没收它们，断流时会穿出去：
+# 镜像不回退、半截 .part 不清理，后台自动升级线程还会被异常直接打死。
+_URL_ERRORS = (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException)
 
 
 # ============================================================
@@ -316,7 +323,7 @@ def _check_github_latest():
             timeout = HTTP_TIMEOUT_SEC if mirror is None else GITHUB_API_REQUEST_TIMEOUT_SEC
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode("utf-8", errors="replace")
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        except _URL_ERRORS as exc:
             logger.warning(
                 "GitHub 检查镜像 %s 失败: %s",
                 "primary" if mirror is None else mirror,
@@ -445,7 +452,7 @@ def _download_installer(url, dest_path, expected_size, progress_callback=None):
                 target, dest_path, expected_size, progress_callback,
                 timeout=DOWNLOAD_TIMEOUT_SEC if mirror is None else GITHUB_DOWNLOAD_REQUEST_TIMEOUT_SEC,
             )
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        except _URL_ERRORS as exc:
             logger.warning(
                 "下载镜像 %s 失败: %s",
                 "primary" if mirror is None else mirror,
@@ -490,7 +497,7 @@ def _do_download_installer(url, dest_path, expected_size, progress_callback, tim
             # 原子改名
             os.replace(tmp, dest_path)
             return last_bytes[0]
-    except (urllib.error.URLError, OSError, TimeoutError):
+    except _URL_ERRORS:
         # 清理半成品
         for p in (dest_path + ".part", dest_path):
             try:
@@ -1463,10 +1470,21 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
     rollback = _write_rollback_script(backup_dir=backup_dir) if backup_dir else None
 
     try:
-        with open(wrapper, "w", encoding="utf-8", newline="\r\n") as f:
-            f.write(_build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME,
-                                          probe_path=probe, ui_port=port,
-                                          backup_dir=backup_dir, rollback_path=rollback))
+        script = _build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME,
+                                       probe_path=probe, ui_port=port,
+                                       backup_dir=backup_dir, rollback_path=rollback)
+        # 审计 U-3：.cmd 由「任务计划程序」以 SYSTEM 身份拉起，cmd.exe 按**系统 ANSI 代码页**
+        # 解析脚本（无控制台、也没有机会 chcp）。以 UTF-8 落盘时，非 ASCII 安装目录
+        # （例如 D:\工具\Drcom）下的 if exist 会全部判 MISSING ——
+        # 自动回滚与安装日志归档**静默失效**（真机 DETACHED 实测：UTF-8 miss / mbcs 命中）✗。
+        # 所以优先按系统 ANSI（Python 的 mbcs）写；系统代码页表示不了中文时退回 UTF-8，
+        # 并让脚本第一行先 chcp 65001（纯 ASCII，能正常执行）。
+        try:
+            with open(wrapper, "w", encoding="mbcs", newline="\r\n") as f:
+                f.write(script)
+        except (LookupError, UnicodeEncodeError):
+            with open(wrapper, "w", encoding="utf-8", newline="\r\n") as f:
+                f.write("@chcp 65001 >nul\r\n" + script)
     except OSError as exc:
         _log_upgrade("WARN", "写升级执行器失败：{}（退回直启）".format(exc))
         wrapper = None
@@ -1599,7 +1617,7 @@ def _do_update_now():
 
         try:
             written = _download_installer(asset_url, installer_path, asset_size, _on_progress)
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        except _URL_ERRORS as exc:
             msg = "下载失败：{}".format(exc)
             _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
             _log_upgrade("ERROR", msg)
@@ -1835,7 +1853,15 @@ def _auto_update_loop():
         # 检查（不升级）：如果发现新版，写 STATE 但不触发 do_update_now
         # 真正的升级由后台线程检测到 update_available=True 后启动
         # 但用户明确要"静默"→ 这里直接触发升级（无需 Web UI 介入）
-        result = _do_check_now()
+        # 审计 U-1：后台线程绝不能因为一次异常就死掉（NSSM AppExit=Ignore 不会拉起它，
+        # 之后所有自动检查/升级都静默失效）。这里把整轮检查兜住，下轮继续。
+        try:
+            result = _do_check_now()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("检查更新抛出未捕获异常（后台线程继续）: %s", exc)
+            if STOP_EVENT.wait(interval_sec):
+                return
+            continue
         if isinstance(result, dict) and result.get("update_available"):
             remote = result.get("latest_version") or ""
             # v2.0.4.0：失败熔断 —— 同一目标版本自动升级失败过就在冷却期内跳过，
@@ -1851,7 +1877,10 @@ def _auto_update_loop():
                 continue
             # 静默升级：立即进入升级流程
             _log_upgrade("INFO", "后台线程检测到新版本，触发静默升级")
-            _do_update_now()
+            try:
+                _do_update_now()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("静默升级抛出未捕获异常（后台线程继续）: %s", exc)
             # 升级完大概率进程被杀；即使没被杀，也等下次循环
             if STOP_EVENT.wait(60):
                 return

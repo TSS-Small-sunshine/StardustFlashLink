@@ -75,9 +75,13 @@ def _log(msg):
 
 
 def ui_port():
-    """从安装目录的 config.json 读 ui_port（用户改过端口也要能连上），失败回默认值。"""
+    """从安装目录的 config.json 读 ui_port（用户改过端口也要能连上），失败回默认值。
+
+    v2.x 维护（审计 C-02）：用 utf-8-sig 读 —— 用户把 config.json 存成「UTF-8 带 BOM」
+    时，旧的 encoding="utf-8" 会 JSONDecodeError，托盘一直连默认 8848 并显示"服务未响应"。
+    """
     try:
-        with open(os.path.join(APP_DIR, "config.json"), "r", encoding="utf-8") as f:
+        with open(os.path.join(APP_DIR, "config.json"), "r", encoding="utf-8-sig") as f:
             cfg = json.load(f)
         port = cfg.get("ui_port")
         if isinstance(port, int) and 1024 <= port <= 65535:
@@ -221,14 +225,21 @@ def decide_events(prev_kind, cur_kind, down_streak):
     - 掉线 → 警告；恢复在线 → 提示；这两类只弹一次（同一状态不重复弹）。
     """
     events = []
-    if prev_kind is None or prev_kind == cur_kind:
+    if prev_kind is None:
         return events
+    # 审计 C-04：旧实现把 prev_kind == cur_kind 的提前返回放在最前面，于是
+    # "连续 3 次 down" 这条规则永远走不到（第 2 次起 prev 就已经是 down）→
+    # 托盘"服务未响应"气泡**永远不会弹**。现在 down 分支先判：只在**刚跨过**阈值
+    # 的那一次弹（down_streak == 阈值），之后维持 down 不重复刷屏。
     if cur_kind == "down":
-        if down_streak >= DOWN_STREAK_TO_NOTIFY:
+        if down_streak == DOWN_STREAK_TO_NOTIFY:
             events.append(("服务未响应",
                            "DrcomAutoLogin 服务没有响应。可以试试：打开配置页看看，或重启服务。",
                            "warn"))
-    elif cur_kind == "off":
+        return events
+    if prev_kind == cur_kind:
+        return events
+    if cur_kind == "off":
         if prev_kind in ("ok", "unknown"):
             events.append(("已掉线",
                            "校园网连接已断开，服务正在尝试重新登录…",
