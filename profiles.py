@@ -80,10 +80,24 @@ def normalize_match_ssids(raw):
             out.append(item)
     return out[:MAX_MATCH_SSIDS]
 
-def validate_values(values):
-    """方案值形状校验（轻量）；返回错误列表。
+# 审计 C-11：方案保存与「切换时生效」必须用同一套合法取值 ——
+# 以前保存允许 1-1440 分钟 / 任意账号，切换时却按 ALLOWED_INTERVALS 与纯数字账号校验，
+# 用户会存出一个**永远切不过去**的方案（若还配了 match_ssids，每个周期都失败刷日志）。
+# 服务层会通过 _attach(allowed_intervals=..., allowed_suffixes=...) 注入同一份常量；
+# 未注入（单测）时用下面的默认值。
+DEFAULT_ALLOWED_INTERVALS = (5, 15, 30, 60, 120)
+DEFAULT_ALLOWED_SUFFIXES = ("", "@yd", "@dx", "@lt")
+_HOST_SHAPE_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z.:-]{0,252}")
 
-    真正的把关在**切换时** —— 会把方案应用到配置副本上，交给注入的
+
+def validate_values(values):
+    """方案值形状 / 取值校验；返回错误列表。
+
+    v2.x 维护（审计 C-11）：**保存时就按"切换时生效"的口径校验**——
+    检查间隔必须在 ALLOWED_INTERVALS 里、账号只能留空或纯数字、后缀在白名单里、
+    host 只能是 IP / 域名字符集。这样用户不可能存出"能存不能切"的方案 ✓。
+
+    真正的整体把关仍在**切换时** —— 会把方案应用到配置副本上，交给注入的
     `_validate_config` 全量校验（见 `apply_to_config`），不通过就整体拒绝 ✗。
     """
     errors = []
@@ -92,12 +106,27 @@ def validate_values(values):
     for k in values:
         if k not in PROFILE_KEYS:
             errors.append("方案里不认识的字段：{}（只允许 {}）".format(k, "、".join(PROFILE_KEYS)))
-    if "host" in values and not isinstance(values["host"], str):
-        errors.append("host 必须是字符串")
+    if "host" in values:
+        host = values["host"]
+        if not isinstance(host, str):
+            errors.append("host 必须是字符串")
+        elif not _HOST_SHAPE_RE.fullmatch(host.strip()):
+            errors.append("host 只能是 IP / 域名（字母数字 . : -），不能含空格、/、[ 等字符")
     # v2.1.1.0：账号与后缀进方案（后缀允许空串 = 校内直连 ✓）
-    for key in ("account", "suffix"):
-        if key in values and not isinstance(values[key], str):
-            errors.append("{} 必须是字符串".format(key))
+    # 审计 C-11：账号必须能过协议层的校验（留空或纯数字），否则切方案时必被拒。
+    if "account" in values:
+        account = values["account"]
+        if not isinstance(account, str):
+            errors.append("account 必须是字符串")
+        elif account.strip() and not account.strip().isdigit():
+            errors.append("account 只能留空或纯数字（学号 / 工号）")
+    if "suffix" in values:
+        suffix = values["suffix"]
+        allowed_suffixes = globals().get("_ALLOWED_SUFFIXES") or DEFAULT_ALLOWED_SUFFIXES
+        if not isinstance(suffix, str):
+            errors.append("suffix 必须是字符串")
+        elif suffix not in allowed_suffixes:
+            errors.append("suffix 必须是 空 / {} 之一".format(" / ".join(s for s in allowed_suffixes if s)))
     if "port" in values:
         try:
             port = int(values["port"])
@@ -112,8 +141,11 @@ def validate_values(values):
         except (TypeError, ValueError):
             errors.append("auto_check_interval_min 必须是整数")
         else:
-            if not (1 <= interval <= 1440):
-                errors.append("auto_check_interval_min 必须在 1-1440 之间")
+            allowed_intervals = globals().get("_ALLOWED_INTERVALS") or DEFAULT_ALLOWED_INTERVALS
+            if interval not in allowed_intervals:
+                # 审计 C-11：与"切换时生效"的口径一致（以前这里允许 1-1440，切换时才被拒 ✗）
+                errors.append("auto_check_interval_min 必须是 {} 之一".format(
+                    " / ".join(str(i) for i in allowed_intervals)))
     if "network_guard_enabled" in values and not isinstance(values["network_guard_enabled"], bool):
         errors.append("network_guard_enabled 必须是布尔值")
     for key in ("guard_allowed_ssids", "guard_allowed_subnets"):
@@ -262,7 +294,8 @@ def _with_config_lock(fn):
 
 
 def _attach(*, logger=None, load_config=None, save_config=None, validate_config=None,
-            load_password_from_disk=None, config_lock=None):
+            load_password_from_disk=None, config_lock=None,
+            allowed_intervals=None, allowed_suffixes=None):
     """注入共享对象，与 web_api / auto_update / metrics 的 `_attach` 策略一致。
 
     `load_password_from_disk`（v2.1.3.0 起）：切方案后要重读密码文件 —— 方案可以带
@@ -282,6 +315,11 @@ def _attach(*, logger=None, load_config=None, save_config=None, validate_config=
         g["load_password_from_disk"] = load_password_from_disk
     if config_lock is not None:
         g["_CONFIG_LOCK"] = config_lock
+    # 审计 C-11：把服务层的合法取值注入进来，保证"保存"与"切换"用同一套口径
+    if allowed_intervals is not None:
+        g["_ALLOWED_INTERVALS"] = tuple(allowed_intervals)
+    if allowed_suffixes is not None:
+        g["_ALLOWED_SUFFIXES"] = tuple(allowed_suffixes)
     return g
 
 
