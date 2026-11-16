@@ -115,7 +115,7 @@
 
 ## 5. 真要实施时的动作清单（2.x / B 方案 ✓）
 
-1. 新建**版本分支**（例如 `v2.1.2.0` ✓）—— 不许塞进别的版本的 PR ✗
+1. 新建分支（按 [`PR-WORKFLOW.md`](PR-WORKFLOW.md) 的命名，如 `feat/storage-jsonl` ✓）—— 一个 PR 只做一件事，不许塞进无关改动 ✗
 2. `.gitignore` 加 `history.db*` ✓
 3. 诊断包 / 配置导出：**排除** db ✓，或导出为文本再走现有脱敏 ✓
 4. 安装器：db 文件 `onlyifdoesntexist` ✓（I8 同款 ✓）

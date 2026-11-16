@@ -34,9 +34,14 @@
 packaging/
 ├── setup.iss              # Inno Setup 6 脚本
 ├── build.bat              # 一键构建脚本
+├── build.ps1              # 构建逻辑（准备 NSSM / Inno Setup / 下载内嵌 Python）
+├── stop-tray.ps1          # 升级前请走托盘（按「tray.py + 安装目录」精确匹配）
+├── RELEASE-NOTES.md       # 正式版 Release 说明模板（CI 渲染占位符）
+├── RELEASE-NOTES-installer.md  # 固定下载通道（tag installer）的短模板
 ├── LICENSE.txt            # MIT 许可证
 ├── config.json.template   # 默认配置（首次安装拷贝为 config.json）
 ├── password.txt.template  # 密码占位（首次安装拷贝为 password.txt）
+├── branding/              # app.ico / EULA.rtf / web-logo-*.png / wizard-*.png
 └── README.md              # 本文件
 ```
 

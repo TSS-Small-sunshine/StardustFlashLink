@@ -20,7 +20,7 @@
 | `SERIAL` +1 | 纯修复 / 打包链路 / 文案，接口与配置结构不变 | `2.0.4.0` → `2.0.4.1` |
 | `PATCH` +1 | 新增**向后兼容**的功能（新 API、新配置项、UI 重构） | `2.0.4.0` → `2.0.5.0` |
 | `MINOR` +1 | 一条版本线收束、开下一条线 → **换代号** | `2.0.x` → `2.1.0.0 "Vega"` |
-| `MAJOR` +1 | 不兼容变更（改服务名 / 配置结构 / 技术栈） | `2.x` → `3.0.0.0 "Polaris"` |
+| `MAJOR` +1 | 不兼容变更（改服务名 / 配置结构 / 技术栈） | `2.x` → `3.0.0.0 "Altair"` |
 
 > **为什么代号不跟 `PATCH` / `SERIAL` 变**：代号回答的是「这是哪一代产品」，
 > 不是「第几次发版」。`2.0.4.0` 与 `2.0.5.0` 同属 `2.0` 代（都叫 Sirius）；
@@ -73,7 +73,6 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
 | `Vega` | 织女星 | **已使用：`2.1` 线**（v2.1.0.0 起） |
 | `Polaris` | 北极星 | 候选（适合 `MAJOR` 级里程碑） |
 | `Rigel` | 参宿七 | 候选 |
-| `Altair` | 河鼓二（牛郎星） | 候选 |
 | `Deneb` | 天津四 | 候选 |
 | `Antares` | 心宿二 | 候选 |
 | `Canopus` | 老人星 | 候选 |
@@ -92,6 +91,7 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
 | `1.x`（v1.0 – v1.4.0） | —（无） | 代号机制自 `2.0` 线起启用，历史版本不回填 |
 | `2.0`（v2.0.0 – v2.0.14.0） | `Sirius` / 天狼星 | 已收束（v2.1.0.0 起进入 `2.1` 线） |
 | `2.1`（v2.1.0.0 – 当前） | `Vega` / 织女星 | ✅ 当前版本线 |
+| `3.0`（`3.0.0.0-preview.x`） | `Altair` / 河鼓二（牛郎星） | 🚧 预览线（`dev/3.0-altair`，只发 prerelease，未合入 `main`） |
 
 ---
 
@@ -111,17 +111,16 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
 
 ```
 # 1) 改版本字面量（§2 清单）+ 写 CHANGELOG / RELEASE-NOTES
-# 2) 本地自检（含隐私守卫；要连安装目录一起查就设 DRCOM_DATA_DIR）
-cd DrcomAutoLogin-Windows
+# 2) 本地自检（在仓库根目录执行；含隐私守卫，要连安装目录一起查就设 DRCOM_DATA_DIR）
 python _smoke_static.py
 python _smoke_http.py
 
-# 3) 提交到版本分支并开 PR（禁止 git add .）
+# 3) 提交到分支并开 PR（命名见 docs/PR-WORKFLOW.md；禁止 git add .）
 git status --short
 git add <逐个文件>
 git commit -m "chore(release): v2.0.4.0 Sirius 天狼星"
 
-# 4) 合并到 main 后触发 CI 构建（版本分支用 workflow_dispatch）
+# 4) 合并到 main 的 push 由 CI 自动构建并发版；需要手动重跑 / 演练时用 workflow_dispatch（dry_run=true 不发 release）
 gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLink --ref main
 ```
 
