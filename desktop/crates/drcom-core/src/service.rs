@@ -141,6 +141,39 @@ fn set(key: &str, value: &str) -> Vec<String> {
     ]
 }
 
+/// NSSM 的 `AppExit` 命令 —— **子参数与值是两个独立 argv** ✓。
+///
+/// nssm 的 AppExit 是「子参数 + 值」两级：`Default` / `0` 是**子参数名**，`Ignore` 是值。
+/// 正确形状是 **5 段 argv**（不含 nssm.exe 本身）：
+///
+/// ```text
+/// nssm set DrcomAutoLogin AppExit Default Ignore
+/// nssm set DrcomAutoLogin AppExit 0 Ignore
+/// ```
+///
+/// 反例（3.0 早期写错的形状）：把 `"AppExit Default"` 当成**一个** argv 元素传进去 →
+/// nssm 报 `Parameter "AppExit" requires a subparameter!`，安装链在第 6 条命令中断，
+/// 系统里留下一个「已注册、没配 AppExit（= NSSM 默认 Restart）」的半成品服务 ✗（违反 R8）。
+/// 2.x v2.0.4.2 专门修过同一处（`auto_update.py` 的 `_set_nssm_appexit`：注释「拆成两个 argv」），
+/// `install.bat` / `packaging/setup.iss` 也是同一形状 ✓。
+///
+/// R8：**只写 Ignore，绝不写 Restart** ✗（重试归程序自己的退避管 ✓）。
+pub fn nssm_appexit_commands() -> Vec<Vec<String>> {
+    // (子参数, 值) —— 与 2.x setup.iss / install.bat 逐字一致 ✓
+    [("Default", "Ignore"), ("0", "Ignore")]
+        .iter()
+        .map(|(subparam, value)| {
+            vec![
+                "set".to_string(),
+                WINDOWS_SERVICE_NAME.to_string(),
+                "AppExit".to_string(),
+                (*subparam).to_string(),
+                (*value).to_string(),
+            ]
+        })
+        .collect()
+}
+
 fn log_path(name: &str) -> String {
     platform::log_dir().join(name).display().to_string()
 }
@@ -153,7 +186,7 @@ pub fn nssm_install_commands(exe: &Path, args: &[&str]) -> Vec<Vec<String>> {
         exe.display().to_string(),
     ];
     launch.extend(args.iter().map(|arg| arg.to_string()));
-    vec![
+    let mut commands = vec![
         launch,
         set(
             "AppDirectory",
@@ -162,16 +195,14 @@ pub fn nssm_install_commands(exe: &Path, args: &[&str]) -> Vec<Vec<String>> {
         set("Start", "SERVICE_AUTO_START"),
         set("DisplayName", "星尘闪连（校园网自动登录）"),
         set("Description", "自动检查校园网在线状态，掉线自动重登"),
-        // 2.x 不变量 I7：崩溃**不自动重启** ✗ —— 重试由程序自己的退避负责 ✓
-        set("AppExit", "Default"),
-        set("AppExit Default", "Ignore"),
-        set("AppExit", "0"),
-        set("AppExit 0", "Ignore"),
-        // 留一份服务侧日志，排障用 ✓
-        set("AppStdout", &log_path("service_stdout.log")),
-        set("AppStderr", &log_path("service_stderr.log")),
-        set("AppRotateFiles", "1"),
-    ]
+    ];
+    // 2.x 不变量 I7 / 3.0 的 R8：崩溃**不自动重启** ✗ —— 重试由程序自己的退避负责 ✓
+    // （逐元素正确的 5 段 argv 在 nssm_appexit_commands 里，别在这里拼字符串 ✗）
+    commands.extend(nssm_appexit_commands());
+    commands.push(set("AppStdout", &log_path("service_stdout.log")));
+    commands.push(set("AppStderr", &log_path("service_stderr.log")));
+    commands.push(set("AppRotateFiles", "1"));
+    commands
 }
 
 /// NSSM 卸载 ✓（`confirm` 是 nssm 的免交互开关 ✓）。
@@ -494,6 +525,53 @@ mod tests {
     }
 
     #[test]
+    fn nssm_appexit_is_two_five_segment_argvs_and_never_restart() {
+        // 2.x 的正确形状（install.bat:178-179 / packaging/setup.iss:287-288 /
+        // auto_update.py:884-897「拆成两个 argv」）：**逐元素**断言，不再 join 成字符串 ✗
+        // （旧测试断言 join 后的子串，"set … AppExit Default" + "set … AppExit Default Ignore"
+        //   两行拼起来恰好凑出 "AppExit Default Ignore"，所以 argv 边界错了也绿 —— 假绿 ✗）
+        let commands = nssm_appexit_commands();
+        let expected: Vec<Vec<String>> = vec![
+            vec!["set", "DrcomAutoLogin", "AppExit", "Default", "Ignore"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            vec!["set", "DrcomAutoLogin", "AppExit", "0", "Ignore"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        ];
+        assert_eq!(commands, expected, "AppExit 命令必须逐元素是这个形状 ✓");
+
+        for argv in &commands {
+            // ① 5 段：(nssm.exe) set <服务> AppExit <子参数> <值> ✓
+            assert_eq!(argv.len(), 5, "必须是 5 段 argv（nssm.exe 之外）: {:?}", argv);
+            assert_eq!(argv[0], "set");
+            assert_eq!(argv[1], WINDOWS_SERVICE_NAME);
+            assert_eq!(argv[2], "AppExit");
+            assert!(matches!(argv[3].as_str(), "Default" | "0"), "子参数: {:?}", argv);
+            assert_eq!(argv[4], "Ignore", "R8 只允许 Ignore: {:?}", argv);
+            // ② 子参数绝不许与参数名拼成**同一个** argv 元素 ✗
+            //    （那正是真机报 "Parameter \"AppExit\" requires a subparameter!" 的形状 ✓）
+            for element in argv {
+                assert!(
+                    !element.starts_with("AppExit "),
+                    "子参数不许并进参数名那个 argv ✗: {:?}",
+                    element
+                );
+            }
+            // ③ R8：绝不写 Restart ✗（NSSM 重启风暴）
+            for element in argv {
+                assert!(
+                    !element.to_ascii_lowercase().contains("restart"),
+                    "AppExit 绝不许写 Restart ✗: {:?}",
+                    argv
+                );
+            }
+        }
+    }
+
+    #[test]
     fn nssm_install_keeps_the_two_x_invariants() {
         let commands = nssm_install_commands(&exe(), &["run"]);
         let joined: Vec<String> = commands.iter().map(|argv| argv.join(" ")).collect();
@@ -504,10 +582,33 @@ mod tests {
         assert!(joined[0].starts_with(&format!("install {} ", WINDOWS_SERVICE_NAME)), "{}", joined[0]);
         assert!(joined[0].contains("stardust-flash-link.exe run"), "{}", joined[0]);
 
-        // ② AppExit 口径（2.x I7）：Default Ignore + 0 Ignore，**绝不写 Restart** ✗
-        assert!(all.contains("AppExit Default Ignore"), "{}", all);
-        assert!(all.contains("AppExit 0 Ignore"), "{}", all);
-        assert!(!all.contains("Restart"), "NSSM 重启风暴是明令禁止的 ✗:\n{}", all);
+        // ② AppExit：安装链里必须出现**逐元素正确**的两条（不再断言 join 后的子串 ✗）
+        let appexit: Vec<Vec<String>> = commands
+            .iter()
+            .filter(|argv| argv.len() >= 3 && argv[2] == "AppExit")
+            .cloned()
+            .collect();
+        assert_eq!(
+            appexit,
+            nssm_appexit_commands(),
+            "安装链里的 AppExit 命令必须与纯函数逐元素一致: {:?}",
+            appexit
+        );
+        // 任何一条 argv 都不许把子参数并进参数名元素（假绿那个 bug 的形状 ✗）
+        for argv in &commands {
+            for element in argv {
+                assert!(
+                    !element.starts_with("AppExit "),
+                    "子参数不许并进参数名那个 argv ✗: {:?}",
+                    element
+                );
+                assert!(
+                    !element.to_ascii_lowercase().contains("restart"),
+                    "NSSM 重启风暴是明令禁止的 ✗: {:?}",
+                    all
+                );
+            }
+        }
 
         // ③ 自动启动 / 工作目录 / 日志 ✓
         assert!(all.contains("Start SERVICE_AUTO_START"), "{}", all);
@@ -585,6 +686,24 @@ mod tests {
         if cfg!(target_os = "windows") {
             assert!(text.contains("nssm install DrcomAutoLogin"), "{}", text);
             assert!(text.contains("nssm start DrcomAutoLogin"), "{}", text);
+            // 用户 --dry-run 看到的就是这两条（逐字核对 2.x install.bat:178-179 的形状 ✓）
+            assert!(
+                text.contains("nssm set DrcomAutoLogin AppExit Default Ignore"),
+                "dry-run 的 AppExit 形状不对（子参数必须单独成段）✗:\n{}",
+                text
+            );
+            assert!(
+                text.contains("nssm set DrcomAutoLogin AppExit 0 Ignore"),
+                "dry-run 的 AppExit 形状不对 ✗:\n{}",
+                text
+            );
+            assert_eq!(
+                text.lines().filter(|line| line.contains("AppExit")).count(),
+                2,
+                "AppExit 只该有两条（多一条就意味着形状又拼错了）✗:\n{}",
+                text
+            );
+            assert!(!text.contains("Restart"), "R8 绝不许出现 Restart ✗:\n{}", text);
         } else {
             assert!(text.contains("launchctl") || text.contains("systemctl"), "{}", text);
         }
