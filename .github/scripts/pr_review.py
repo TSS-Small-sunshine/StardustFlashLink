@@ -86,6 +86,10 @@ VERSION_SYNC_FILES = (
     "联网_service.py",
     "install.bat",
     "uninstall.bat",
+)
+#: 版本号"自动读取"清单（v2.1.3.5 起）：这些脚本构建时从 version.py 读版本，不写字面量，
+#: 所以只校验"确实有读取逻辑"，不再要求出现具体版本号（审计 J6）。
+VERSION_AUTOREAD_FILES = (
     "packaging/build.ps1",
 )
 VERSION_SYNC_CHANGELOG = "CHANGELOG.md"
@@ -299,6 +303,12 @@ def check_version_sync(version, files):
             findings.append((FAIL, "version", f"读不到 {path}，无法确认版本号是否同步"))
         elif version not in content:
             findings.append((FAIL, "version", f"{path} 里没有 {version} —— 版本字面量没同步（I2）"))
+    for path in VERSION_AUTOREAD_FILES:
+        content = files.get(path, "")
+        if not content:
+            findings.append((FAIL, "version", f"读不到 {path}，无法确认它是否自动读取版本号"))
+        elif "version.py" not in content or "VERSION" not in content:
+            findings.append((FAIL, "version", f"{path} 没有从 version.py 读取版本号的逻辑（J6/I2）"))
     changelog = files.get(VERSION_SYNC_CHANGELOG, "")
     if f"## v{version}" not in changelog:
         findings.append((FAIL, "version", f"{VERSION_SYNC_CHANGELOG} 缺少 ## v{version} 段落（I2）"))
@@ -649,10 +659,18 @@ def self_test():
 
     # 版本同步
     good = {path: "2.1.4.0" for path in VERSION_SYNC_FILES}
+    good.update({path: "Select-String version.py VERSION" for path in VERSION_AUTOREAD_FILES})
     good.update({VERSION_SYNC_CHANGELOG: "## v2.1.4.0 (feature)", VERSION_SYNC_RELEASE_NOTES: "v{{VERSION}} {{CODENAME}}"})
     check("版本：全同步通过", not check_version_sync("2.1.4.0", good))
     good["install.bat"] = "v2.1.3.0"
     check("版本：漏一处被拦", any(f[0] == FAIL for f in check_version_sync("2.1.4.0", good)))
+    _auto = dict(good, **{"install.bat": "2.1.4.0"})
+    _auto["packaging/build.ps1"] = "$AppVersionText = 'v2.1.4.0'"
+    check("版本：自动读取文件里写死字面量也不算通过（J6）",
+          any(f[0] == FAIL for f in check_version_sync("2.1.4.0", _auto)))
+    _auto["packaging/build.ps1"] = "$VersionFile = version.py; $ver = '''^VERSION'''"
+    check("版本：自动读取文件有读取逻辑即通过（J6）",
+          not check_version_sync("2.1.4.0", _auto))
 
     # 发布模板
     check("发布模板：合规通过", not check_release_template('v{{VERSION}} "{{CODENAME}}"（{{CODENAME_CN}}）\n'))
