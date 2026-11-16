@@ -1,6 +1,6 @@
-<#
+﻿<#
 ============================================================
-  build.ps1 - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 - Inno Setup 安装包构建脚本 (v2.1.3.4)
+  build.ps1 - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 - Inno Setup 安装包构建脚本 (版本号构建时从 version.py 读取)
 
   为什么从 build.bat 改写为 PowerShell:
     1. cmd 的文件存在性判断（if-exist）在该机器某些 context 下即使文件存在也返回 false
@@ -23,7 +23,6 @@ $ErrorActionPreference = 'Stop'
 # ============================================================
 #   常量
 # ============================================================
-$AppVersionText  = 'v2.1.3.4'
 $LogPath         = $null   # 在路径解析后赋值
 $LangUrl         = 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl'
 $LangManualUrl   = 'https://github.com/jrsoftware/issrc/tree/main/Files/Languages'
@@ -141,6 +140,28 @@ function Stop-Build {
     $script:ExitCode = 1
     exit 1
 }
+
+# ============================================================
+#   版本号解析（审计 J6）：唯一来源 = 仓库根 version.py
+#   以前这里还有一份 'v2.1.3.4' 字面量（版本号第 6 份副本），banner 会和真实版本悄悄漂移。
+#   现在构建时读取；读不到 / 格式不符 -> Stop-Build，绝不猜一个版本号继续打包。
+# ============================================================
+$VersionFile = Join-Path $ProjectDir 'version.py'
+$AppVersionText = $null
+if (-not (Test-Path -LiteralPath $VersionFile -PathType Leaf)) {
+    Stop-Build -Message ('找不到 version.py，无法确定安装包版本号: ' + $VersionFile) -Hint @(
+        '        build.ps1 不再硬编码版本号，统一从仓库根的 version.py 读取 VERSION。',
+        '        请确认是从仓库检出的目录运行 packaging\build.bat（version.py 与 packaging\ 同级）。'
+    )
+}
+$VersionMatch = Select-String -LiteralPath $VersionFile -Pattern '^VERSION\s*=\s*"([0-9.]+)"' | Select-Object -First 1
+if (-not $VersionMatch) {
+    Stop-Build -Message ('version.py 里找不到 VERSION = "x.y.z.w" 定义，无法确定安装包版本号: ' + $VersionFile) -Hint @(
+        '        期望形式: VERSION = "2.1.3.4"（version.py 是版本号唯一来源，见 docs/VERSIONING.md）。'
+    )
+}
+$AppVersionText = 'v' + $VersionMatch.Matches[0].Groups[1].Value
+Write-Info ('版本号（读取自 version.py）: ' + $AppVersionText)
 
 # ============================================================
 #   供应链校验（审计 P2-4 / J7）：上游二进制哈希锁

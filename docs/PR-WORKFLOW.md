@@ -52,7 +52,7 @@
 | 正文 | 太短（<80 字符）、缺 `## 这是什么` 或 `## 怎么验证` |
 | 双线隔离 | `dev/**` 往 main 提；main 往 `dev/**` 合；main 的 PR 碰 `desktop/`；dev 的 PR 碰根目录 2.x 代码 / `packaging/` |
 | 隐私 | 提交 `password.txt` / `config.json` / `logs/` / 私钥 / `.p12` / token 形态；URL 带 `password=` |
-| 版本同步 | 改 `version.py` 但没同步 `setup.iss` / 批处理 / `build.ps1` / CHANGELOG |
+| 版本同步 | 改 `version.py` 但没同步 `setup.iss` / 批处理 / CHANGELOG（`build.ps1` 构建时自动读取 `version.py`，不再要求字面量） |
 | 发布模板 | 改 `packaging/RELEASE-NOTES.md` 但首行缺 `{{CODENAME}}` 占位，或出现渲染器不认识的占位符 |
 | 大小 | 0 改动；>80 文件；>5000 行 |
 

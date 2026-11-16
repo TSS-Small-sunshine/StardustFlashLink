@@ -29,7 +29,7 @@
 | # | 不变量 |
 | --- | --- |
 | I1 | NSSM 服务名 `DrcomAutoLogin`、`AppId`、默认安装路径 `%ProgramFiles%\DrcomAutoLogin` **不变**（存量升级依赖） |
-| I2 | 版本号唯一来源 `version.py`；`setup.iss` / `install.bat` / `uninstall.bat` / `build.ps1` / docstring 必须同步 |
+| I2 | 版本号唯一来源 `version.py`；`setup.iss` / `install.bat` / `uninstall.bat` / docstring 必须手改同步；`packaging/build.ps1` **构建时自动读取 `version.py`**（无需手改） |
 | I3 | 前端继续内联在 `web_api.py`；不引入 npm / CDN / 外部字体 / 新静态文件 |
 | I4 | 不新增 Python 依赖（含「顺便用一下」的第三方包） |
 | I5 | 既有 API 路径与字段名**只增不改不删**（Web UI 与自动升级客户端都依赖） |

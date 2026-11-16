@@ -98,6 +98,9 @@ UPDATE_WRAPPER_NAME = "drcom_apply_update.cmd"
 UPDATE_RC_NAME = "drcom_apply_update.rc"
 UPDATE_LOG_NAME = "drcom-installer-silent.log"
 UPDATE_LEFTOVER_STALE_SEC = 5 * 60  # 只清"陈旧"的执行器残留（正在跑的那次绝不碰）
+# 审计 J8：%TEMP% 里**旧版本**的安装包（换目标版本重试后留下的 12 MB 包）超过这个年龄才清，
+# 免得删掉本轮刚下载完、还没装上 / 正被安装器占用着的包（正在使用的删不掉，也一律不动）。
+OLD_INSTALLER_MAX_AGE_SEC = 24 * 3600
 SCHTASKS_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "schtasks.exe")
 SC_PATH = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "sc.exe")
 
@@ -471,6 +474,21 @@ def update_busy_message():
     return msg or "已有升级任务在执行"
 
 
+def _expected_size_bytes(value):
+    """把候选里的 expected_size 归一成非负整数（缺失 / 非法 / <=0 都返回 0，纯函数）。
+
+    审计 C2：expected_size 来自 GitHub releases 资产元数据，可能是 None / 字符串 / 0；
+    只有当它给出**正整数**时才做下载后大小核对，缺失时保持旧行为。
+    """
+    if isinstance(value, bool):
+        return 0
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return size if size > 0 else 0
+
+
 def _download_installer(url, dest_path, expected_size, progress_callback=None, expected_sha256=None):
     """按顺序尝试主源 + 镜像下载 installer；任一成功即返回字节数。
     所有镜像都失败则抛最后一次异常。
@@ -481,6 +499,8 @@ def _download_installer(url, dest_path, expected_size, progress_callback=None, e
     digest 仍只信主源（GITHUB_API_MIRRORS 只剩 None，见 P1-2）。
     没给 expected_sha256 时不校验：fail-closed 的「digest 缺失即拒绝」在 _do_update_now
     里、下载之前就把关。
+    审计 C2：expected_size > 0 时**下载后核对实际大小**（截断包 / 限流页），不符 → 删文件、
+    记 WARN、换下一个镜像；expected_size 缺失 / 非正数 → 不核对，保持旧行为。
 
     progress_callback(downloaded_bytes, total_bytes_or_None) 每 ~200ms 触发。
     """
@@ -497,6 +517,24 @@ def _download_installer(url, dest_path, expected_size, progress_callback=None, e
         except _URL_ERRORS as exc:
             logger.warning("下载镜像 %s 失败: %s", mirror_name, exc)
             last_exc = exc
+            continue
+        # 审计 C2：候选里带了 expected_size（>0 字节）就核对实际大小。
+        # 镜像用 200 返回截断的包 / 限流页时，若没有 digest 可依赖（或 digest 校验之前），
+        # 大小不符同样说明「下载不完整」→ 删掉该镜像的产物、换下一个（与 SHA256 失败同一路径）。
+        # 没有 expected_size 时保持旧行为，不做任何核对。
+        expected_bytes = _expected_size_bytes(expected_size)
+        if expected_bytes > 0 and written != expected_bytes:
+            logger.warning(
+                "镜像 %s 下载的安装器大小不符（期望 %d 字节，实际 %d 字节），删除后换下一个镜像",
+                mirror_name, expected_bytes, written)
+            try:
+                if os.path.isfile(dest_path):
+                    os.remove(dest_path)
+            except OSError as exc:
+                logger.warning("删除大小不符的安装器失败: %s", exc)
+            last_exc = OSError(
+                "镜像 {} 下载的安装器大小不符（期望 {} 字节，实际 {} 字节）".format(
+                    mirror_name, expected_bytes, written))
             continue
         if expected_sha256 and not _verify_sha256(dest_path, expected_sha256):
             logger.warning("镜像 %s 下载的安装器 SHA256 不符，删除后换下一个镜像", mirror_name)
@@ -1348,6 +1386,48 @@ class _GeneratedScriptError(OSError):
     """
 
 
+# 审计 E5：升级执行器（.cmd）里的路径是**直接插值**进 "..." 的。cmd.exe 解析这一行时
+# 仍会展开 %VAR%（以及延迟展开的 !VAR!），并把 ^ & | < > 当转义 / 命令分隔 / 重定向；
+# 换行会把一条命令截成两条。这些字符在 Windows 目录名里是合法的，但自动升级的 .cmd
+# 执行器表达不了 —— 生成执行器 / 回滚脚本前先检查，命中就**停止自动升级**，让用户手动跑安装包。
+# 正常路径（盘符、空格、反斜杠、中文）一律放行，例如 D:\Program Files\DrcomAutoLogin。
+_CMD_UNSAFE_PATH_CHARS = (
+    ("%", "%"), ("!", "!"), ("^", "^"), ("&", "&"),
+    ("|", "|"), ("<", "<"), (">", ">"), ("\r", "换行"), ("\n", "换行"),
+)
+
+
+def _cmd_path_unsafe_reason(path):
+    """路径里是否含 cmd 插值危险字符：返回中文原因，安全时返回空串（纯函数）。
+
+    只用于**会被拼进 .cmd 的路径**（安装目录 / 内嵌 Python / 安装包 / 脚本输出路径）；
+    手动升级（用户自己双击安装包，不经过 cmd 插值）不受这层检查影响。
+    """
+    if not isinstance(path, str) or not path:
+        return ""
+    for ch, label in _CMD_UNSAFE_PATH_CHARS:
+        if ch in path:
+            return "路径包含 cmd 特殊字符「{}」".format(label)
+    return ""
+
+
+def _cmd_paths_unsafe_reason(labeled_paths):
+    """一次检查多组 (标签, 路径)，返回第一条不安全项的中文原因；全安全返回空串（纯函数）。"""
+    for label, path in labeled_paths:
+        reason = _cmd_path_unsafe_reason(path)
+        if reason:
+            return "{}：{}".format(label, reason)
+    return ""
+
+
+class _CmdPathUnsafeError(OSError):
+    """升级脚本里要插值的路径含 cmd 特殊字符，已拒绝生成脚本（审计 E5）。
+
+    继承 OSError：既有 `except OSError` 兜底仍然接得住；升级路径单独先接住它，
+    给用户明确的中文结论（停止自动升级、请手动运行安装包），而不是含糊的启动失败。
+    """
+
+
 def _upgrade_python_executable():
     """升级脚本（回滚 / 探针 / py_compile）用哪个解释器：内嵌优先，缺内嵌退回当前进程。
 
@@ -1757,7 +1837,15 @@ def _write_update_wrapper(path, script):
     - 系统代码页表示不了中文时退回 UTF-8，并让脚本第一行先 chcp 65001（纯 ASCII，能执行）；
     - 审计 G5：newline 传空串 —— 脚本本身已经用 CRLF 拼好行尾，文本模式再按 CRLF 转换
       会生成 **CR CR LF**（实测 53 处）。cmd 能容忍，但生成物不符合预期，也容易误导排查。
+    - 审计 E5：执行器**自身路径**也会被 schtasks /tr 拼进命令行 —— 含 cmd 特殊字符时
+      直接拒绝生成（抛 _CmdPathUnsafeError），绝不落一个注定跑不对的脚本。
     """
+    unsafe_reason = _cmd_path_unsafe_reason(path)
+    if unsafe_reason:
+        msg = ("安装路径包含 cmd 特殊字符，已停止自动升级；请手动运行安装包"
+               "（升级执行器：{}）").format(unsafe_reason)
+        _log_upgrade("WARN", msg)
+        raise _CmdPathUnsafeError(msg)
     try:
         with open(path, "w", encoding="mbcs", newline="") as handle:
             handle.write(script)
@@ -1811,7 +1899,25 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
     py_compile 校验语法；**校验失败抛 _GeneratedScriptError 中止升级，绝不启动安装器**。
     写盘失败仍按旧行为降级（探针 → health=SKIP）；校验失败不能降级 —— 那意味着
     升级后既没有健康判据、也没有可用的回滚脚本，等于在没有退路的情况下换代码。
+
+    审计 E5：动手写任何脚本之前先检查**会被插值进 .cmd 的路径**（安装目录 / 内嵌 Python /
+    安装包 / 执行器与结果文件路径）。含 cmd 特殊字符（% ! ^ & | < > 换行）时执行器一定
+    跑不对 —— 抛 _CmdPathUnsafeError 中止本次自动升级，让用户手动运行安装包，绝不硬上。
     """
+    unsafe_reason = _cmd_paths_unsafe_reason((
+        ("安装目录", BASE_DIR),
+        ("内嵌 Python", _embedded_python_path()),
+        ("安装包", installer_path),
+        ("升级执行器", _wrapper_path()),
+        ("结果文件", _rc_path()),
+        ("健康探测脚本", _health_probe_path()),
+        ("回滚脚本", _rollback_script_path()),
+        ("安装日志", _installer_log_path()),
+    ))
+    if unsafe_reason:
+        msg = "安装路径包含 cmd 特殊字符，已停止自动升级；请手动运行安装包（{}）".format(unsafe_reason)
+        _log_upgrade("WARN", msg)
+        raise _CmdPathUnsafeError(msg)
     log_path = _installer_log_path()
     wrapper = _wrapper_path()
     rc_path = _rc_path()
@@ -2072,6 +2178,15 @@ def _do_update_now():
             _log_upgrade("INFO", "installer 已启动（方式={}，PID={}，第 {} 次尝试；收尾将探 http://{}:{}{}）".format(
                 launch.get("mode"), launch.get("pid"), prev_count + 1,
                 HEALTH_PROBE_HOST, _normalize_ui_port(cfg.get("ui_port")), HEALTH_PROBE_PATH))
+        except _CmdPathUnsafeError as exc:
+            # 审计 E5：路径含 cmd 插值危险字符 → 执行器 / 回滚脚本一律不生成，本次自动升级失败。
+            # 手动升级（用户自己双击安装包）不经过 cmd 插值，提示语直接指向它，不误导用户去修路径。
+            _write_update_attempt(remote_ver, count=prev_count + 1, state="failed")
+            msg = str(exc)
+            _set_update_state(update_state="error", update_progress=0,
+                              update_progress_message=msg, update_last_error=msg)
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
         except _GeneratedScriptError as exc:
             # 审计 D5：生成的脚本语法不过 → **必须中止升级**，绝不能启动安装器。
             # 单独接住（在 OSError 之前）给出明确中文原因，而不是含糊的「启动 installer 失败」。
@@ -2650,8 +2765,16 @@ def _cleanup_update_leftovers():
     # 4) 已经装上的安装包（审计 E4 / I9：产物名以 setup.iss 为准）
     # 新前缀 StardustFlashLink-Setup-v* + 历史前缀 DrcomAutoLogin-Setup-v* 都认，
     # 否则改名之后旧残留永远清不掉（12 MB × 每次升级）。
+    # 审计 J8：以前只删「刚好是当前版本」的包 —— 换目标版本重试后，上一个目标版本的
+    # 12 MB 包会一直躺在 %TEMP% 里。现在再清**旧版本**的残留，规则（宁可不删，绝不误删）：
+    #   - 只看 _update_tmp_dir() 根目录（不递归，别处的同名文件一律不碰）；
+    #   - 文件名能解析出**严格四段**版本，且该版本 < 当前版本；
+    #   - mtime 超过 OLD_INSTALLER_MAX_AGE_SEC（24 小时）——刚下好 / 正被安装器占用的包不动；
+    #   - 解析不出 / 版本更高 / 删不掉（正在使用）→ 一律保留；删除失败只记 DEBUG。
     try:
-        for name in os.listdir(_update_tmp_dir()):
+        tmp_dir = _update_tmp_dir()
+        old_before = time.time() - OLD_INSTALLER_MAX_AGE_SEC
+        for name in os.listdir(tmp_dir):
             matched_prefix = None
             for prefix in (INSTALLER_FILENAME_PREFIX, LEGACY_INSTALLER_FILENAME_PREFIX):
                 if name.startswith(prefix) and name.endswith(".exe"):
@@ -2660,12 +2783,26 @@ def _cleanup_update_leftovers():
             if matched_prefix is None:
                 continue
             ver = name[len(matched_prefix):-len(".exe")]
-            if _compare_versions(VERSION, ver) == 0:
+            full_path = os.path.join(tmp_dir, name)
+            cmp = _compare_versions(VERSION, ver)
+            if cmp == 0:
+                # 当前版本：已经装上，照旧立刻删（不看 mtime，保持旧行为）
                 try:
-                    os.remove(os.path.join(_update_tmp_dir(), name))
+                    os.remove(full_path)
                     _log_upgrade("INFO", "清理已安装的安装包：{}".format(name))
                 except OSError:
                     pass
+                continue
+            # 旧版本：版本必须严格小于当前版本，且文件名是严格四段数字
+            if cmp != 1 or len(_parse_version(ver)) != 4:
+                continue
+            try:
+                if os.path.getmtime(full_path) >= old_before:
+                    continue  # 24 小时内：可能是本轮刚下载的包 / 正在使用
+                os.remove(full_path)
+                _log_upgrade("INFO", "清理旧版本安装包：{}".format(name))
+            except OSError as exc:
+                logger.debug("清理旧版本安装包失败（保留）：%s（%s）", name, exc)
     except OSError:
         pass
 

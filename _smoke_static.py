@@ -3669,6 +3669,331 @@ check("维护 R4-供应链：浮动下载物（ISCC / 中文语言文件）在 n
       repr([n.get("name") for n in (_lock_doc.get("not_locked") or [])]))
 
 
+# ============================================================
+# 维护第五轮（2026-11 / 2.x 维护：C2 / J8 / E5 / J6）
+# 对应 _维护报告/audit/upgrade.md 的 C2 / J8 / E5 / J6。
+# 行为级：C2 用替身模拟镜像下载；J8 在 TEMP 沙箱造安装包 + 控制 mtime；
+# E5 测纯函数 + 写脚本函数拒绝生成；J6 读 build.ps1 / VERSIONING.md 源码。
+# 不联网、不真装、不起真实服务进程。
+# ============================================================
+
+_R5_MISSING = object()
+_R5_NAMES = (
+    "LOG_DIR", "UPGRADE_LOG_FILE", "logger", "BASE_DIR", "NSSM_PATH",
+    "STATE", "STATE_LOCK", "UPDATE_LOCK", "STOP_EVENT",
+    "_load_config", "_check_github_latest", "_check_disk_free_mb", "_now_iso",
+    "_probe_local_health", "_do_download_installer", "GITHUB_DOWNLOAD_MIRRORS",
+)
+_r5_saved = {k: au.__dict__.get(k, _R5_MISSING) for k in _R5_NAMES}
+_r5_saved_temp = os.environ.get("TEMP")
+_r5_root = tempfile.mkdtemp(prefix="drcom_r5_")
+_r5_app = os.path.join(_r5_root, "app")
+_r5_logs = os.path.join(_r5_root, "logs")
+for _d in (_r5_app, _r5_logs):
+    os.makedirs(_d, exist_ok=True)
+os.environ["TEMP"] = _r5_root
+_r5_state = {}
+_r5_logger = logging.getLogger("smoke_auto_update_r5")
+_r5_logger.addHandler(logging.NullHandler())
+au._attach(
+    logger=_r5_logger, state=_r5_state, state_lock=threading.Lock(), update_lock=threading.Lock(),
+    tools_dir=os.path.join(_r5_root, "tools"), nssm_path=os.path.join(_r5_root, "tools", "nssm.exe"),
+    upgrade_log_file=os.path.join(_r5_logs, "upgrade.log"), log_dir=_r5_logs, base_dir=_r5_app,
+    load_config=lambda: {}, save_config=lambda *a: None,
+    now_iso=lambda: "2026-11-16T00:00:00", stop_event=threading.Event())
+
+
+class _R5Logger(object):
+    """记录 info / warning / debug 文案（C2 / E5 的行为断言用）。"""
+
+    def __init__(self):
+        self.lines = []
+
+    def _add(self, level, msg, args):
+        self.lines.append(level + " " + (msg % args if args else str(msg)))
+
+    def info(self, msg, *a):
+        self._add("INFO", msg, a)
+
+    def warning(self, msg, *a):
+        self._add("WARN", msg, a)
+
+    def error(self, msg, *a):
+        self._add("ERROR", msg, a)
+
+    def exception(self, msg, *a):
+        self._add("EXC", msg, a)
+
+    def debug(self, msg, *a):
+        self._add("DEBUG", msg, a)
+
+
+def _r5_upgrade_log():
+    _lp = au.UPGRADE_LOG_FILE
+    return pathlib.Path(_lp).read_text(encoding="utf-8") if os.path.isfile(_lp) else ""
+
+
+_r5_cap = _R5Logger()
+au.logger = _r5_cap
+_r5_saved_mirrors = au.GITHUB_DOWNLOAD_MIRRORS
+_r5_saved_do_download = au._do_download_installer
+
+# —— C2：下载完成后按 expected_size 核对实际大小（不符 → 删文件、换下一个镜像）——
+_r5_dl_calls = []
+_r5_good = b"GOOD-R5-INSTALLER" * 8          # 136 字节
+_r5_dest = os.path.join(_r5_root, "dl_r5.exe")
+
+
+def _r5_fake_size_mismatch_then_ok(url, dest_path, expected_size, cb, timeout):
+    _r5_dl_calls.append(url)
+    if "gh-proxy.com" not in url:             # 主源返回被截断的包（9 字节 < 期望 144）
+        pathlib.Path(dest_path).write_bytes(b"TRUNCATED")
+        return 9
+    pathlib.Path(dest_path).write_bytes(_r5_good)
+    return len(_r5_good)
+
+
+au.GITHUB_DOWNLOAD_MIRRORS = (None, "https://gh-proxy.com")
+au._do_download_installer = _r5_fake_size_mismatch_then_ok
+_r5_written = None
+try:
+    _r5_written = au._download_installer("https://example.invalid/pkg.exe", _r5_dest,
+                                         len(_r5_good), None)
+    _r5_size_ok = (_r5_written == len(_r5_good)
+                   and pathlib.Path(_r5_dest).read_bytes() == _r5_good)
+finally:
+    au._do_download_installer = _r5_saved_do_download
+    au.GITHUB_DOWNLOAD_MIRRORS = _r5_saved_mirrors
+_r5_size_warns = [l for l in _r5_cap.lines if "大小不符" in l]
+check("维护 R5-C2：expected_size 不符 → 删掉该镜像的包并换下一个镜像（不判成功）",
+      _r5_size_ok and len(_r5_size_warns) == 1
+      and ("期望 %d 字节" % len(_r5_good)) in _r5_size_warns[0]
+      and "实际 9 字节" in _r5_size_warns[0]
+      and any("gh-proxy.com" in u for u in _r5_dl_calls),
+      repr((_r5_written, _r5_size_warns, _r5_dl_calls)))
+
+# 所有镜像都不符 → 抛错、文件删干净，绝不把半截包判成成功
+_r5_dest2 = os.path.join(_r5_root, "dl_r5_bad.exe")
+
+
+def _r5_fake_always_short(url, dest_path, expected_size, cb, timeout):
+    pathlib.Path(dest_path).write_bytes(b"SHORT")
+    return 5
+
+
+au.GITHUB_DOWNLOAD_MIRRORS = (None, "https://gh-proxy.com")
+au._do_download_installer = _r5_fake_always_short
+_r5_size_error = ""
+try:
+    au._download_installer("https://example.invalid/pkg.exe", _r5_dest2, 144, None)
+except OSError as _exc:
+    _r5_size_error = str(_exc)
+finally:
+    au._do_download_installer = _r5_saved_do_download
+    au.GITHUB_DOWNLOAD_MIRRORS = _r5_saved_mirrors
+check("维护 R5-C2：所有镜像大小都不符 → 抛中文错误且不留半截包（绝不判成功）",
+      "大小不符" in _r5_size_error and "期望 144 字节" in _r5_size_error
+      and "实际 5 字节" in _r5_size_error and not os.path.isfile(_r5_dest2),
+      repr((_r5_size_error, os.path.isfile(_r5_dest2))))
+
+# expected_size 缺失 / 相符 → 行为与以前一致（不误删、不误判失败）
+def _r5_fake_writes(url, dest_path, expected_size, cb, timeout):
+    pathlib.Path(dest_path).write_bytes(b"ANY-BYTES")
+    return 9
+
+
+au._do_download_installer = _r5_fake_writes
+_r5_dest3 = os.path.join(_r5_root, "dl_r5_none.exe")
+_r5_dest4 = os.path.join(_r5_root, "dl_r5_match.exe")
+try:
+    _r5_none_written = au._download_installer("https://example.invalid/pkg.exe", _r5_dest3, None, None)
+    _r5_none_ok = _r5_none_written == 9 and os.path.isfile(_r5_dest3)
+    _r5_match_written = au._download_installer("https://example.invalid/pkg.exe", _r5_dest4, 9, None)
+    _r5_match_ok = _r5_match_written == 9 and os.path.isfile(_r5_dest4)
+finally:
+    au._do_download_installer = _r5_saved_do_download
+check("维护 R5-C2：expected_size 缺失 / 相符时不改行为（不校验、不误删）",
+      _r5_none_ok and _r5_match_ok, repr((_r5_none_ok, _r5_match_ok)))
+
+# —— J8：TEMP 里「旧版本 + 超过 24 小时」的安装包要清；新的 / 坏名字 / 子目录不动 ——
+_r5_old_mtime = time.time() - (au.OLD_INSTALLER_MAX_AGE_SEC + 3600)   # 25 小时前
+_r5_fresh_mtime = time.time() - 60                                    # 1 分钟前
+_r5_pkg = {
+    "old_expired": "StardustFlashLink-Setup-v2.1.0.0.exe",   # 旧版本 + 过期 → 删
+    "old_fresh": "StardustFlashLink-Setup-v2.1.0.1.exe",     # 旧版本但刚下好 → 留
+    "higher": "StardustFlashLink-Setup-v9.9.9.9.exe",        # 版本更高 → 留
+    "badname": "StardustFlashLink-Setup-vabc.exe",           # 解析不出 → 留
+    "three_seg": "StardustFlashLink-Setup-v2.1.0.exe",       # 只有三段 → 留
+}
+for _n in _r5_pkg.values():
+    _p = os.path.join(_r5_root, _n)
+    pathlib.Path(_p).write_bytes(b"x")
+    os.utime(_p, (_r5_old_mtime, _r5_old_mtime))
+os.utime(os.path.join(_r5_root, _r5_pkg["old_fresh"]), (_r5_fresh_mtime, _r5_fresh_mtime))
+# 子目录里的同名旧包：清理范围限定 TEMP 根目录（不递归）→ 必须保留
+_r5_sub = os.path.join(_r5_root, "sub")
+os.makedirs(_r5_sub, exist_ok=True)
+_r5_sub_pkg = os.path.join(_r5_sub, "StardustFlashLink-Setup-v2.1.0.0.exe")
+pathlib.Path(_r5_sub_pkg).write_bytes(b"x")
+os.utime(_r5_sub_pkg, (_r5_old_mtime, _r5_old_mtime))
+au._cleanup_update_leftovers()
+check("维护 R5-J8：TEMP 里旧版本 + 超过 24h 的安装包被清理，新版本 / 坏名字 / 三段版本保留",
+      not os.path.isfile(os.path.join(_r5_root, _r5_pkg["old_expired"]))
+      and os.path.isfile(os.path.join(_r5_root, _r5_pkg["old_fresh"]))
+      and os.path.isfile(os.path.join(_r5_root, _r5_pkg["higher"]))
+      and os.path.isfile(os.path.join(_r5_root, _r5_pkg["badname"]))
+      and os.path.isfile(os.path.join(_r5_root, _r5_pkg["three_seg"])),
+      repr(sorted(os.listdir(_r5_root))))
+check("维护 R5-J8：清理范围限定 TEMP 根目录（子目录里的同名旧包不递归误删）",
+      os.path.isfile(_r5_sub_pkg), repr(sorted(os.listdir(_r5_sub))))
+for _n in _r5_pkg.values():          # 清掉夹具，免得干扰后面断言
+    try:
+        os.remove(os.path.join(_r5_root, _n))
+    except OSError:
+        pass
+shutil.rmtree(_r5_sub, ignore_errors=True)
+
+# —— E5：cmd 插值危险字符的纯函数 + 生成 / 启动脚本前拒绝 ——
+_r5_safe_path = r"D:\Program Files\DrcomAutoLogin"
+check("维护 R5-E5：正常安装路径（盘符 + 空格）不判成不安全",
+      au._cmd_path_unsafe_reason(_r5_safe_path) == "",
+      repr(au._cmd_path_unsafe_reason(_r5_safe_path)))
+_r5_danger = {
+    "%": r"D:\100%\DrcomAutoLogin",
+    "!": r"D:\a!b\DrcomAutoLogin",
+    "^": r"D:\a^b\DrcomAutoLogin",
+    "&": r"D:\a&b\DrcomAutoLogin",
+    "|": r"D:\a|b\DrcomAutoLogin",
+    "<": r"D:\a<b\DrcomAutoLogin",
+    ">": r"D:\a>b\DrcomAutoLogin",
+    "换行": "D:\\a\nb\\DrcomAutoLogin",
+}
+_r5_danger_missed = {
+    _k: au._cmd_path_unsafe_reason(_v) for _k, _v in _r5_danger.items()
+    if not au._cmd_path_unsafe_reason(_v)
+}
+check("维护 R5-E5：含 % / ! / ^ / & / | / < / > / 换行的路径都返回非空中文原因",
+      not _r5_danger_missed, repr(_r5_danger_missed))
+
+# 写执行器函数：路径危险 → 拒绝生成（不落盘 + 中文 WARN）
+_r5_evil_wrapper = os.path.join(_r5_root, "100%", "wrap.cmd")
+_r5_cap.lines = []
+_r5_wrap_raised = None
+try:
+    au._write_update_wrapper(_r5_evil_wrapper, "@echo off\r\n")
+except au._CmdPathUnsafeError as _exc:
+    _r5_wrap_raised = _exc
+check("维护 R5-E5：_write_update_wrapper 在危险路径下拒绝生成（不写盘 + 中文 WARN）",
+      isinstance(_r5_wrap_raised, au._CmdPathUnsafeError)
+      and not os.path.isfile(_r5_evil_wrapper)
+      and any("cmd 特殊字符" in l for l in _r5_cap.lines),
+      repr((_r5_wrap_raised, _r5_cap.lines[-3:])))
+
+# 启动升级：安装目录含 % → 一开始就拒绝，不生成任何升级脚本
+_r5_base_before = au.BASE_DIR
+_r5_unsafe_app = os.path.join(_r5_root, "100%", "app")
+os.makedirs(_r5_unsafe_app, exist_ok=True)
+_r5_cap.lines = []
+_r5_launch_raised = None
+try:
+    au.BASE_DIR = _r5_unsafe_app
+    au._launch_installer(os.path.join(_r5_root, "Fake-Setup.exe"), 8848, None)
+except au._CmdPathUnsafeError as _exc:
+    _r5_launch_raised = _exc
+finally:
+    au.BASE_DIR = _r5_base_before
+_r5_launch_msg = str(_r5_launch_raised or "")
+check("维护 R5-E5：安装目录含 cmd 特殊字符 → 不生成执行器 / 回滚脚本，中文 error 指向手动安装",
+      isinstance(_r5_launch_raised, au._CmdPathUnsafeError)
+      and "安装路径包含 cmd 特殊字符" in _r5_launch_msg
+      and "请手动运行安装包" in _r5_launch_msg
+      and not os.path.isfile(au._wrapper_path())
+      and not os.path.isfile(au._health_probe_path())
+      and not os.path.isfile(au._rollback_script_path()),
+      repr((_r5_launch_msg, os.path.isfile(au._wrapper_path()))))
+
+# 端到端：_do_update_now 在危险路径下按失败处理（不启动安装器、state=error）
+_r5_nssm_stub = os.path.join(_r5_root, "tools", "nssm.exe")
+os.makedirs(os.path.dirname(_r5_nssm_stub), exist_ok=True)
+pathlib.Path(_r5_nssm_stub).write_bytes(b"stub")
+_r5_saved_e2e = {k: au.__dict__.get(k, _R5_MISSING) for k in (
+    "NSSM_PATH", "SCHTASKS_PATH", "BASE_DIR", "_check_disk_free_mb", "_load_config",
+    "_probe_local_health", "_check_github_latest", "_download_installer", "_read_nssm_appexit")}
+_r5_saved_popen = au.subprocess.Popen
+_r5_popen_calls = []
+
+
+def _r5_popen_guard(*a, **k):
+    _r5_popen_calls.append(str(a[0]) if a else "")
+    raise OSError("危险路径下不得启动安装器")
+
+
+def _r5_e2e_download(url, dest_path, expected_size, progress_callback=None, expected_sha256=None):
+    pathlib.Path(dest_path).write_bytes(b"fake-installer-bytes")
+    return 21
+
+
+_r5_e2e_result = None
+_r5_cap.lines = []
+try:
+    au.NSSM_PATH = _r5_nssm_stub
+    au.SCHTASKS_PATH = os.path.join(_r5_root, "no_schtasks_for_r5.exe")   # 回归时也别碰真计划任务
+    au.BASE_DIR = _r5_unsafe_app
+    au._check_disk_free_mb = lambda: 99999
+    au._load_config = lambda: {"update_min_free_disk_mb": 0, "ui_port": 8848}
+    au._probe_local_health = lambda *a, **k: (True, "http=200 ok=true")
+    au._check_github_latest = lambda: ("9.9.9", "https://example.invalid/x.exe", "0" * 64, 21, None)
+    au._download_installer = _r5_e2e_download
+    au._read_nssm_appexit = lambda *a, **k: None
+    au.subprocess.Popen = _r5_popen_guard
+    _r5_e2e_result = au._do_update_now()
+finally:
+    for _k, _v in _r5_saved_e2e.items():
+        if _v is _R5_MISSING:
+            au.__dict__.pop(_k, None)
+        else:
+            au.__dict__[_k] = _v
+    au.subprocess.Popen = _r5_saved_popen
+_r5_e2e_log = _r5_upgrade_log()
+check("维护 R5-E5：_do_update_now 在危险路径下按失败处理（state=error + 中文 error + WARN，不启动安装器）",
+      isinstance(_r5_e2e_result, dict) and _r5_e2e_result.get("ok") is False
+      and "安装路径包含 cmd 特殊字符" in (_r5_e2e_result.get("error") or "")
+      and "请手动运行安装包" in (_r5_e2e_result.get("error") or "")
+      and _r5_state.get("update_state") == "error"
+      and "安装路径包含 cmd 特殊字符" in (_r5_state.get("update_last_error") or "")
+      and not _r5_popen_calls
+      and "安装路径包含 cmd 特殊字符" in _r5_e2e_log
+      and "[WARN]" in _r5_e2e_log,
+      repr((_r5_e2e_result, _r5_state.get("update_state"), _r5_popen_calls, _r5_e2e_log[-200:])))
+
+# —— J6：build.ps1 的版本号从 version.py 读取（不再维护第 6 份字面量副本）——
+_r5_build_ps1 = pathlib.Path("packaging/build.ps1").read_text(encoding="utf-8")
+check("维护 R5-J6：build.ps1 不再硬编码 AppVersionText 版本字面量，且从 version.py 读取",
+      "$AppVersionText  = 'v2." not in _r5_build_ps1
+      and "version.py" in _r5_build_ps1
+      and "^VERSION" in _r5_build_ps1
+      and "Stop-Build" in _r5_build_ps1
+      and "$AppVersionText = 'v' +" in _r5_build_ps1,
+      "read_logic=%s" % ("version.py" in _r5_build_ps1))
+_r5_versioning = pathlib.Path("docs/VERSIONING.md").read_text(encoding="utf-8")
+check("维护 R5-J6：docs/VERSIONING.md 把 build.ps1 列为「自动读取，无需手改」",
+      "自动读取" in _r5_versioning
+      and "`packaging/build.ps1`" in _r5_versioning
+      and "| `packaging/build.ps1` | banner |" not in _r5_versioning,
+      "listed=%s" % ("`packaging/build.ps1`" in _r5_versioning))
+
+# —— 沙箱收尾：还原注入点 / TEMP，别影响隐私守卫与版本一致性 ——
+for _k, _v in _r5_saved.items():
+    if _v is _R5_MISSING:
+        au.__dict__.pop(_k, None)
+    else:
+        au.__dict__[_k] = _v
+if _r5_saved_temp is None:
+    os.environ.pop("TEMP", None)
+else:
+    os.environ["TEMP"] = _r5_saved_temp
+shutil.rmtree(_r5_root, ignore_errors=True)
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -3757,7 +4082,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.4", version.VERSION == "2.1.3.4", version.VERSION)
+check("版本 = 2.1.3.5", version.VERSION == "2.1.3.5", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

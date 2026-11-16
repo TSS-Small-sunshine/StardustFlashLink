@@ -47,10 +47,15 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
 | `packaging/setup.iss` | `MyAppVersion`、`MyAppCodename`（NSSM 服务描述） |
 | `联网_service.py` | 文件头 docstring |
 | `install.bat` / `uninstall.bat` | 标题行 |
-| `packaging/build.ps1` | banner |
 | `CHANGELOG.md` | 在最上方新增本版段落 |
 | `packaging/RELEASE-NOTES.md` | 本版说明的**模板**（CI 用 `render_release_notes.py` 渲染；规则见 [RELEASING.md](RELEASING.md)） |
 | `packaging/RELEASE-NOTES-installer.md` | 固定下载通道（tag `installer`）的短模板（同一渲染器） |
+
+以下位置**自动读取 `version.py`，改版本时无需手改**（脚本里不再保留版本字面量副本）：
+
+| 位置 | 读取方式 |
+| --- | --- |
+| `packaging/build.ps1` | 构建启动时用正则 `^VERSION\s*=\s*"([0-9.]+)"` 从仓库根的 `version.py` 读取 `VERSION`，banner 显示 `v{VERSION}`；找不到 `version.py` / 格式不符时中文报错并停止构建（不猜版本号） |
 
 ---
 
