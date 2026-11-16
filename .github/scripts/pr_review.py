@@ -46,6 +46,9 @@ OPTIONAL_SECTIONS = ("## 改动范围", "## 风险与回滚", "## 检查清单")
 #: 2.x（Vega）运行时文件：只允许在 main 的 PR 里改。
 TWO_X_PATHS = (
     re.compile(r"^(protocol|web_api|tray|auto_update|metrics|profiles|eula|version)\.py$"),
+    # 审计 P2-12：主服务脚本是中文名，旧清单漏了它 —— 3.0 线 PR 可单改 2.x 主服务而不被拦 ✗
+    # （必须配合 P2-11 的 core.quotePath=false，否则 git 把它转义成 "\350\201\224..." 根本匹配不上）
+    re.compile(r"^联网_service\.py$"),
     re.compile(r"^(install|uninstall)\.bat$"),
     re.compile(r"^packaging/"),
     re.compile(r"^(_smoke_static|_smoke_http)\.py$"),
@@ -103,8 +106,10 @@ INFO = "info"
 
 def git(*args, cwd="."):
     """跑 git 命令并返回 stdout（失败抛 RuntimeError，让 CI 直接红）。"""
+    # 审计 P2-11：必须显式关掉 core.quotePath —— 否则中文文件名（本仓库主服务脚本就是
+    # 「联网_service.py」）会被 git 转义成 "\350\201\224..."，name-status / diff 的路径全部错位 ✗
     result = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True,
+        ["git", "-c", "core.quotePath=false", *args], cwd=cwd, capture_output=True, text=True,
         encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
@@ -114,11 +119,49 @@ def git(*args, cwd="."):
 
 def git_show(path, cwd="."):
     """读 head 上的某个文件内容；文件不存在返回空串。"""
+    # 与 git() 同口径：关掉 quotePath（P2-11），路径里的中文保持可读。
     result = subprocess.run(
-        ["git", "show", "HEAD:" + path], cwd=cwd, capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
+        ["git", "-c", "core.quotePath=false", "show", "HEAD:" + path], cwd=cwd,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     return result.stdout if result.returncode == 0 else ""
+
+
+#: git 引号路径里的 C 风格转义（core.quotePath=true 时中文名会写成 "\350\201..."）。
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+    '"': '"', "\\": "\\",
+}
+
+
+def decode_git_path(token):
+    """把 git 输出里的路径还原成真实文件名（处理 C 风格引号 + 八进制转义）。"""
+    token = token or ""
+    if len(token) < 2 or not (token.startswith('"') and token.endswith('"')):
+        return token
+    inner = token[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if char != "\\" or index + 1 >= len(inner):
+            out += char.encode("utf-8")
+            index += 1
+            continue
+        # 八进制转义：\350 → 0xE8（一个 UTF-8 字节）
+        nxt = inner[index + 1]
+        if nxt in "01234567":
+            digits = ""
+            cursor = index + 1
+            while cursor < len(inner) and len(digits) < 3 and inner[cursor] in "01234567":
+                digits += inner[cursor]
+                cursor += 1
+            out.append(int(digits, 8) & 0xFF)
+            index = cursor
+            continue
+        out += _C_ESCAPES.get(nxt, nxt).encode("utf-8")
+        index += 2
+    return out.decode("utf-8", "replace")
 
 
 def parse_name_status(output):
@@ -130,10 +173,33 @@ def parse_name_status(output):
         parts = line.split("\t")
         status = parts[0]
         if status.startswith("R") and len(parts) >= 3:
-            entries.append(("R", parts[1], parts[2]))
+            entries.append(("R", decode_git_path(parts[1]), decode_git_path(parts[2])))
         elif len(parts) >= 2:
-            entries.append((status, parts[1], parts[1]))
+            path = decode_git_path(parts[1])
+            entries.append((status, path, path))
     return entries
+
+
+def parse_added_lines(diff_text):
+    """解析 git diff（--unified=0）里的新增行 → [(路径, 新行号, 行内容)]。"""
+    added = []
+    current = ""
+    new_line = 0
+    for line in diff_text.splitlines():
+        # 审计 P2-11：两种文件头都要认 —— 原文 `+++ b/x` 与带引号转义的 `+++ "b/x"`
+        if line.startswith("+++ b/"):
+            current = decode_git_path(line[6:])
+        elif line.startswith('+++ "b/'):
+            current = decode_git_path(line[4:])[2:]
+        elif line.startswith("@@"):
+            match = re.search(r"\+(\d+)", line)
+            new_line = int(match.group(1)) if match else 0
+        elif line.startswith("+") and not line.startswith("+++"):
+            added.append((current, new_line, line[1:]))
+            new_line += 1
+        elif not line.startswith("-"):
+            new_line += 1
+    return added
 
 
 def changed_paths(entries):
@@ -387,21 +453,8 @@ def collect(repo_dir, base_ref):
             deletions += int(parts[1])
     commits = int(git("rev-list", "--count", f"{base}..HEAD", cwd=repo_dir).strip() or 0)
 
-    added = []  # (path, lineno, text)
     diff = git("diff", "--unified=0", f"{base}...HEAD", cwd=repo_dir)
-    current = ""
-    new_line = 0
-    for line in diff.splitlines():
-        if line.startswith("+++ b/"):
-            current = line[6:]
-        elif line.startswith("@@"):
-            match = re.search(r"\+(\d+)", line)
-            new_line = int(match.group(1)) if match else 0
-        elif line.startswith("+") and not line.startswith("+++"):
-            added.append((current, new_line, line[1:]))
-            new_line += 1
-        elif not line.startswith("-"):
-            new_line += 1
+    added = parse_added_lines(diff)  # (path, lineno, text)
     return {
         "paths": paths,
         "entries": entries,
@@ -548,6 +601,40 @@ def self_test():
     check("范围：dev 收 2.x 代码被拦", any(f[0] == FAIL for f in check_scope("dev/3.0-altair", "feat/x", ["web_api.py"])))
     check("范围：dev 收 desktop 放行", not check_scope("dev/3.0-altair", "feat/x", ["desktop/crates/lib.rs"]))
     check("范围：dev 往 main 提被拦", any(f[0] == FAIL for f in check_scope("main", "dev/3.0-altair", [])))
+    # 审计 P2-12：2.x 主服务脚本是中文名，必须被双线隔离拦住；main 上照常放行。
+    check("范围：dev 收主服务脚本（联网_service.py）被拦",
+          any(f[0] == FAIL for f in check_scope("dev/3.0-altair", "feat/x", ["联网_service.py"])))
+    check("范围：dev 收 2.x 冒烟脚本被拦",
+          any(f[0] == FAIL for f in check_scope("dev/3.0-altair", "feat/x", ["_smoke_static.py"])))
+    check("范围：main 收主服务脚本放行", not check_scope("main", "fix/x", ["联网_service.py"]))
+    check("范围：main 收 desktop 仍然被拦",
+          any(f[0] == FAIL for f in check_scope("main", "feat/x", ["desktop/app/main.rs"])))
+
+    # 路径解析（审计 P2-11：中文文件名不能被 core.quotePath 转义成 "\350\201..."）
+    check("路径：name-status 中文名原样",
+          changed_paths(parse_name_status("M\t联网_service.py\n")) == ["联网_service.py"])
+    check("路径：name-status 八进制转义还原",
+          changed_paths(parse_name_status('M\t"\\350\\201\\224\\347\\275\\221_service.py"\n'))
+          == ["联网_service.py"])
+    check("路径：重命名两侧都还原",
+          parse_name_status('R100\t"a/\\350\\201\\224.txt"\tb/联网.txt\n')[0]
+          == ("R", "a/联.txt", "b/联网.txt"))
+    _diff = ("diff --git a/联网_service.py b/联网_service.py\n"
+             "--- a/联网_service.py\n"
+             "+++ b/联网_service.py\n"
+             "@@ -10,0 +11 @@\n"
+             "+password = \"x\"\n")
+    check("diff：中文路径行归属正确",
+          parse_added_lines(_diff) == [("联网_service.py", 11, 'password = "x"')])
+    _diff_quoted = ('diff --git "a/\\350\\201\\224\\347\\275\\221_service.py" "b/\\350\\201\\224\\347\\275\\221_service.py"\n'
+                    '--- "a/\\350\\201\\224\\347\\275\\221_service.py"\n'
+                    '+++ "b/\\350\\201\\224\\347\\275\\221_service.py"\n'
+                    "@@ -3,0 +4 @@\n"
+                    "+x = 1\n"
+                    "+y = 2\n")
+    check("diff：带引号转义的路径行归属与行号都正确",
+          parse_added_lines(_diff_quoted) == [("联网_service.py", 4, "x = 1"),
+                                              ("联网_service.py", 5, "y = 2")])
 
     # 隐私
     check("隐私：password.txt 被拦", any(f[0] == FAIL for f in check_privacy(["password.txt"], [])))

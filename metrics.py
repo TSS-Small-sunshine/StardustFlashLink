@@ -238,10 +238,12 @@ def summarize(cycles, now_epoch, days=DEFAULT_DAYS):
 # ============================================================
 # 薄壳：磁盘 / 网络（上层只通过 build_metrics / api_get_metrics 用它们）
 # ============================================================
-def read_log_tail(path, max_bytes=MAX_TAIL_BYTES):
-    """读日志尾部，返回行列表。文件不存在 / 读不了 → ``[]``（面板留空，不报错）。"""
+def _read_log_once(path, max_bytes):
+    """读一次日志尾部；文件在读取瞬间消失时抛 FileNotFoundError（交给上层重试）。"""
     try:
         size = os.path.getsize(path)
+    except FileNotFoundError:
+        raise
     except OSError:
         return []
     try:
@@ -249,6 +251,8 @@ def read_log_tail(path, max_bytes=MAX_TAIL_BYTES):
             if size > max_bytes:
                 f.seek(size - max_bytes)
             data = f.read()
+    except FileNotFoundError:
+        raise
     except OSError:
         return []
     text = data.decode("utf-8-sig", errors="replace")
@@ -256,6 +260,46 @@ def read_log_tail(path, max_bytes=MAX_TAIL_BYTES):
     if size > max_bytes and lines:
         lines = lines[1:]        # 从中间开始读 → 首行多半被切断，丢掉
     return lines
+
+
+def read_log_tail(path, max_bytes=MAX_TAIL_BYTES):
+    """读日志尾部，返回行列表。文件不存在 / 读不了 → ``[]``（面板留空，不报错）。
+
+    审计 C-25：日志轮转的是「rename + 新建」两步，面板若正好在两步之间 stat/open，
+    会看到"文件不存在"而丢掉**整段**归档。这里对"读取瞬间消失"重试一次（10ms），
+    不重试真正的缺失文件（那本来就是没日志）。
+    """
+    for attempt in range(2):
+        try:
+            return _read_log_once(path, max_bytes)
+        except FileNotFoundError:
+            if attempt == 0:
+                time.sleep(0.01)     # 轮转窗口极小：等写者完成 rename 再看一次
+                continue
+            return []
+    return []
+
+
+# 审计 C-24：面板每刷新一次都做 TCP 握手，最多阻塞请求线程 LATENCY_TIMEOUT=3 秒。
+# 状态页自动轮询 + 多开标签页时，线程会被这些"测量"占住。加一个 30 秒 TTL 缓存：
+# 同一个 (host, port) 30 秒内复用上次结果；换了目标立即重测。
+LATENCY_CACHE_TTL_SEC = 30
+_LATENCY_CACHE = {"key": None, "at": 0.0, "value": None}
+
+
+def cached_latency(host, port, now_epoch=None, ttl_sec=None):
+    """带 TTL 的当前延迟（毫秒 int / None）。纯逻辑可单测：now_epoch 可注入。"""
+    if not host or not port:
+        return None
+    now = time.time() if now_epoch is None else now_epoch
+    ttl = LATENCY_CACHE_TTL_SEC if ttl_sec is None else ttl_sec
+    key = (str(host), str(port))
+    cache = globals().get("_LATENCY_CACHE") or {"key": None, "at": 0.0, "value": None}
+    if cache.get("key") == key and (now - cache.get("at", 0.0)) < ttl:
+        return cache.get("value")
+    value = measure_latency(host, port)
+    cache.update({"key": key, "at": now, "value": value})
+    return value
 
 
 def measure_latency(host, port, timeout=LATENCY_TIMEOUT):
@@ -343,7 +387,8 @@ def api_get_metrics(days=DEFAULT_DAYS):
             cfg = {}
     log_dir = globals().get("LOG_DIR") or ""
     path = os.path.join(log_dir, LOG_NAME) if log_dir else ""
-    return build_metrics(days=days, log_path=path,
-                         latency_host=cfg.get("host"), latency_port=cfg.get("port"))
+    # 审计 C-24：走 TTL 缓存，避免每次面板刷新都把请求线程卡在 TCP 握手上（最多 3s）
+    latency = cached_latency(cfg.get("host"), cfg.get("port"))
+    return build_metrics(days=days, log_path=path, latency=latency)
 
 

@@ -132,6 +132,10 @@ BACKUP_DIR_NAME = "backup"                 # {app}\backup\<版本>\
 BACKUP_MANIFEST_NAME = "manifest.json"
 BACKUP_NOTE_MAX = 120
 BACKUP_KEEP_MIN = 2                        # 无论多旧，至少留最新 2 份备份
+# 审计 D1：备份目录先建目录 + 拷文件、最后才写 manifest；中途失败会留下「有目录、无 manifest」
+# 的半成品。它进不了 _list_backups，于是 _prune_backups 以前永远看不见。清理它时必须只删
+# 「manifest 缺失且 mtime 超过 1 天」的目录 —— 正在备份的那一份 mtime 是新的，绝不能被误删。
+BACKUP_ORPHAN_MIN_AGE_SEC = 24 * 3600
 ROLLBACK_MODULES = (
     "联网_service.py",
     "version.py",
@@ -590,6 +594,22 @@ def _backup_dir_for(version):
     return os.path.join(_backup_root(), version)
 
 
+def _write_backup_manifest(d, manifest):
+    """原子写备份清单（审计 D1）：先写 manifest.json.tmp，再 os.replace 覆盖正式文件。
+
+    只有正式 manifest.json 存在且可解析，_list_backups 才认为这份备份可用；
+    所以清单要么完整出现、要么不出现 —— 不会出现「半截 JSON 让备份永久不可见」，
+    也不会让 _prune_backups 把刚写完的半成品目录当成「合法备份」处理。
+    写失败由调用方（_backup_modules）兜住并中止本次升级（宁可这次不升）。
+    """
+    path = os.path.join(d, BACKUP_MANIFEST_NAME)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
+
+
 def _backup_modules(version=None, note=""):
     """把「随包分发的代码文件」整目录备份到 `{app}\\backup\\<版本>\\`，返回备份目录。
 
@@ -629,8 +649,10 @@ def _backup_modules(version=None, note=""):
             "rollback_files": [n for n in ROLLBACK_MODULES if n in files],
             "files": files,
         }
-        with open(os.path.join(d, BACKUP_MANIFEST_NAME), "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        # 审计 D1：manifest 是「这份备份可用」的唯一凭据，必须原子落盘 ——
+        # 先写 manifest.json.tmp 再 os.replace；中途失败只会留下 .tmp（由 _prune_backups
+        # 按「无合法 manifest + 超过 1 天」清理），不会留下半截正式清单。
+        _write_backup_manifest(d, manifest)
     except OSError as exc:
         logger.error("备份当前版本失败: %s", exc)
         _log_upgrade("ERROR", "备份到 {} 失败：{}".format(d, exc))
@@ -679,13 +701,46 @@ def _list_backups():
 
 
 def _prune_backups():
-    """清掉过期备份：7 天前的删掉，但**最新的 2 份永远保留**（`BACKUP_KEEP_MIN`）。"""
-    backups = _list_backups()
-    keep = {b["path"] for b in backups[:BACKUP_KEEP_MIN]}
-    cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
-    for b in backups[BACKUP_KEEP_MIN:]:
-        if b["path"] in keep:
+    """清掉过期备份：7 天前的删掉，但**最新的 2 份永远保留**（`BACKUP_KEEP_MIN`）。
+
+    审计 D1：先清理「有目录、却没有合法 manifest」的半成品备份。旧实现最后一步才写
+    manifest，备份中途失败（断电 / 杀软 / 磁盘满）就会留下这种目录；_list_backups 跳过它，
+    于是 _prune_backups 以前永远看不见、也永远不清理（{app}\\backup 越积越多）。
+    清理条件里必须有「mtime 超过 BACKUP_ORPHAN_MIN_AGE_SEC」——**绝不删刚建出来、
+    可能正在拷贝文件的目录**，否则会把正在备份的那一份误删。
+
+    审计 D2：先按 keep 过滤出「非最新 N 份」再逐个判断过期。旧代码 keep 只含前 2 份、
+    循环又从 backups[2:] 开始，`if b["path"] in keep` 恒为 False，是死代码。
+    """
+    root = _backup_root()
+    # —— 1) 半成品目录（目录在、没有合法 manifest）——
+    valid = {os.path.normcase(b["path"]) for b in _list_backups()}
+    cutoff_orphan = time.time() - BACKUP_ORPHAN_MIN_AGE_SEC
+    try:
+        names = os.listdir(root)
+    except OSError:
+        names = []
+    for name in names:
+        d = _backup_dir_for(name)
+        if d is None or not os.path.isdir(d) or os.path.normcase(d) in valid:
             continue
+        try:
+            mtime = os.path.getmtime(d)
+            if mtime >= cutoff_orphan:
+                continue  # mtime 新 = 可能正在备份，绝不动
+            age_days = max(1, int((time.time() - mtime) / 86400))
+            shutil.rmtree(d, ignore_errors=False)
+            _log_upgrade("INFO", "清理半成品备份目录：{}（没有合法 manifest，已存在约 {} 天）".format(
+                name, age_days))
+        except OSError as exc:
+            logger.warning("清理半成品备份目录 %s 失败: %s", d, exc)
+
+    # —— 2) 过期备份：至少留最新 BACKUP_KEEP_MIN 份，其余按保留期（7 天）删 ——
+    backups = _list_backups()
+    keep = {os.path.normcase(b["path"]) for b in backups[:BACKUP_KEEP_MIN]}
+    candidates = [b for b in backups if os.path.normcase(b["path"]) not in keep]
+    cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+    for b in candidates:
         try:
             if os.path.getmtime(b["path"]) >= cutoff:
                 continue
@@ -855,8 +910,18 @@ def _rollback_script_path():
     return os.path.join(_update_tmp_dir(), UPDATE_ROLLBACK_NAME)
 
 
-def _write_rollback_script(backup_dir=None, rc_path=None):
-    """把回滚脚本落盘（自动回滚与手动回滚共用同一份），返回路径；失败返回 None。"""
+def _write_rollback_script(backup_dir=None, rc_path=None, raise_on_invalid=False):
+    """把回滚脚本落盘（自动回滚与手动回滚共用同一份），返回路径；失败返回 None。
+
+    审计 D5：落盘后立刻用内嵌 Python（缺内嵌时退回当前解释器）跑 py_compile 校验语法。
+    回滚脚本是「升级升坏了」时唯一的退路，模板改坏以前只有第一次真回滚才发现 ——
+    那时往往正是最需要它工作、最没有人工介入机会的时刻，必须提前校验。
+
+    校验不过的处理：
+      - raise_on_invalid=False（手动回滚等调用）：删掉坏脚本、记 ERROR、返回 None；
+      - raise_on_invalid=True（升级路径）：抛 _GeneratedScriptError 中止升级 ——
+        绝不能「降级成 rollback=SKIP 继续装」，那等于在没有退路的情况下换代码。
+    """
     path = _rollback_script_path()
     try:
         with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -869,21 +934,39 @@ def _write_rollback_script(backup_dir=None, rc_path=None):
     except OSError as exc:
         logger.warning("写回滚脚本失败: %s", exc)
         return None
+    ok, detail = _py_compile_script(path, "回滚脚本")
+    if not ok:
+        _log_upgrade("ERROR", "回滚脚本生成后语法校验失败：{}（{}）".format(
+            detail, "本次升级中止" if raise_on_invalid else "已删除该脚本"))
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        if raise_on_invalid:
+            raise _GeneratedScriptError(detail)
+        return None
     return path
 
 
 def _run_rollback(backup_dir, expect=None, tag="manual"):
-    """跑一次回滚（子进程，用**随包内嵌**解释器）。返回 (ok, detail)。"""
+    """跑一次回滚（子进程，优先用**随包内嵌**解释器，缺内嵌时退回当前解释器）。
+
+    审计 D3：旧实现注释写「随包内嵌解释器」、代码却用 sys.executable —— 服务被 NSSM 用
+    {app}\\python\\python.exe 启动时两者等价，但换成 pythonw.exe 后 subprocess 拿不到输出，
+    回滚「失败」的原因就查不出来了。现在统一走 _upgrade_python_executable()。
+
+    返回 (ok, detail)。
+    """
     rc_path = os.path.join(_update_tmp_dir(), "drcom_rollback.rc")
     path = _write_rollback_script(backup_dir=backup_dir, rc_path=rc_path)
     if path is None:
-        return False, "无法写回滚脚本"
+        return False, "无法写回滚脚本（写盘失败或脚本语法校验未通过）"
     try:
         if os.path.isfile(rc_path):
             os.remove(rc_path)
     except OSError:
         pass
-    args = [sys.executable, path, "--backup", backup_dir, "--app", BASE_DIR,
+    args = [_upgrade_python_executable(), path, "--backup", backup_dir, "--app", BASE_DIR,
             "--rc", rc_path, "--log", UPGRADE_LOG_FILE, "--tag", tag]
     if expect:
         args += ["--expect", str(expect)]
@@ -1142,12 +1225,53 @@ def _clear_update_attempt():
         pass
 
 
+def reset_update_attempt(reason="用户请求"):
+    """重置自动升级熔断（审计 F2）：删除 logs/update_attempt.json，返回是否处理成功。
+
+    背景：同一版本累计失败 UPDATE_ATTEMPT_MAX（3）次后，_auto_retry_blocked 会永久停止
+    自动重试；旧版本没有任何 UI / API 入口，只能手工删 json。这里提供一个业务层小函数，
+    由 web_api 接线：POST /api/update/install 的 payload 增加**只增**字段
+    `reset_attempt`（bool）；为 true 时先调本函数（再走原有防并发逻辑）。
+
+    契约（web_api 侧只需要一行）：
+        if (payload or {}).get("reset_attempt") is True:
+            _auto_update_mod.reset_update_attempt("用户点击「重置自动升级熔断」")
+
+    **未 attach 时不炸**：本模块被单测 / 冒烟直接 import（没有 _attach 注入 LOG_DIR）时，
+    取路径会 NameError —— 这属于「没有日志目录可清」，返回 False 即可，绝不向上抛异常。
+    成功清除会落一条中文 upgrade.log；没有记录可清时也返回 True（幂等，调用方不必区分）。
+    """
+    try:
+        path = _attempt_file()
+    except NameError:
+        return False
+    existed = os.path.isfile(path)
+    # 与成功升级 / 手动回滚共用同一个清理函数，语义不分叉；再复核一次，
+    # 删除失败（权限 / 被占用）时如实返回 False，别让 UI 以为已经解了熔断。
+    _clear_update_attempt()
+    if os.path.isfile(path):
+        return False
+    try:
+        _log_upgrade("INFO", "已重置自动升级熔断：清除升级尝试记录（{}，原因：{}）".format(
+            "存在" if existed else "本就不存在", reason))
+    except (NameError, OSError) as exc:   # 未 attach / 日志不可写都不影响熔断已清的事实
+        log = globals().get("logger")
+        if log is not None:
+            log.warning("重置自动升级熔断后写 upgrade.log 失败: %s", exc)
+    return True
+
+
 def _auto_retry_blocked(remote_ver):
-    """同一版本自动升级失败过 → 返回 (是否阻断, 原因)。"""
+    """同一版本自动升级失败过 → 返回 (是否阻断, 原因)。
+
+    审计 F2：旧代码这里还有 `if rec.get("state") == "success": return False, ""` ——
+    那是死分支：升级成功由 `_clear_update_attempt()` 直接删除记录（见启动钩子 C 段与
+    手动回滚），文件里永远写不进 "success"。删掉，避免以后误以为「写 success 能解熔断」。
+    真正的人工重置入口是 `reset_update_attempt()`（web_api 的 install 端点可带
+    reset_attempt=true 接线调用）。
+    """
     rec = _read_update_attempt()
     if rec.get("target") != remote_ver:
-        return False, ""
-    if rec.get("state") == "success":
         return False, ""
     count = int(rec.get("count") or 1)
     if count >= UPDATE_ATTEMPT_MAX:
@@ -1210,6 +1334,72 @@ def _embedded_python_path():
     """
     base = globals().get("BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, EMBEDDED_PYTHON_REL)
+
+
+# 审计 D5：生成脚本（回滚 / 健康探针）在交给 SYSTEM 执行前先跑 py_compile 校验语法。
+PY_COMPILE_TIMEOUT_SEC = 30
+
+
+class _GeneratedScriptError(OSError):
+    """生成的升级脚本语法校验失败（审计 D5）。
+
+    继承 OSError 是为了让既有 `except OSError` 兜底逻辑仍然有效；升级路径单独先接住它，
+    给出「本次升级已中止」的明确中文错误，而不是悄悄降级继续装。
+    """
+
+
+def _upgrade_python_executable():
+    """升级脚本（回滚 / 探针 / py_compile）用哪个解释器：内嵌优先，缺内嵌退回当前进程。
+
+    审计 D3：回滚脚本以前用 sys.executable 却注释写「内嵌解释器」。服务由 NSSM 用
+    {app}\\python\\python.exe 启动时二者等价；换成 pythonw.exe 后子进程 stdout 拿不到，
+    回滚失败原因就查不出来。统一从这里取，语义与注释一致。
+    """
+    py = _embedded_python_path()
+    return py if os.path.isfile(py) else sys.executable
+
+
+def _py_compile_script(path, label="脚本"):
+    """用内嵌 Python 跑 py_compile 校验生成脚本的语法（审计 D5）。返回 (ok, detail)。
+
+    校验对象是**生成出来准备交给 SYSTEM 执行的脚本文件**（回滚脚本 / 健康探针），
+    不是项目模块 —— 模板改坏时，以前只有第一次真回滚 / 真探测才发现，必须提前拦下。
+    只用标准库 py_compile；子进程带超时；任何异常一律当「校验失败」，绝不放行升级。
+    """
+    if not path or not os.path.isfile(path):
+        return False, "{}文件不存在：{}".format(label, path)
+    py = _upgrade_python_executable()
+    if not py:
+        return False, "找不到可用的 Python 解释器"
+    # 显式指定 cfile：别在 SYSTEM 的 %TEMP% 里留 __pycache__（没人清）。
+    # doraise=True 让语法错误以非 0 退出码 + traceback 暴露，便于把原因写进 upgrade.log。
+    cfile = path + ".pyc"
+    code = ("import py_compile, sys\n"
+            "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)\n")
+    # 兼容替身/测试用 SimpleNamespace 版 subprocess（可能没有 PIPE 常量）：
+    # 拿不到 PIPE 就不收 stderr，只按退出码判定 —— 校验结论不受影响。
+    kwargs = {"timeout": PY_COMPILE_TIMEOUT_SEC, "check": False}
+    pipe = getattr(subprocess, "PIPE", None)
+    if pipe is not None:
+        kwargs["stdout"] = pipe
+        kwargs["stderr"] = pipe
+    try:
+        try:
+            proc = subprocess.run([py, "-c", code, path, cfile], **kwargs)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, "调用 {} 校验{}失败：{}".format(os.path.basename(py or "python"), label, exc)
+    finally:
+        try:
+            if os.path.isfile(cfile):
+                os.remove(cfile)
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        stderr = getattr(proc, "stderr", None) or b""
+        lines = stderr.decode("utf-8", "replace").strip().splitlines()
+        last = lines[-1] if lines else "退出码 {}".format(proc.returncode)
+        return False, "{}语法校验失败（{}）".format(label, last)
+    return True, "{}语法校验通过".format(label)
 
 
 def _normalize_ui_port(value):
@@ -1615,7 +1805,12 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
     v2.0.10.0：顺带写健康探测脚本（执行器用它探 `/api/health`）。写失败不致命 ——
     执行器会落一行 `health=SKIP` 退回旧判据。
     v2.0.11.0：再写一个回滚脚本并把 `backup_dir` 传下去 —— 两轮都不健康时执行器会
-    自动还原升级前的代码（写失败只是落 `rollback=SKIP`，不影响升级本身）。
+    自动还原升级前的代码（**写盘**失败只是落 `rollback=SKIP`，不影响升级本身）。
+
+    审计 D5：生成的两个 .py 脚本（健康探针 / 回滚脚本）落盘后先用内嵌 Python 跑
+    py_compile 校验语法；**校验失败抛 _GeneratedScriptError 中止升级，绝不启动安装器**。
+    写盘失败仍按旧行为降级（探针 → health=SKIP）；校验失败不能降级 —— 那意味着
+    升级后既没有健康判据、也没有可用的回滚脚本，等于在没有退路的情况下换代码。
     """
     log_path = _installer_log_path()
     wrapper = _wrapper_path()
@@ -1635,7 +1830,24 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
         _log_upgrade("WARN", "写健康探测脚本失败：{}（本次升级只看服务状态）".format(exc))
         probe = None
 
-    rollback = _write_rollback_script(backup_dir=backup_dir) if backup_dir else None
+    # 审计 D5：探针脚本落盘后立刻 py_compile 校验 —— 探针语法坏了，执行器只会落
+    # health=SKIP（安静退回旧判据），而用户以为「有 HTTP 健康判定」。提前拦下。
+    if probe is not None:
+        _probe_ok, _probe_detail = _py_compile_script(probe, "健康探测脚本")
+        if not _probe_ok:
+            _log_upgrade("ERROR", "健康探测脚本生成后语法校验失败：{}（本次升级中止）".format(
+                _probe_detail))
+            try:
+                os.remove(probe)
+            except OSError:
+                pass
+            raise _GeneratedScriptError(_probe_detail)
+
+    # 审计 D5：回滚脚本必须「生成即校验」；语法不过就直接中止升级（raise_on_invalid=True），
+    # 不能降级成 rollback=SKIP 继续装。
+    rollback = None
+    if backup_dir:
+        rollback = _write_rollback_script(backup_dir=backup_dir, raise_on_invalid=True)
 
     try:
         script = _build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME,
@@ -1709,7 +1921,15 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
 def _do_update_now():
     """完整执行一次升级检测 + 下载 + 升级。返回 dict（用于 HTTP 响应）。"""
     if not _acquire_update_lock():
-        return {"ok": False, "error": "升级正在进行中"}
+        # 审计 F1：web_api 是「先判忙 → 回 200 → 起线程 → 线程里才取锁」。两次点击挤在
+        # 线程调度间隙时，第二个请求已经拿到 200，却在这里被静默丢弃 —— 用户以为「已提交」。
+        # 不能改 web_api，那就把「未执行」写进状态机与 upgrade.log，至少 UI 能看到原因，
+        # 而不是停在上一轮的状态里。中文文案是契约的一部分（_smoke_static 有断言）。
+        msg = "另一项升级任务正在进行，本次请求未执行"
+        _set_update_state(update_state="error", update_progress=0,
+                          update_progress_message=msg, update_last_error=msg)
+        _log_upgrade("WARN", msg)
+        return {"ok": False, "error": msg}
     try:
         # —— 1. 锁住：state=checking（acquire 时已设置）——
         _set_update_state(update_progress_message="检查 GitHub 最新版本...")
@@ -1852,6 +2072,15 @@ def _do_update_now():
             _log_upgrade("INFO", "installer 已启动（方式={}，PID={}，第 {} 次尝试；收尾将探 http://{}:{}{}）".format(
                 launch.get("mode"), launch.get("pid"), prev_count + 1,
                 HEALTH_PROBE_HOST, _normalize_ui_port(cfg.get("ui_port")), HEALTH_PROBE_PATH))
+        except _GeneratedScriptError as exc:
+            # 审计 D5：生成的脚本语法不过 → **必须中止升级**，绝不能启动安装器。
+            # 单独接住（在 OSError 之前）给出明确中文原因，而不是含糊的「启动 installer 失败」。
+            _write_update_attempt(remote_ver, count=prev_count + 1, state="failed")
+            msg = "生成的升级脚本语法校验失败，已中止升级：{}".format(exc)
+            _set_update_state(update_state="error", update_progress=0,
+                              update_progress_message=msg, update_last_error=msg)
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
         except OSError as exc:
             # 启动失败：不让 Python 退出，保持服务运行 + Web UI 显示 error
             _write_update_attempt(remote_ver, count=prev_count + 1, state="failed")
@@ -1891,7 +2120,13 @@ def _do_update_now():
 def _do_check_now():
     """只跑 GitHub 检查 + 状态更新，不升级。"""
     if not _acquire_update_lock():
-        return {"ok": False, "error": "升级正在进行中"}
+        # 审计 F1：与 _do_update_now 同一 TOCTOU 窗口 —— 检查请求也可能拿到 200 后被
+        # 静默丢弃。写状态 + upgrade.log，让 UI 能解释「为什么没有任何变化」。
+        msg = "另一项升级任务正在进行，本次请求未执行"
+        _set_update_state(update_state="error", update_progress=0,
+                          update_progress_message=msg, update_last_error=msg)
+        _log_upgrade("WARN", msg)
+        return {"ok": False, "error": msg}
     try:
         _set_update_state(update_progress_message="检查 GitHub 最新版本...")
         latest = _check_github_latest()

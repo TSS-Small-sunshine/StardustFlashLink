@@ -313,9 +313,15 @@ try:
     # ============================================================
     class _FakeUpdater(object):
         busy = "下载中 42%"
+        resets = []
 
         def _schedule_success_clear(self):
             pass
+
+        def reset_update_attempt(self, reason=""):
+            # 维护第三轮（审计 F2）：/api/update/install 的 reset_attempt 字段接线
+            self.resets.append(reason)
+            return True
 
         def update_busy_message(self):
             return self.busy
@@ -345,6 +351,13 @@ try:
     _st_rb, _b_rb = _post_json("/api/rollback", {"version": "../evil"})
     _check("维护 R2-H1：POST /api/rollback 坏版本号 → 400（不把路径拼进备份目录）",
            (_st_rb, (_b_rb or {}).get("ok")), (400, False))
+    # 维护第三轮（审计 F2）：reset_attempt 字段只增不改既有契约，且不影响忙时 409
+    _resets_before = len(_FakeUpdater.resets)
+    _st_reset, _b_reset = _post_json("/api/update/install", {"reset_attempt": True})
+    _check("维护 R3-F2：POST /api/update/install 带 reset_attempt → 先重置熔断（忙时仍 409）",
+           (_st_reset, len(_FakeUpdater.resets) - _resets_before,
+            "任务进行中" in (_b_reset or {}).get("error", "")),
+           (409, 1, True))
 finally:
     server.shutdown()
 

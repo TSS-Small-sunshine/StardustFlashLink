@@ -128,12 +128,34 @@ def _log(msg, *args, level=logging.INFO):
 # ============================================================
 # 网络操作（与上版一致 + 接受 cfg 参数）
 # ============================================================
+def _interruptible_wait(seconds):
+    """可被 STOP_EVENT 提前打断的短睡眠（审计 C-18）。返回 True = 收到停止信号。"""
+    ev = globals().get("_STOP_EVENT")
+    if ev is not None:
+        try:
+            return bool(ev.wait(seconds))
+        except AttributeError:      # 注入的不是 Event（单测替身）→ 退回普通 sleep
+            pass
+    time.sleep(seconds)
+    return False
+
+
 def wait_network(host, port, timeout):
-    """每 2s 探测 host:port，最多 timeout 秒。返回 bool。"""
+    """每 2s 探测 host:port，最多 timeout 秒。返回 bool。
+
+    审计 C-18：旧实现不可中断 —— 收到 SIGTERM / 用户点停止后仍要等完最长 300s，
+    NSSM 停止超时到点会强杀进程，可能正好截断在途登录请求；而且每 2 秒一条「等待中」
+    日志，一次不可达循环能刷 150 行。
+    现在：每步都可被 _STOP_EVENT 打断（返回 False）；等待日志改为「前 3 次 + 之后每 10 次」
+    记一条，失败行照旧（排障要看）。
+    """
     _log("等待网络 %s:%s 可用（最长 %ss）...", host, port, timeout)
     deadline = time.time() + timeout
     attempt = 0
     while time.time() < deadline:
+        if globals().get("_STOP_EVENT") is not None and _STOP_EVENT.is_set():
+            _log("等待网络被停止信号打断（已等 %s 次）", attempt)
+            return False
         attempt += 1
         t0 = time.time()
         try:
@@ -143,9 +165,11 @@ def wait_network(host, port, timeout):
                 _log("网络已可达（第 %s 次尝试，耗时 %.2fs）", attempt, time.time() - t0)
                 return True
         except OSError as exc:
-            _log("等待中 (%s): %s", attempt, exc)
-            # 此处 sleep 用在 retry 循环，不是长循环
-            time.sleep(2)
+            if attempt <= 3 or attempt % 10 == 0:
+                _log("等待中 (%s): %s", attempt, exc, level=logging.DEBUG)
+            if _interruptible_wait(2):
+                _log("等待网络被停止信号打断（已等 %s 次）", attempt)
+                return False
     _log("等待 %ss 后 %s:%s 仍不可达", timeout, host, port, level=logging.ERROR)
     return False
 
@@ -190,12 +214,21 @@ def discover_network(host):
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
             txt = resp.read().decode("utf-8", errors="replace")
+        # 审计 C-21：v4ip / olmac 来自网关响应，不能直接拼进登录 URL ——
+        # 先过形状白名单（IP 用 ipaddress 校验、MAC 必须 12 位十六进制），不合格当空串。
         m = re.search(r'"v4ip"\s*:\s*"([^"]*)"', txt)
         if m:
-            ip = m.group(1)
+            candidate = m.group(1).strip()
+            try:
+                ipaddress.ip_address(candidate)
+                ip = candidate
+            except ValueError:
+                ip = ""
         m2 = re.search(r'"olmac"\s*:\s*"([^"]*)"', txt, re.I)
         if m2:
-            mac = m2.group(1).upper().replace(":", "").replace("-", "")
+            candidate_mac = m2.group(1).upper().replace(":", "").replace("-", "")
+            if re.fullmatch(r"[0-9A-F]{12}", candidate_mac):
+                mac = candidate_mac
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         pass
     # fallback：UDP connect 拿本机 IP

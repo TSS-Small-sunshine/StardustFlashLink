@@ -975,6 +975,13 @@ def api_post_update_check(payload):
 
 def api_post_update_install(payload):
     """POST /api/update/install — 立即开始升级。"""
+    # 维护第三轮（审计 F2）：payload 只增字段 reset_attempt —— 显式清掉「同一版本连续失败 3 次
+    # 后的自动重试熔断」，否则用户在界面上没有任何重置入口，只能手工删 logs/update_attempt.json。
+    if isinstance(payload, dict) and payload.get("reset_attempt") is True:
+        try:
+            _auto_update_mod.reset_update_attempt("通过 /api/update/install 的 reset_attempt 重置")
+        except (AttributeError, OSError, ValueError) as exc:  # noqa: BLE001 —— 重置失败不该挡升级
+            _log("重置自动升级熔断失败: %s", exc, level=logging.ERROR)
     # v2.0.6.3：同上 —— 升级锁被占时直接说清「谁在跑」，不再先回「已提交」再静默丢弃
     _busy = _auto_update_mod.update_busy_message()
     if _busy:

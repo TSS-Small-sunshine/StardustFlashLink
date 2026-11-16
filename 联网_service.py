@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.2）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.3）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -362,6 +362,10 @@ def _validate_config(cfg):
     host = cfg.get("host")
     if not isinstance(host, str) or not host.strip():
         errors.append("host 必须是非空字符串")
+    elif not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.:-]{0,252}", host.strip()):
+        # 审计 C-21：结构性防御优先 —— host 会直接拼进 URL；带空格 / / / [ 会让 urllib 抛
+        # InvalidURL 之类的"内部异常"。只接受 IP / 域名可用的字符集。
+        errors.append("host 只能是 IP / 域名（字母数字 . : -），不能含空格、/、[ 等字符")
 
     port = cfg.get("port")
     if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
@@ -1050,6 +1054,9 @@ def main():
             save_config=_save_config,
             validate_config=_validate_config,
             config_lock=CONFIG_LOCK,
+            # 审计 C-11：方案保存与切换用**同一套**合法取值（否则会存出永远切不过去的方案）
+            allowed_intervals=ALLOWED_INTERVALS,
+            allowed_suffixes=ALLOWED_SUFFIXES,
             # v2.1.3.0：方案可以带自己的密码文件 → 切方案后要重读密码 ✓
             load_password_from_disk=_load_password_from_disk,
         )
