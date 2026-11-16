@@ -1763,6 +1763,18 @@ check("发布说明：真实模板可端到端渲染（无 {{...}} 残留）",
       _dry.returncode == 0 and "{{" not in _dry.stdout,
       (_dry.stdout or "")[-300:] + (_dry.stderr or "")[-200:])
 
+# —— 发布 / 分支保护闸门（审计 P1-1 / P1-2 / D-17）——
+check("发布流程：同名版本默认不覆盖正式版 release（版本号必须先递增）",
+      "allow_republish" in _wf_src and "已跳过正式版发布" in _wf_src)
+_bp_json = json.loads(pathlib.Path(".github/branch-protection.json").read_text(encoding="utf-8"))
+check("分支保护：main 的配置要求走 PR（required_pull_request_reviews 非 null）",
+      isinstance(_bp_json.get("required_pull_request_reviews"), dict)
+      and _bp_json.get("required_status_checks", {}).get("strict") is True)
+_pr_checks_wf = pathlib.Path(".github/workflows/pr-checks.yml").read_text(encoding="utf-8")
+check("CI：PR Gate 会跑 PR 机器人 / 发布说明渲染器的自测",
+      "pr_review.py --self-test" in _pr_checks_wf
+      and "render_release_notes.py --self-test" in _pr_checks_wf)
+
 check("v2.0.4.0 changelog 多路径候选", "_changelog_candidates" in _src_eula)
 _eula = importlib.import_module("eula")
 _eula._attach(base_dir=tempfile.mkdtemp())  # 空目录 = 模拟"安装包漏带 CHANGELOG.md"
