@@ -2288,6 +2288,56 @@ finally:
 check("维护 M-9：GET 异常分支不再因裸 logger NameError 断连（回 500 JSON）",
       _m9_ok, repr(_m9_detail))
 _srv_m.shutdown()
+
+# —— M-10：登录失败文案 / 兜底异常都必须擦掉 URL 与 password=（审计 C-10/C-17，I6）——
+class _M10Resp:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_m10_saved_open = _proto.urllib.request.urlopen
+
+
+def _m10_bad_status(req, timeout=None):
+    # BadStatusLine 的 str 会带上 req 的 URL —— 而登录 URL 里就有 user_password
+    raise http.client.BadStatusLine("bad status: " + getattr(req, "full_url", ""))
+
+
+_proto.urllib.request.urlopen = _m10_bad_status
+try:
+    _m10_ok, _m10_msg = _proto.login("10.0.0.1", "2023001234", "", "#Demo-Pwd-0000#", "10.0.0.2", "")
+finally:
+    _proto.urllib.request.urlopen = _m10_saved_open
+check("维护 M-10：登录遇到 HTTPException（BadStatusLine）也被安全化（无密码 / 无 URL）",
+      _m10_ok is False and "#Demo-Pwd-0000#" not in _m10_msg
+      and "password=" not in _m10_msg and "http://" not in _m10_msg,
+      repr(_m10_msg))
+
+
+def _m10_echo(req, timeout=None):
+    return _M10Resp(b'dr1({"result":0,"msg":"bad: user_password=#Demo-Pwd-0000# at http://10.0.0.1/x"})')
+
+
+_proto.urllib.request.urlopen = _m10_echo
+try:
+    _m10_ok2, _m10_msg2 = _proto.login("10.0.0.1", "2023001234", "", "#Demo-Pwd-0000#", "10.0.0.2", "")
+finally:
+    _proto.urllib.request.urlopen = _m10_saved_open
+check("维护 M-10：服务端 msg 回显密码参数时被擦除（I6：日志/界面零明文凭据）",
+      _m10_ok2 is False and "#Demo-Pwd-0000#" not in _m10_msg2
+      and "password=***" in _m10_msg2 and "http://" not in _m10_msg2,
+      repr(_m10_msg2))
+
+
 if _m7_had_logger:
     _wa.logger = _m7_saved_logger
 else:

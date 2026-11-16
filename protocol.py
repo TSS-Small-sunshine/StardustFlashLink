@@ -16,6 +16,7 @@
     - 仅 Python 3 标准库。
 """
 
+import http.client  # v2.x 维护：BadStatusLine / IncompleteRead 也是网络异常
 import ipaddress  # noqa: E402  v2.0.5.0：网络位置守卫的 CIDR 匹配
 import json
 import logging
@@ -230,7 +231,7 @@ def is_online(host):
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             txt = resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+    except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as exc:
         _log("在线检查网络异常: %s", exc, level=logging.DEBUG)
         return None
     m = re.search(r"\((\{.*?\})\s*\)", txt, re.S)
@@ -320,7 +321,7 @@ def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
         )
         with urllib.request.urlopen(req, timeout=12) as resp:
             txt = resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+    except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as exc:
         # v2.1.0.0（P7-2）：**绝不把异常原文写进日志 / 返回给界面** ——
         # 这条 GET 的 URL 里带着 `user_password`，而某些异常（HTTPError / URLError 的包装、
         # 底层 socket 错误）会把整条 URL 原样带出来 ✗ → 密码就进了 logs\campus_login.log，
@@ -332,13 +333,15 @@ def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
     # 解析 JSONP：dr1234({...});
     m = re.search(r"\((\{.*?\})\s*\)\s*;?\s*$", txt, re.S)
     if not m:
-        return False, "login 接口返回非 JSONP: {}".format(txt[:80])
+        # 审计 C-10：响应体也可能是门户回显的参数（含 user_password）—— 同样过擦除
+        return False, "login 接口返回非 JSONP: {}".format(_scrub_url(txt[:80]))
     try:
         data = json.loads(m.group(1))
     except (ValueError, json.JSONDecodeError):
-        return False, "login JSON 解析失败: {}".format(txt[:80])
+        return False, "login JSON 解析失败: {}".format(_scrub_url(txt[:80]))
     success = data.get("result") == 1
-    msg = data.get("msg", "") or ""
+    # 审计 C-10：服务端 msg 会原样进日志 / 界面，同样先擦 URL 与 password=（I6）
+    msg = _scrub_url(data.get("msg", "") or "")
     return success, msg
 
 
@@ -593,8 +596,10 @@ def run_once(reason):
                 _set_backoff()
 
         except Exception as exc:  # noqa: BLE001 — 兜底写日志
-            _log("run_once 未捕获异常: %s", exc, level=logging.ERROR)
-            _set_state(last_error="内部异常: {}".format(exc))
+            # 审计 C-17：异常原文可能带登录 URL（含密码）—— 兜底路径也必须安全化（I6）
+            safe = _safe_error_text(exc)
+            _log("run_once 未捕获异常: %s", safe, level=logging.ERROR)
+            _set_state(last_error="内部异常: {}".format(safe))
             _set_backoff()
         finally:
             with _STATE_LOCK:
