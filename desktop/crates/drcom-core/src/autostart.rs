@@ -47,14 +47,23 @@ impl AutostartState {
 
 // ---------------- 纯函数：要写什么 ----------------
 
-/// 注册表里要写的值：**带引号** ✓
+/// 注册表里要写的值：**带引号的 exe ＋ 空格分隔的子命令/参数** ✓
 /// （路径含空格时 `reg.exe` 参数会被截断 ✗ —— 这是最常见的坑）。
-pub fn windows_value(exe: &Path) -> String {
-    format!("\"{}\"", exe.display())
+///
+/// Run 键的值是一条**完整命令行**（仍是单个 `REG_SZ`）：只写 exe 的话开机跑的是
+/// 「无参程序」（打印帮助就退出；GUI 则直接弹窗），与「自启跑无界面循环、开机不弹窗」
+/// 的承诺相反 ✗（审计 P1-4）。CLI 传的就是 `["run"]` ✓。
+pub fn windows_value(exe: &Path, args: &[&str]) -> String {
+    let mut value = format!("\"{}\"", exe.display());
+    for arg in args {
+        value.push(' ');
+        value.push_str(arg);
+    }
+    value
 }
 
 /// `reg add` 的参数（`HKCU` 开头 ⇒ 用户级、免管理员 ✓）。
-pub fn windows_add_args(exe: &Path) -> Vec<String> {
+pub fn windows_add_args(exe: &Path, args: &[&str]) -> Vec<String> {
     vec![
         "add".to_string(),
         WINDOWS_RUN_KEY.to_string(),
@@ -63,7 +72,7 @@ pub fn windows_add_args(exe: &Path) -> Vec<String> {
         "/t".to_string(),
         "REG_SZ".to_string(),
         "/d".to_string(),
-        windows_value(exe),
+        windows_value(exe, args),
         "/f".to_string(),
     ]
 }
@@ -183,7 +192,7 @@ pub fn plan(exe: &Path, args: &[&str]) -> Vec<String> {
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "（Windows：注册表 Run 键）".to_string());
     match Os::current() {
-        Os::Windows => vec![format!("reg.exe {}", windows_add_args(exe).join(" "))],
+        Os::Windows => vec![format!("reg.exe {}", windows_add_args(exe, args).join(" "))],
         Os::Linux => vec![
             format!("写入 {}", target),
             format!("内容:\n{}", systemd_unit(exe, args)),
@@ -202,10 +211,10 @@ pub fn plan(exe: &Path, args: &[&str]) -> Vec<String> {
 pub fn enable(exe: &Path, args: &[&str]) -> Result<String, String> {
     match Os::current() {
         Os::Windows => {
-            run_reg(&windows_add_args(exe))?;
+            run_reg(&windows_add_args(exe, args))?;
             Ok(format!(
                 "已写入当前用户的启动项：{}（免管理员 ✓）",
-                windows_value(exe)
+                windows_value(exe, args)
             ))
         }
         Os::Linux => {
@@ -319,18 +328,57 @@ mod tests {
     }
 
     #[test]
-    fn windows_entry_is_quoted_and_strictly_user_level() {
-        let value = windows_value(&exe());
-        assert!(value.starts_with('"') && value.ends_with('"'), "路径必须带引号 ✗: {}", value);
+    fn windows_entry_is_quoted_and_carries_the_run_subcommand() {
+        // Run 值必须是一条完整命令行：「带引号的 exe + 空格 + run」——
+        // 只写 exe 就丢了 run（开机弹窗 / 打印帮助就退出），这是审计 P1-4 的回归点 ✗。
+        let value = windows_value(&exe(), &["run"]);
+        assert_eq!(value, format!("\"{}\" run", exe().display()));
+        assert!(value.starts_with('"'), "路径必须带引号 ✗: {}", value);
+        assert!(value.contains("\" run"), "引号之后必须空格再接 run ✓: {}", value);
 
-        let joined = windows_add_args(&exe()).join(" ");
-        assert!(joined.contains(r"HKCU\"), "只用当前用户键（免管理员 ✓）: {}", joined);
-        assert!(!joined.contains("HKLM"), "绝不能碰机器级键 ✗: {}", joined);
-        assert!(joined.contains("/f"), "要覆盖写 ✓: {}", joined);
+        // 逐元素断言 argv（不能只 join 后 contains：命令拼接的 bug 会被子串掩盖 ✗）
+        let args = windows_add_args(&exe(), &["run"]);
+        assert_eq!(args.len(), 9, "reg add 的 argv 形状变了 ✗: {:?}", args);
+        assert_eq!(args[0], "add");
+        assert_eq!(args[1], WINDOWS_RUN_KEY);
+        assert_eq!(args[2], "/v");
+        assert_eq!(args[3], ENTRY_NAME);
+        assert_eq!(args[4], "/t");
+        assert_eq!(args[5], "REG_SZ");
+        assert_eq!(args[6], "/d");
+        assert_eq!(args[7], format!("\"{}\" run", exe().display()), "/d 的值必须带 run ✓");
+        assert_eq!(args[8], "/f");
+        // run 必须拼进 /d 的值里，**不能**单独当成一个 argv（reg 会多认一个参数 ✗）
+        assert!(!args.iter().any(|a| a == "run"), "run 只能出现在 /d 的值里 ✗: {:?}", args);
+        assert!(args[1].starts_with("HKCU\\"), "只用当前用户键（免管理员 ✓）: {}", args[1]);
+        assert!(!args.iter().any(|a| a.contains("HKLM")), "绝不能碰机器级键 ✗: {:?}", args);
 
-        assert!(reg_output_has_entry("    StardustFlashLink    REG_SZ    \"C:\\x.exe\""));
+        // 多个参数也要按顺序拼进同一个 REG_SZ（将来加 --once 之类不许丢 ✓）
+        assert_eq!(
+            windows_value(&exe(), &["run", "--once"]),
+            format!("\"{}\" run --once", exe().display())
+        );
+
+        assert!(reg_output_has_entry("    StardustFlashLink    REG_SZ    \"C:\\x.exe\" run"));
         assert!(!reg_output_has_entry("错误: 系统找不到指定的注册表项或值。"));
         assert!(windows_delete_args().contains(&"/f".to_string()));
+    }
+
+    #[test]
+    fn windows_plan_prints_the_run_subcommand_too() {
+        let text = plan(&exe(), &["run"]).join("\n");
+        assert!(text.contains("run"), "计划里必须能看出跑的是 run 子命令 ✓: {}", text);
+        #[cfg(windows)]
+        {
+            let lines = plan(&exe(), &["run"]);
+            assert_eq!(lines.len(), 1, "Windows 只写一条 Run 值: {:?}", lines);
+            assert!(lines[0].starts_with("reg.exe add "), "{}", lines[0]);
+            assert!(
+                lines[0].contains("\" run"),
+                "dry-run 的计划也必须带 run（否则用户以为只是启动 exe）✗: {}",
+                lines[0]
+            );
+        }
     }
 
     #[test]

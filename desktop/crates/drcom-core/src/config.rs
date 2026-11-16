@@ -8,7 +8,7 @@
 use crate::channel::Channel;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const ALLOWED_SUFFIXES: [&str; 4] = ["", "@yd", "@dx", "@lt"];
 pub const ALLOWED_INTERVALS: [u32; 5] = [5, 15, 30, 60, 120];
@@ -138,6 +138,41 @@ impl Default for Config {
     }
 }
 
+/// 损坏配置的备份路径：同目录 `config.json.bad-<时间戳>` ✓
+///
+/// 语义与 2.x `联网_service.py` 的 `_backup_broken_config()` 一致：
+/// **改名保留原文件**（不是复制），坏内容逐字节留在 `.bad-*` 里可人工抢救 ✓。
+fn bad_config_path(path: &Path, stamp: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".to_string());
+    path.with_file_name(format!("{}.bad-{}", name, stamp))
+}
+
+/// 把解析失败的配置文件改名成 `config.json.bad-<时间戳>`，返回备份路径。
+///
+/// 时间戳用 [`crate::timefmt::compact_utc`]（UTC，和日志/其它落盘文件同一口径 ✓）；
+/// 同一秒内连撞两次时追加 `-2` / `-3`……，**绝不覆盖已存在的备份** ✓。
+fn backup_broken_config(path: &Path) -> Result<PathBuf, String> {
+    let stamp = crate::timefmt::compact_utc(std::time::SystemTime::now());
+    let mut candidate = bad_config_path(path, &stamp);
+    let mut serial = 1;
+    while candidate.exists() {
+        serial += 1;
+        candidate = bad_config_path(path, &format!("{}-{}", stamp, serial));
+    }
+    std::fs::rename(path, &candidate).map_err(|e| {
+        format!(
+            "备份损坏的配置 {} → {} 失败: {}",
+            path.display(),
+            candidate.display(),
+            e
+        )
+    })?;
+    Ok(candidate)
+}
+
 impl Config {
     /// 从 JSON 文本解析（缺字段自动补默认值 ✓ —— 2.x 的老配置里没有 3.0 字段）。
     pub fn from_json(text: &str) -> Result<Config, String> {
@@ -154,10 +189,39 @@ impl Config {
         !self.account.trim().is_empty()
     }
 
+    /// 读取配置。**解析失败时先把坏文件备份，再让调用方回落默认值** ✓（审计 P2-1）。
+    ///
+    /// 为什么必须先备份：GUI 设置页 / CLI 里有大量 `Config::load(..).unwrap_or_default()`
+    /// 的调用点，一旦随后 `save()`，默认值就会把用户的账号 / 方案 / 未知字段**永久覆盖** ✗。
+    /// 先改名成 `config.json.bad-<时间戳>`（2.x `_backup_broken_config()` 的同款语义），
+    /// 原内容就一定能人工抢救回来 ✓。
+    ///
+    /// 返回 `Err` 是为了让能处理错误的调用方（CLI / 状态面板）把这条**可读错误**展示出来；
+    /// 同时写一条 stderr 日志，避免被 `unwrap_or_default()` 静默吞掉。
     pub fn load(path: &Path) -> Result<Config, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("读不了配置文件 {}: {}", path.display(), e))?;
-        Config::from_json(&text)
+        match Config::from_json(&text) {
+            Ok(cfg) => Ok(cfg),
+            Err(parse_error) => {
+                let notice = match backup_broken_config(path) {
+                    Ok(bad) => format!(
+                        "{}；原文件已备份为 {}（内容原样保留，可人工抢救）",
+                        parse_error,
+                        bad.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "config.json.bad-*".to_string())
+                    ),
+                    Err(backup_error) => format!(
+                        "{}；而且{}（请先手工备份，避免保存时覆盖）",
+                        parse_error, backup_error
+                    ),
+                };
+                // 可读日志：CLI / 服务日志里直接能看到（GUI 下也不影响功能 ✓）
+                eprintln!("[警告] {}", notice);
+                Err(notice)
+            }
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -336,6 +400,98 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// 同目录下所有 `config.json.bad-*` 备份（按文件名排序，便于断言）。
+    fn bad_backups(dir: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().starts_with("config.json.bad-"))
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn bad_config_name_matches_the_two_x_pattern() {
+        assert_eq!(
+            bad_config_path(Path::new("data/config.json"), "20261116-094500"),
+            PathBuf::from("data/config.json.bad-20261116-094500")
+        );
+        // 非 config.json 的名字也按「原名 + .bad-时间戳」处理（不写死文件名 ✓）
+        assert_eq!(
+            bad_config_path(Path::new("config.json"), "x"),
+            PathBuf::from("config.json.bad-x")
+        );
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_verbatim_before_falling_back_to_defaults() {
+        let dir = temp_dir("corrupt");
+        let path = dir.join("config.json");
+        // 2.x/3.0 都出现过的坏法：类型写错 + JSON 截断（强类型 serde 下整份读不出来）
+        let broken = "{\n  \"host\": \"10.9.9.9\",\n  \"port\": \"八十\",\n  \"留存\": 1\n";
+        std::fs::write(&path, broken).unwrap();
+
+        let err = Config::load(&path).expect_err("坏配置必须报错（不许静默回落）");
+        assert!(err.contains("解析失败"), "错误要可读: {}", err);
+        assert!(err.contains("已备份"), "错误里要说明已备份: {}", err);
+        assert!(err.contains("config.json.bad-"), "错误里要带备份名: {}", err);
+
+        let backups = bad_backups(&dir);
+        assert_eq!(backups.len(), 1, "解析失败必须留**恰好一份**备份: {:?}", backups);
+        let name = backups[0].file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("config.json.bad-"), "备份名要跟 2.x 对齐: {}", name);
+        assert_eq!(
+            std::fs::read_to_string(&backups[0]).unwrap(),
+            broken,
+            "备份必须与原始坏文本逐字节一致 ✓"
+        );
+        assert!(!path.exists(), "坏文件先改名备份，主路径留空给默认值 ✓");
+
+        // 调用方的真实路径：unwrap_or_default() 回落默认值 → 保存（沿用 atomicfile）也没覆盖坏内容 ✓
+        let fallback = Config::load(&path).unwrap_or_default();
+        assert_eq!(fallback, Config::default(), "文件缺失 → 回落默认值 ✓");
+        fallback.save(&path).unwrap();
+        assert_eq!(Config::load(&path).unwrap(), Config::default());
+        assert_eq!(
+            std::fs::read_to_string(&backups[0]).unwrap(),
+            broken,
+            "保存默认值之后备份必须还在 ✓"
+        );
+        assert!(tmp_leftovers(&dir).is_empty(), "保存走 atomicfile，不留 tmp ✓");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_corruption_never_overwrites_an_older_backup() {
+        let dir = temp_dir("corrupt-twice");
+        let path = dir.join("config.json");
+        let first = "{\"host\": ";
+        std::fs::write(&path, first).unwrap();
+        assert!(Config::load(&path).is_err());
+        let second = "{\"port\": \"不是数字\"}";
+        std::fs::write(&path, second).unwrap();
+        assert!(Config::load(&path).is_err());
+
+        let backups = bad_backups(&dir);
+        assert_eq!(backups.len(), 2, "两次损坏要留两份备份（不许互相覆盖）: {:?}", backups);
+        let mut got: Vec<String> =
+            backups.iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+        got.sort();
+        let mut expected = vec![first.to_string(), second.to_string()];
+        expected.sort();
+        assert_eq!(got, expected, "每次损坏的原文都要各留一份 ✓");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
