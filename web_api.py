@@ -456,24 +456,25 @@ def api_post_credentials(payload):
         # 部分更新：**基于现有配置**改这两个键 ✓ ——
         # 绝不能只把 {account, suffix} 丢给 _save_config：它会用 DEFAULT_CONFIG 把
         # 其它字段补成默认值，等于把网关 / 端口 / 间隔一起重置 ✗。
+        # 整段持 CONFIG_LOCK：与「配置页保存 / 方案自动切换」互斥（审计 C-06 丢更新）。
         try:
-            cfg = dict(_load_config() or {})
-        except Exception as exc:  # noqa: BLE001
-            return 500, {"ok": False, "error": "读取配置失败：{}".format(exc)}
-        if account is not None:
-            cfg["account"] = account
-        if suffix is not None:
-            cfg["suffix"] = suffix
-        errors = _validate_config(cfg)
-        if errors:
-            return 400, {"ok": False, "error": "；".join(errors)}
-        try:
-            _save_config(cfg)
+            with CONFIG_LOCK:
+                cfg = dict(_load_config() or {})
+                if account is not None:
+                    cfg["account"] = account
+                if suffix is not None:
+                    cfg["suffix"] = suffix
+                errors = _validate_config(cfg)
+                if errors:
+                    return 400, {"ok": False, "error": "；".join(errors)}
+                _save_config(cfg)
         except ValueError as exc:
             return 400, {"ok": False, "error": str(exc)}
         except OSError as exc:
             _log("写 config.json 失败: %s", exc, level=logging.ERROR)
             return 500, {"ok": False, "error": "写文件失败"}
+        except Exception as exc:  # noqa: BLE001
+            return 500, {"ok": False, "error": "读取配置失败：{}".format(exc)}
         saved_account = cfg.get("account", "")
         saved_suffix = cfg.get("suffix", "")
     else:
@@ -1001,9 +1002,10 @@ def api_post_update_toggle(payload):
     if not isinstance(enabled, bool):
         return 400, {"ok": False, "error": "enabled 必须是布尔值"}
     try:
-        cfg = _load_config()
-        cfg["auto_update_enabled"] = enabled
-        _save_config(cfg)
+        with CONFIG_LOCK:
+            cfg = _load_config()
+            cfg["auto_update_enabled"] = enabled
+            _save_config(cfg)
     except (ValueError, OSError) as exc:
         return 400, {"ok": False, "error": str(exc)}
     _auto_update_mod._log_upgrade("INFO", "auto_update_enabled 改为 {}".format(enabled))
