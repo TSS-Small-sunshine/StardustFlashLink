@@ -22,6 +22,10 @@ on:
         description: 'true = 只渲染并打印发布说明，不创建/覆盖 release（验证 workflow 改动用）'
         required: false
         default: 'false'
+      allow_republish:
+        description: 'true = 允许覆盖已存在的同名 v{版本} release（默认 false：版本号没递增就跳过正式版发布）'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -298,6 +302,16 @@ jobs:
           $old = gh release view $tag --json name 2>$null | ConvertFrom-Json
           if ($old -and $old.name) { $title = $old.name }
           if ("${{ github.event.inputs.title }}" -ne "") { $title = "${{ github.event.inputs.title }}" }
+          # 审计 P1-1：同名版本 release 已存在 = version.py 没递增。旧行为是
+          # delete + create（tag 被挪到新提交、同版本换本体）—— 已装客户端拿 remote==local
+          # 就判「已是最新」，这次构建的补丁永远到不了用户 ✗。
+          # 默认拒绝覆盖（CI 只给 warning，不红）；确需重发同一版本时显式 allow_republish。
+          gh release view $tag 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0 -and "${{ github.event.inputs.allow_republish }}" -ne "true") {
+            Write-Host "::warning::v$env:APP_VERSION 的 release 已存在 —— 版本号没有递增，已跳过正式版发布（installer 固定链接照常更新）。要重发同一版本请用 workflow_dispatch 且 allow_republish=true；否则请先 bump version.py。"
+            gh release view $tag --json url,tagName,isPrerelease,assets
+            exit 0
+          }
           gh release view $tag 2>$null | Out-Null
           if ($LASTEXITCODE -eq 0) {
             gh release delete $tag --yes --cleanup-tag

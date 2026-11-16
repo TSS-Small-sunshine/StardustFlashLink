@@ -16,6 +16,14 @@ PR / 合并策略见 [PR-WORKFLOW.md](PR-WORKFLOW.md)。
 > 少了非 prerelease 的 `v{VERSION}` release，自动升级就取不到版本号与 digest —— 这是
 > 不变量 I10，不要「先发 installer、过几天再补正式版」。
 
+> **版本号必须递增才发正式版**（审计 P1-1）：同名 `v{VERSION}` release 已存在时，
+> `build-installer.yml` 只更新 `installer` 固定链接并**跳过**正式版发布（打一条 GitHub
+> warning）—— 因为覆盖同名 tag 会让 tag 漂移 / 同版本换安装包，而自动升级客户端拿
+> `remote == local` 就判「已是最新」，补丁永远到不了已装用户 ✗。
+> 确实要重发同一版本（例如修复上一次失败的构建）时，用 `workflow_dispatch` 且
+> `allow_republish=true`。常规发版流程是：**先 bump `version.py`（+ CHANGELOG / 模板），
+> 合并后再让 CI 发版**。
+
 两个 release 的正文都**由 CI 从仓库里的模板渲染**，不在 GitHub 页面手改：
 
 | 通道 | 模板 |
