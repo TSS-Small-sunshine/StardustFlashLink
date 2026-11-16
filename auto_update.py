@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading   # 审计 G1：启动钩子的延迟复核线程（daemon）
 import time
 import urllib.error
 import urllib.parse
@@ -54,7 +55,13 @@ GITHUB_UA = "DrcomAutoLogin-Windows/{}".format(VERSION)
 HTTP_TIMEOUT_SEC = 8
 DOWNLOAD_CHUNK_BYTES = 64 * 1024  # 64KB
 DOWNLOAD_TIMEOUT_SEC = 300  # 5 分钟
-INSTALLER_FILENAME_PATTERN = "DrcomAutoLogin-Setup-v{ver}.exe"
+# 审计 E4 / 不变量 I9：安装包产物名以 setup.iss 的 OutputBaseFilename 为准
+#   （StardustFlashLink-Setup-v{ver}.exe）；以前这里写的是旧产品名 DrcomAutoLogin-Setup-v*。
+# 只影响 %TEMP% 暂存名与 _cleanup_update_leftovers 的匹配 —— 两处必须**一起**改。
+INSTALLER_FILENAME_PATTERN = "StardustFlashLink-Setup-v{ver}.exe"
+INSTALLER_FILENAME_PREFIX = "StardustFlashLink-Setup-v"
+# v2.0.3.0 之前的产物名：只用于清理历史残留（不参与本次下载的命名）
+LEGACY_INSTALLER_FILENAME_PREFIX = "DrcomAutoLogin-Setup-v"
 NSSM_REGISTRY_PATH = r"HKLM\SYSTEM\CurrentControlSet\Services\DrcomAutoLogin"
 NSSM_PARAMETERS_PATH = NSSM_REGISTRY_PATH + r"\Parameters"
 SERVICE_NAME = "DrcomAutoLogin"
@@ -178,15 +185,25 @@ GITHUB_DOWNLOAD_REQUEST_TIMEOUT_SEC = 60  # 镜像 fallback 时下载单段超�
 # ============================================================
 # 自动升级函数（从 联网_service.py 逐字搬入）
 # ============================================================
+# 审计 B1：后缀必须分类 —— 预发布（rc/alpha/beta/pre/dev）要**低于**同版本正式版；
+# 只有 fix/hotfix/patch（以及未知后缀，保持旧口径）继续用 sentinel 999。
+# 用法：suffix.startswith(_PRERELEASE_SUFFIXES) —— str.startswith 支持元组。
+_PRERELEASE_SUFFIXES = ("rc", "alpha", "beta", "pre", "dev")
+
+
 def _parse_version(s):
-    """将 "1.2" / "v1.3.1" / "1.3-fix" / "1.3.1-hotfix" 解析为可比较元组。解析失败返回 ()。
+    """将 "1.2" / "v1.3.1" / "1.3-fix" / "1.3.1-rc2" 解析为可比较元组。解析失败返回 ()。
 
     规则:
     - 忽略前缀 'v' / 'V'
     - '.' 分隔数字段;每个数字段必须是纯数字,或数字后带非数字后缀( '-fix' / '_hotfix' / '-rc1' 等)
-    - 遇到非数字后缀时,追加 sentinel 999 让补丁版本严格大于同主版本号 (1.3-fix > 1.3)
-      但又人工高于任意后续小版本号( 1.3-fix > 1.3.1 );遇到后缀后立即停止解析,
-      防止 "1.3-fix.5" 这类异常输入被错误地拆出更多段
+    - 后缀分两类（审计 B1）:
+        * 预发布后缀 rc / alpha / beta / pre / dev → 追加 -1:
+          `2.1.3.0-rc1` 与同版本正式版 `2.1.3.0` 比较时**更低**（补 0 后 -1 < 0）；
+        * 其它（fix / hotfix / patch 与未知后缀）→ 追加 sentinel 999:
+          让补丁版本严格大于同主版本号 (1.3-fix > 1.3)，但又人工高于任意后续小版本号
+          ( 1.3-fix > 1.3.1 ) —— 这是既有设计意图，不改；
+      遇到后缀后立即停止解析, 防止 "1.3-fix.5" 这类异常输入被错误地拆出更多段
     - 某段完全不包含数字 → 解析失败返回 ()
     """
     if not isinstance(s, str):
@@ -209,10 +226,13 @@ def _parse_version(s):
         if not digits:
             return ()  # 该段没数字,解析失败
         out.append(int(digits))
-        # 同一段里剩余字符(如 "-fix" / "_hotfix" / "-rc1" 等)→ 追加 sentinel
+        # 同一段里剩余字符(如 "-fix" / "_hotfix" / "-rc1" 等)→ 按后缀分类追加标记
         if len(part) > len(digits):
-            # 任何非数字后缀都让补丁版 > 同主版本(且人工高于任意后续小版本)
-            out.append(999)
+            suffix = part[len(digits):].lstrip("-_.").lower()
+            if suffix.startswith(_PRERELEASE_SUFFIXES):
+                out.append(-1)   # 预发布：低于同版本正式版
+            else:
+                out.append(999)  # fix / hotfix / patch / 未知后缀：保持旧口径
             # 后续段不再解析(防止 "1.3-fix.5" 被错误解析)
             break
     return tuple(out)
@@ -233,6 +253,16 @@ def _compare_versions(local, remote):
     if lv > rv:
         return 1
     return 0
+
+
+# 审计 B2：远端版本串白名单（防 `..\` 穿越拼进 %TEMP% 文件名，也防把脏 tag 当版本）。
+# 以前只有 _do_update_now 有这道闸，_do_check_now 没有 —— 两处共用本函数。
+_REMOTE_VERSION_RE = re.compile(r"[0-9A-Za-z._-]{1,32}")
+
+
+def _valid_remote_version(version):
+    """远端 tag 解析出的版本串是否过白名单（纯函数；_do_update_now / _do_check_now 共用）。"""
+    return isinstance(version, str) and _REMOTE_VERSION_RE.fullmatch(version) is not None
 
 
 def _rotate_upgrade_log():
@@ -437,9 +467,16 @@ def update_busy_message():
     return msg or "已有升级任务在执行"
 
 
-def _download_installer(url, dest_path, expected_size, progress_callback=None):
+def _download_installer(url, dest_path, expected_size, progress_callback=None, expected_sha256=None):
     """按顺序尝试主源 + 镜像下载 installer；任一成功即返回字节数。
     所有镜像都失败则抛最后一次异常。
+
+    审计 C1：**每个镜像下完立刻校验 SHA256**。镜像用 200 返回 HTML 错误页 / 限流页
+    （校园网里极常见）时，以前要等全部下载完、在 _do_update_now 里才发现校验失败 ——
+    主源本来可用却整次失败。现在校验不过就删掉**该镜像**的产物并 continue（换下一个），
+    digest 仍只信主源（GITHUB_API_MIRRORS 只剩 None，见 P1-2）。
+    没给 expected_sha256 时不校验：fail-closed 的「digest 缺失即拒绝」在 _do_update_now
+    里、下载之前就把关。
 
     progress_callback(downloaded_bytes, total_bytes_or_None) 每 ~200ms 触发。
     """
@@ -447,19 +484,26 @@ def _download_installer(url, dest_path, expected_size, progress_callback=None):
     last_exc = None
     for mirror in GITHUB_DOWNLOAD_MIRRORS:
         target = primary_url if mirror is None else mirror.rstrip("/") + "/" + primary_url
+        mirror_name = "primary" if mirror is None else mirror
         try:
-            return _do_download_installer(
+            written = _do_download_installer(
                 target, dest_path, expected_size, progress_callback,
                 timeout=DOWNLOAD_TIMEOUT_SEC if mirror is None else GITHUB_DOWNLOAD_REQUEST_TIMEOUT_SEC,
             )
         except _URL_ERRORS as exc:
-            logger.warning(
-                "下载镜像 %s 失败: %s",
-                "primary" if mirror is None else mirror,
-                exc,
-            )
+            logger.warning("下载镜像 %s 失败: %s", mirror_name, exc)
             last_exc = exc
             continue
+        if expected_sha256 and not _verify_sha256(dest_path, expected_sha256):
+            logger.warning("镜像 %s 下载的安装器 SHA256 不符，删除后换下一个镜像", mirror_name)
+            try:
+                if os.path.isfile(dest_path):
+                    os.remove(dest_path)
+            except OSError as exc:
+                logger.warning("删除校验失败的安装器失败: %s", exc)
+            last_exc = OSError("镜像 {} 下载的安装器 SHA256 校验不符".format(mirror_name))
+            continue
+        return written
     raise last_exc if last_exc is not None else OSError("所有下载镜像都失败")
 
 
@@ -853,8 +897,8 @@ def _run_rollback(backup_dir, expect=None, tag="manual"):
     return proc.returncode == 0, detail
 
 
-def _read_nssm_appexit():
-    """读 nssm 的 AppExit 策略（Default 子值）；不存在 / 为空 / 权限不足返回 None。
+def _read_nssm_appexit(subvalue=APPEXIT_DEFAULT_VALUE):
+    """读 nssm 某个 AppExit 子值；不存在 / 为空 / 权限不足返回 None。
 
     v2.0.4.2 修：nssm 的存储结构是**子键 + 子值** ——
 
@@ -865,16 +909,24 @@ def _read_nssm_appexit():
     v2.0.4.1 及以前读的是 `Parameters` 下的**同名值** `AppExit` —— 那儿根本没有这个值，
     于是每次启动都误报「AppExit 自愈失败（仍是空值）」，并且白白往 `Parameters`
     写了一个 nssm 不认的非法值。真机日志里那行 WARN 就是这么来的。
+
+    审计 E2：subvalue 默认读 (默认) 值（沿用既有调用点），传 "0" 读退出码 0 的子值 ——
+    I7 要求 Default 与 "0" **两个都是** Ignore，只读一个等于只兜住一半。
     """
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _hklm_subpath(APPEXIT_SUBKEY)) as k:
-            value, _ = winreg.QueryValueEx(k, APPEXIT_DEFAULT_VALUE)
+            value, _ = winreg.QueryValueEx(k, subvalue)
     except (OSError, ImportError):
         return None
     if not isinstance(value, str) or not value.strip():
         return None
     return value.strip()
+
+
+def _appexit_value_ok(value):
+    """AppExit 子值是否是 nssm 合法值 Ignore（大小写不敏感；None / 空值都算不合规）。"""
+    return isinstance(value, str) and value.strip().lower() == "ignore"
 
 
 def _write_nssm_appexit(value):
@@ -923,26 +975,36 @@ def _set_nssm_appexit(subparam, value):
 
 
 def _ensure_nssm_appexit_sane():
-    """AppExit 为空 / 缺失时自愈为与 setup.iss 一致的值（v2.0.4.0；v2.0.4.2 修读取方式）。
+    """AppExit 必须是 Default Ignore + 0 Ignore，否则用 nssm set 纠偏（审计 E2 / 不变量 I7）。
 
-    返回当前（修复后）的值，失败返回 None。
+    以前只认「空值」：Default 被旧版本 / 手工 / 第三方脚本设成 Restart 时不会纠偏，
+    名为 "0" 的子值只写不读 —— I7（端口冲突时 NSSM 不得死循环重启）其实只兜住一半。
+    现在判据是「两个子值都是 Ignore」，**绝不写 Restart**。
+
+    返回当前（修复后）的 Default 值，失败返回 None。
     """
-    cur = _read_nssm_appexit()
-    if cur:
-        # 已有合法策略（Ignore）→ 什么都不做，也**不该**报"自愈失败"（v2.0.4.2 修的误报）
-        return cur
+    cur_default = _read_nssm_appexit()
+    cur_zero = _read_nssm_appexit("0")
+    if _appexit_value_ok(cur_default) and _appexit_value_ok(cur_zero):
+        # 已合规（Default Ignore + 0 Ignore）→ 什么都不做，也**不该**报"自愈失败"（v2.0.4.2 修的误报）
+        return cur_default
     if not os.path.isfile(NSSM_PATH):
-        _log_upgrade("WARN", "AppExit 无效（空/缺失）且找不到 nssm.exe，跳过自愈")
+        _log_upgrade("WARN", "AppExit 不是 Default Ignore / 0 Ignore（现值 Default={!r} / 0={!r}）"
+                             "且找不到 nssm.exe，跳过自愈".format(cur_default, cur_zero))
         return None
     ok_default = _set_nssm_appexit("Default", "Ignore")
     ok_zero = _set_nssm_appexit("0", "Ignore")
-    fixed = _read_nssm_appexit()
-    if fixed:
-        _log_upgrade("INFO", "AppExit 自愈完成：此前为空/缺失 → 现为 {}（Default Ignore={} / 0 Ignore={}）".format(
-            fixed, ok_default, ok_zero))
+    fixed_default = _read_nssm_appexit()
+    fixed_zero = _read_nssm_appexit("0")
+    if _appexit_value_ok(fixed_default) and _appexit_value_ok(fixed_zero):
+        _log_upgrade("INFO", "AppExit 自愈完成：此前 Default={!r} / 0={!r} → 现为 Default Ignore / 0 Ignore"
+                             "（nssm set 结果 Default={} / 0={}）".format(
+                                 cur_default, cur_zero, ok_default, ok_zero))
     else:
-        _log_upgrade("WARN", "AppExit 自愈失败（仍是空值），请手动执行：nssm set {} AppExit Default Ignore".format(SERVICE_NAME))
-    return fixed
+        _log_upgrade("WARN", "AppExit 自愈失败（现值 Default={!r} / 0={!r}），请手动执行："
+                             "nssm set {} AppExit Default Ignore".format(
+                                 fixed_default, fixed_zero, SERVICE_NAME))
+    return fixed_default if _appexit_value_ok(fixed_default) else None
 
 
 # ============================================================
@@ -1166,6 +1228,42 @@ def _normalize_ui_port(value):
     return port
 
 
+def _probe_local_health(ui_port=None, timeout_sec=None):
+    """探一次本机 Web UI 的 /api/health（升级前健康基线，审计 A2）。
+
+    返回 (ok, detail)。**只有 ok=True 才允许开始升级**：当前服务本来就不健康
+    （端口被占 / 配置非法 / 进程半死）时，装新版本也救不回来 —— 旧代码同样绑不上端口，
+    执行器却会把「已经装好的新版」用备份覆盖回旧版，用户看到的是「升级失败」。
+    真机最伤信心的故障就是这一类，所以升级前先要一个健康基线。
+
+    口径与升级看门狗探针保持一致（复用端口规范化与超时常量）：
+      - 只探 127.0.0.1 + /api/health；
+      - 禁用系统代理（IE/环境变量里的代理可能不把 127.0.0.1 列入绕过表）；
+      - 200 且响应 JSON 里 ok 为真才算健康。
+    """
+    port = _normalize_ui_port(ui_port)
+    timeout = HEALTH_PROBE_TIMEOUT_SEC if timeout_sec is None else float(timeout_sec)
+    url = "http://{}:{}{}".format(HEALTH_PROBE_HOST, port, HEALTH_PROBE_PATH)
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url, timeout=timeout) as resp:
+            code = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return False, "HTTP {}".format(exc.code)
+    except Exception as exc:  # noqa: BLE001  连接被拒 / 超时 / URLError 都算「不健康」
+        return False, "{}: {}".format(type(exc).__name__, exc)
+    if code != 200:
+        return False, "HTTP {}".format(code)
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return False, "响应不是 JSON"
+    if not isinstance(data, dict) or not data.get("ok"):
+        return False, "ok 不为真"
+    return True, "http=200 ok=true"
+
+
 def _installer_log_path():
     return os.path.join(_update_tmp_dir(), UPDATE_LOG_NAME)
 
@@ -1354,6 +1452,12 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
          → 起服务 → 再探一次。这样「升坏了」不再需要用户重装安装包；
       7. 收尾：删计划任务、删探针与回滚脚本、删自己。
 
+    审计 A2（回滚归因）：
+      - 两轮都不健康时先读一眼 service_stderr.log：尾部有 FATAL / bind → 判「端口被占」，
+        落 health=PORT_BUSY 并**跳过回滚**（旧代码同样绑不上端口，回滚零收益）；
+      - 回滚后再探一次，若 rollback=OK 但最后一次 health 仍非 OK → 追加 rollback=USELESS，
+        启动钩子据此报 error（不能宣称回滚成功）。
+
     新增参数都已给默认值（老调用点与老断言不受影响）：
         python_path / probe_path     内嵌解释器与探针脚本（默认取实际路径）
         ui_port                      要探的 Web UI 端口（非法值退回 8848）
@@ -1377,6 +1481,7 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         "setlocal",
         'set "LOG=' + log_path + '"',
         'set "RC=' + rc_path + '"',
+        'set "APP=' + app_dir + '"',
         "rem ---- 1) 静默安装（任务：桌面图标 + 启动服务）----",
         '"' + installer_path + '" /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /NOCANCEL'
         ' /CLOSEAPPLICATIONS /TASKS=desktopicon,startservice,trayicon /LOG="%LOG%"',
@@ -1407,6 +1512,17 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         '"' + py + '" "' + probe + '" --port ' + str(port) + ' --rc "%RC%" --tag retry'
         ' --wait ' + str(int(HEALTH_PROBE_RETRY_WAIT_SEC)) + ' >nul 2>&1',
         "if not errorlevel 1 goto after_health",
+        "rem ---- 4b) 归因：探针失败是不是「端口被占」？（审计 A2）----",
+        "rem 端口冲突时旧代码同样绑不上，回滚零收益（还会把已经装好的新版覆盖回旧版）->",
+        "rem 读 {app}\\logs\\service_stderr.log 尾部有没有 FATAL / bind 字样（cmd 用 find /i）。",
+        'set "PORTBUSY="',
+        'find /i "FATAL" "%APP%\\logs\\service_stderr.log" >nul 2>&1',
+        'if not errorlevel 1 set "PORTBUSY=1"',
+        'find /i "bind" "%APP%\\logs\\service_stderr.log" >nul 2>&1',
+        'if not errorlevel 1 set "PORTBUSY=1"',
+        'if defined PORTBUSY >>"%RC%" echo health=PORT_BUSY',
+        'if defined PORTBUSY >>"%RC%" echo rollback=SKIP',
+        'if defined PORTBUSY goto after_health',
         "rem ---- 4c) 两轮都不健康 -> 自动回滚到升级前那份代码（v2.0.11.0）----",
         'rem 回滚只还原代码文件；配置文件与密码文件一律不动。缺件就落 rollback=SKIP。',
         'if not exist "' + py + '" >>"%RC%" echo rollback=SKIP',
@@ -1423,6 +1539,12 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         "rem 回滚后再探一次：结果会作为 rc 里最后一条 health= 落盘（多行以最后一条为准）",
         '"' + py + '" "' + probe + '" --port ' + str(port) + ' --rc "%RC%" --tag after-rollback'
         ' --wait ' + str(int(HEALTH_PROBE_RETRY_WAIT_SEC)) + ' >nul 2>&1',
+        "rem 审计 A2：回滚=OK 但最后一次 health 仍非 OK -> 回滚无用（rollback=USELESS），",
+        "rem 启动钩子据此把 update_state 落成 error，绝不宣称回滚成功。",
+        "if not errorlevel 1 goto after_health",
+        'find /i "rollback=OK" "%RC%" >nul 2>&1',
+        "if errorlevel 1 goto after_health",
+        '>>"%RC%" echo rollback=USELESS',
         ":after_health",
         "rem ---- 5) 服务状态回写（放在健康探测之后，取的是最终状态）----",
         '"' + sc + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
@@ -1434,6 +1556,52 @@ def _build_update_wrapper(installer_path, app_dir, log_path, rc_path, task_name,
         'del /f /q "%~f0" >nul 2>&1',
     ]
     return "\r\n".join(lines) + "\r\n"
+
+
+def _write_update_wrapper(path, script):
+    """把执行器脚本落盘，返回实际使用的编码名（审计 A3 / G5）。
+
+    - 优先按系统 ANSI（Python 的 mbcs）写：.cmd 由「任务计划程序」以 SYSTEM 身份拉起，
+      cmd.exe 按**系统 ANSI 代码页**解析（无控制台、也没有机会 chcp）。以 UTF-8 落盘时，
+      非 ASCII 安装目录（例如 D:\\工具\\Drcom）下的 if exist 会全部判 MISSING ✗；
+    - 系统代码页表示不了中文时退回 UTF-8，并让脚本第一行先 chcp 65001（纯 ASCII，能执行）；
+    - 审计 G5：newline 传空串 —— 脚本本身已经用 CRLF 拼好行尾，文本模式再按 CRLF 转换
+      会生成 **CR CR LF**（实测 53 处）。cmd 能容忍，但生成物不符合预期，也容易误导排查。
+    """
+    try:
+        with open(path, "w", encoding="mbcs", newline="") as handle:
+            handle.write(script)
+        return "mbcs"
+    except (LookupError, UnicodeEncodeError):
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("@chcp 65001 >nul\r\n" + script)
+        return "utf-8"
+
+
+def _delete_update_task(reason="", warn=True):
+    """删掉一次性升级计划任务（审计 E1）。
+
+    /create 成功而 /run 失败时，任务会留在计划程序里（/sc once /st 00:00 → 次日 00:00
+    再静默装一遍同一个安装包）。退回 DETACHED 直启之前必须先删掉它；删失败不致命，记 WARN。
+    """
+    if not os.path.isfile(SCHTASKS_PATH):
+        return False
+    try:
+        proc = subprocess.run(
+            [SCHTASKS_PATH, "/delete", "/tn", UPDATE_TASK_NAME, "/f"],
+            timeout=15, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if warn:
+            _log_upgrade("WARN", "清理一次性升级任务失败：{}（{}）".format(exc, reason or "退回直启前"))
+        return False
+    if proc.returncode == 0:
+        _log_upgrade("INFO", "已清理一次性升级任务（{}）".format(reason or "退回直启前"))
+        return True
+    if warn:
+        _log_upgrade("WARN", "清理一次性升级任务返回 {}（{}）".format(proc.returncode, reason or "退回直启前"))
+    return False
 
 
 def _launch_installer(installer_path, ui_port=None, backup_dir=None):
@@ -1473,23 +1641,16 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
         script = _build_update_wrapper(installer_path, BASE_DIR, log_path, rc_path, UPDATE_TASK_NAME,
                                        probe_path=probe, ui_port=port,
                                        backup_dir=backup_dir, rollback_path=rollback)
-        # 审计 U-3：.cmd 由「任务计划程序」以 SYSTEM 身份拉起，cmd.exe 按**系统 ANSI 代码页**
-        # 解析脚本（无控制台、也没有机会 chcp）。以 UTF-8 落盘时，非 ASCII 安装目录
-        # （例如 D:\工具\Drcom）下的 if exist 会全部判 MISSING ——
-        # 自动回滚与安装日志归档**静默失效**（真机 DETACHED 实测：UTF-8 miss / mbcs 命中）✗。
-        # 所以优先按系统 ANSI（Python 的 mbcs）写；系统代码页表示不了中文时退回 UTF-8，
-        # 并让脚本第一行先 chcp 65001（纯 ASCII，能正常执行）。
-        try:
-            with open(wrapper, "w", encoding="mbcs", newline="\r\n") as f:
-                f.write(script)
-        except (LookupError, UnicodeEncodeError):
-            with open(wrapper, "w", encoding="utf-8", newline="\r\n") as f:
-                f.write("@chcp 65001 >nul\r\n" + script)
+        # 审计 A3 / G5：编码与行尾细节收进 _write_update_wrapper ——
+        # 优先系统 ANSI（mbcs，cmd 无控制台时按 ANSI 代码页解析），
+        # 表示不了中文时退回 UTF-8 + 首行 chcp 65001；newline="" 不再重复转换 CRLF。
+        _write_update_wrapper(wrapper, script)
     except OSError as exc:
         _log_upgrade("WARN", "写升级执行器失败：{}（退回直启）".format(exc))
         wrapper = None
 
     if wrapper:
+        created_task = False
         try:
             create = subprocess.run(
                 [SCHTASKS_PATH, "/create", "/tn", UPDATE_TASK_NAME, "/tr", wrapper,
@@ -1498,6 +1659,7 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
                 check=False,
             )
             if create.returncode == 0:
+                created_task = True
                 run = subprocess.run(
                     [SCHTASKS_PATH, "/run", "/tn", UPDATE_TASK_NAME],
                     timeout=20,
@@ -1505,11 +1667,15 @@ def _launch_installer(installer_path, ui_port=None, backup_dir=None):
                 )
                 if run.returncode == 0:
                     return {"mode": "schtasks", "pid": None}
-                _log_upgrade("WARN", "schtasks /run 返回 {}（退回直启）".format(run.returncode))
+                _log_upgrade("WARN", "schtasks /run 返回 {}（先清理一次性任务，再退回直启）".format(run.returncode))
             else:
                 _log_upgrade("WARN", "schtasks /create 返回 {}（退回直启）".format(create.returncode))
         except (OSError, subprocess.TimeoutExpired) as exc:
             _log_upgrade("WARN", "任务计划程序拉起失败：{}（退回直启）".format(exc))
+        if created_task:
+            # 审计 E1：/run 没成功时任务还留在计划程序里（/sc once /st 00:00 → 次日 00:00
+            # 会再静默装一遍同一个安装包）。退回 DETACHED 直启之前必须先删掉它。
+            _delete_update_task(reason="退回 DETACHED 直启前")
 
     args = [
         installer_path,
@@ -1566,7 +1732,20 @@ def _do_update_now():
             _log_upgrade("ERROR", msg)
             return {"ok": False, "error": msg}
 
-        # 2c. GitHub API 可达
+        # 2c. 升级前健康基线（审计 A2）：当前服务都不健康时，先修服务再升级。
+        # 否则「端口被占 / 配置非法 / 进程半死」这类问题会让新版本也起不来，
+        # 执行器再把已经装好的新版用备份覆盖回旧版 —— 升级成功却被判失败。
+        ui_port = cfg.get("ui_port")
+        healthy, health_detail = _probe_local_health(ui_port)
+        if not healthy:
+            msg = "当前服务不健康（{}），已中止升级；请先修复服务（查看 logs\\service_stderr.log）后再升级".format(
+                health_detail)
+            _set_update_state(update_state="error", update_progress=0,
+                              update_progress_message=msg, update_last_error=msg)
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
+
+        # 2d. GitHub API 可达
         latest = _check_github_latest()
         if latest is None:
             msg = "GitHub releases/latest 不可达或返回异常"
@@ -1575,8 +1754,9 @@ def _do_update_now():
             return {"ok": False, "error": msg}
         remote_ver, asset_url, digest, asset_size, published = latest
 
-        # P1-3：远端版本串白名单（防 `..\` 穿越拼进 %TEMP% 文件名）
-        if not re.fullmatch(r"[0-9A-Za-z._-]{1,32}", remote_ver):
+        # P1-3 / 审计 B2：远端版本串白名单（防 `..\` 穿越拼进 %TEMP% 文件名）；
+        # 与 _do_check_now 共用 _valid_remote_version()，两处口径不再分叉。
+        if not _valid_remote_version(remote_ver):
             msg = "远端版本串非法：{!r}".format(remote_ver)
             _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
             _log_upgrade("ERROR", msg)
@@ -1603,7 +1783,16 @@ def _do_update_now():
             update_last_check_at=_now_iso(),
         )
 
-        # —— 4. 下载 ——
+        # —— 4. 下载 + 逐镜像校验（审计 C1）——
+        # P0-2 / fail-closed：digest 为 None 时**不下载、不安装** ——
+        # 宁可不升级，也不执行来路不明的 exe；digest 只信主源（P1-2）。
+        if not digest:
+            msg = "远端未返回 digest，无法校验完整性，拒绝安装"
+            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg,
+                              update_last_error=msg)
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
+
         _set_update_state(update_state="downloading", update_progress=0,
                           update_progress_message="下载安装器（{}）...".format(remote_ver))
 
@@ -1616,37 +1805,17 @@ def _do_update_now():
             _set_update_state(update_progress=pct, update_progress_message="下载中 {}%".format(pct))
 
         try:
-            written = _download_installer(asset_url, installer_path, asset_size, _on_progress)
+            # 审计 C1：把 digest 传进下载器 —— 每个镜像下完立刻校验，不符就换下一个镜像。
+            written = _download_installer(asset_url, installer_path, asset_size, _on_progress,
+                                          expected_sha256=digest)
         except _URL_ERRORS as exc:
             msg = "下载失败：{}".format(exc)
-            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
+            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg,
+                              update_last_error=msg)
             _log_upgrade("ERROR", msg)
             return {"ok": False, "error": msg}
 
-        _log_upgrade("INFO", "下载完成：{} 字节".format(written))
-
-        # —— 5. 校验 SHA256（P0-2：fail-closed）——
-        # 旧行为是 fail-open：digest 为 None 时**不做任何校验**直接执行安装器。
-        # 现在拿不到 digest 就拒绝安装 —— 宁可不升级，也不执行来路不明的 exe。
-        if not digest:
-            msg = "远端未返回 digest，无法校验完整性，拒绝安装"
-            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
-            _log_upgrade("ERROR", msg)
-            try:
-                os.remove(installer_path)
-            except OSError:
-                pass
-            return {"ok": False, "error": msg}
-        if not _verify_sha256(installer_path, digest):
-            try:
-                os.remove(installer_path)
-            except OSError:
-                pass
-            msg = "SHA256 校验失败，已删除安装器"
-            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
-            _log_upgrade("ERROR", "{}（期望 {}）".format(msg, digest[:16] + "..."))
-            return {"ok": False, "error": msg}
-        _log_upgrade("INFO", "SHA256 校验通过")
+        _log_upgrade("INFO", "下载完成：{} 字节（SHA256 逐个镜像校验通过）".format(written))
 
         # —— 6. 备份当前代码（v2.0.11.0：整目录 + manifest）——
         # 备份失败就**不升级**：宁可这次不升，也不能在「回不去」的状态下换代码。
@@ -1735,8 +1904,39 @@ def _do_check_now():
             return {"ok": False, "error": "GitHub 不可达或返回异常"}
 
         remote_ver, asset_url, digest, size, published = latest
+        # 审计 B2-①：远端版本串白名单（与 _do_update_now 共用 _valid_remote_version）。
+        if not _valid_remote_version(remote_ver):
+            # 注意：不把脏 tag 写进 update_latest_version / update_latest_url，
+            # 否则 UI 会把它当成「最新版本」渲染出来。
+            msg = "远端版本无法解析：{!r}".format(remote_ver)
+            _set_update_state(
+                update_state="error",
+                update_progress=0,
+                update_progress_message=msg,
+                update_available=False,
+                update_last_check_at=_now_iso(),
+                update_last_error=msg,
+            )
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
+
         cmp = _compare_versions(VERSION, remote_ver)
-        if cmp is None or cmp >= 0:
+        # 审计 B2-②：以前把「不可比较」静默当「已是最新」（与 _do_update_now 的口径相反），
+        # 远端元数据坏掉时 UI 会显示「已是最新」且没有任何错误 —— 这里必须报 error。
+        if cmp is None:
+            msg = "远端版本无法解析：本机 {} vs 远程 {}".format(VERSION, remote_ver)
+            _set_update_state(
+                update_state="error",
+                update_progress=0,
+                update_progress_message=msg,
+                update_available=False,
+                update_last_check_at=_now_iso(),
+                update_last_error=msg,
+            )
+            _log_upgrade("ERROR", msg)
+            return {"ok": False, "error": msg}
+
+        if cmp >= 0:
             _set_update_state(
                 update_state=None,
                 update_progress=0,
@@ -1827,10 +2027,18 @@ def api_post_rollback(payload):
 # ============================================================
 # 自动升级后台线程
 # ============================================================
+# 审计 F3：默认配置就是关闭（联网_service / config.json.template / 冒烟都断言 false），
+# 旧实现每 30 秒写一条 INFO —— 每机每天 2880 行，把 RotatingFileHandler 的排障窗口挤掉。
+# 现在只在开关**状态变化**时记一次，并把复核间隔放宽到 300 秒（从关闭改为启用最多 5 分钟生效）。
+AUTO_UPDATE_DISABLED_WAIT_SEC = 300
+_auto_update_disabled_logged = False
+
+
 def _auto_update_loop():
     """后台线程：按 update_check_interval_hours 周期检查 GitHub 新版。
     注意：auto_update_enabled=False 时不主动检查，但 manual / 启动钩子仍可触发。
     """
+    global _auto_update_disabled_logged
     logger.info("自动升级后台线程启动")
     # 首次启动延迟 30 秒（让服务先稳定 + Web UI 就绪）
     if STOP_EVENT.wait(30):
@@ -1839,10 +2047,15 @@ def _auto_update_loop():
         try:
             cfg = _load_config()
             if not cfg.get("auto_update_enabled", True):
-                logger.info("auto_update_enabled=False，30s 后重新检查开关")
-                if STOP_EVENT.wait(30):
+                # 审计 F3：只在「关 → 关」的第一次记日志；等待改 300 秒（启用时行为不变）。
+                if not _auto_update_disabled_logged:
+                    logger.info("auto_update_enabled=False（默认关闭），每 %d 秒复核一次开关",
+                                AUTO_UPDATE_DISABLED_WAIT_SEC)
+                    _auto_update_disabled_logged = True
+                if STOP_EVENT.wait(AUTO_UPDATE_DISABLED_WAIT_SEC):
                     return
                 continue
+            _auto_update_disabled_logged = False   # 开关重新打开 → 下次变化再记一次
             interval_sec = int(cfg.get("update_check_interval_hours", 6)) * 3600
         except (OSError, ValueError) as exc:
             logger.warning("读取更新配置失败: %s", exc)
@@ -1899,50 +2112,60 @@ def _post_upgrade_startup():
     「尝试确认 / 执行器结果 / AppExit 自愈 / 托盘自启」**会被整段静默跳过** ✗。
     现在旧式备份只剩「提示脚本变过」这一个用途（且只影响那一行日志），其余步骤一律执行 ✓。
     """
+    # —— A) 旧式 %TEMP% 备份（v2.0.11.0 之前）：只用来提示 + 顺手清理 ——
+    # 审计 G2：这一段**单独** try，而且先判 TEMP 是否可用。以前整段一个 try，
+    # TEMP 不存在 / 无权限时 listdir 抛异常 → 后面的备份清理 / 升级结论 /
+    # AppExit 自愈 / 托盘自启对齐**全部不执行**，只留一行 WARN（失败也不会被记 failed）。
     try:
-        # —— A) 旧式 %TEMP% 备份（v2.0.11.0 之前）：只用来提示 + 顺手清理 ——
-        legacy = []
-        for name in os.listdir(os.environ.get("TEMP", ".")):
-            if name.startswith("drcom_backup_") and name.endswith(".py"):
-                legacy.append(name)
-        legacy.sort(reverse=True)  # 最新在前
-        if legacy:
-            newest = os.path.join(os.environ.get("TEMP", "."), legacy[0])
-            if os.path.isfile(newest):
-                # v2.0.4.2：**不再**据此宣告"升级完成"。备份是升级前随手落的，
-                # 拿它比 hash 会把"任何一次脚本改动（含手动热补丁）"误判成"升级成功" ——
-                # 真机上就出现过"绿 banner 说已升级，实际还是旧版本"（22:41 那次日志）。
-                # 成功与否一律由下面的尝试记录（目标版本 vs 当前版本）判定。
-                current_hash = _sha256_hex(os.path.join(BASE_DIR, "联网_service.py"))
-                backup_hash = _sha256_hex(newest)
-                if current_hash and backup_hash and current_hash != backup_hash:
-                    _log_upgrade("INFO", "启动钩子：联网_service.py 与最近备份不同（可能是升级，也可能只是本地改动）")
-                else:
-                    _log_upgrade("INFO", "启动钩子：未检测到脚本变更")
-            cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
-            for name in legacy[1:]:
-                p = os.path.join(os.environ.get("TEMP", "."), name)
-                try:
-                    if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
-                        os.remove(p)
-                        _log_upgrade("INFO", "清理过期备份：{}".format(name))
-                except OSError:
-                    pass
+        temp_dir = os.environ.get("TEMP") or ""
+        if temp_dir and os.path.isdir(temp_dir):
+            legacy = []
+            for name in os.listdir(temp_dir):
+                if name.startswith("drcom_backup_") and name.endswith(".py"):
+                    legacy.append(name)
+            legacy.sort(reverse=True)  # 最新在前
+            if legacy:
+                newest = os.path.join(temp_dir, legacy[0])
+                if os.path.isfile(newest):
+                    # v2.0.4.2：**不再**据此宣告"升级完成"。备份是升级前随手落的，
+                    # 拿它比 hash 会把"任何一次脚本改动（含手动热补丁）"误判成"升级成功" ——
+                    # 真机上就出现过"绿 banner 说已升级，实际还是旧版本"（22:41 那次日志）。
+                    # 成功与否一律由下面的尝试记录（目标版本 vs 当前版本）判定。
+                    current_hash = _sha256_hex(os.path.join(BASE_DIR, "联网_service.py"))
+                    backup_hash = _sha256_hex(newest)
+                    if current_hash and backup_hash and current_hash != backup_hash:
+                        _log_upgrade("INFO", "启动钩子：联网_service.py 与最近备份不同（可能是升级，也可能只是本地改动）")
+                    else:
+                        _log_upgrade("INFO", "启动钩子：未检测到脚本变更")
+                cutoff = time.time() - BACKUP_RETENTION_DAYS * 86400
+                for name in legacy[1:]:
+                    p = os.path.join(temp_dir, name)
+                    try:
+                        if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                            os.remove(p)
+                            _log_upgrade("INFO", "清理过期备份：{}".format(name))
+                    except OSError:
+                        pass
+        else:
+            _log_upgrade("WARN", "启动钩子：%TEMP% 不可用（{!r}），跳过旧式备份清理".format(temp_dir))
+    except Exception as exc:  # noqa: BLE001
+        _log_upgrade("WARN", "启动钩子：扫旧式备份异常（{}），继续后面的步骤".format(exc))
 
-        # —— B) 整目录备份（v2.0.11.0 起）：清过期（最新 2 份永远保留）+ 报可用清单 ——
-        try:
-            _prune_backups()
-        except Exception as exc:  # noqa: BLE001  清理失败不该拖垮后面的自愈步骤
-            logger.warning("清理过期备份异常: %s", exc)
-        try:
-            _log_upgrade("INFO", "可用回滚备份：{}".format(
-                "、".join("v{}".format(b["version"]) for b in _list_backups()) or "无"))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("列备份失败: %s", exc)
+    # —— B) 整目录备份（v2.0.11.0 起）：清过期（最新 2 份永远保留）+ 报可用清单 ——
+    try:
+        _prune_backups()
+    except Exception as exc:  # noqa: BLE001  清理失败不该拖垮后面的自愈步骤
+        logger.warning("清理过期备份异常: %s", exc)
+    try:
+        _log_upgrade("INFO", "可用回滚备份：{}".format(
+            "、".join("v{}".format(b["version"]) for b in _list_backups()) or "无"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("列备份失败: %s", exc)
 
-        # —— v2.0.4.0：用尝试记录确认"上次自动升级到底装上没有" ——
-        # 之前只比对备份 hash，无法区分"同版本重装"与"根本没装上"，
-        # 于是装不上时既没有告警、也没有熔断。
+    # —— C) v2.0.4.0：用尝试记录确认"上次自动升级到底装上没有" ——
+    # 之前只比对备份 hash，无法区分"同版本重装"与"根本没装上"，
+    # 于是装不上时既没有告警、也没有熔断。
+    try:
         attempt = _read_update_attempt()
         target = attempt.get("target")
         if target and attempt.get("state") != "success":
@@ -1963,31 +2186,50 @@ def _post_upgrade_startup():
                 _log_upgrade("WARN", "上次自动升级未生效：目标 {}，当前仍为 {}（installer 被拦截/挂起？见 logs/installer-silent.log）".format(target, VERSION))
                 _write_update_attempt(target, count=count, state="failed")
                 _set_update_state(update_last_error="上次自动升级未生效（目标 {}）".format(target))
+    except Exception as exc:  # noqa: BLE001
+        _log_upgrade("WARN", "启动钩子：确认上次升级结果异常（{}）".format(exc))
 
-        # —— v2.0.4.2：读升级执行器留下的结果（退出码 / 服务状态）并清掉残留 ——
-        # v2.0.4.3：带 8 秒宽限 —— 服务是安装器在 ssPostInstall 拉起来的，
-        # 那一刻执行器还在等 installer 退出（随后才写 rc），立刻读会读空。
+    # —— D) v2.0.4.2：读升级执行器留下的结果（退出码 / 服务状态）并清掉残留 ——
+    # v2.0.4.3：带 8 秒宽限 —— 服务是安装器在 ssPostInstall 拉起来的，
+    # 那一刻执行器还在等 installer 退出（随后才写 rc），立刻读会读空。
+    # 审计 G1：同步等待保留（防与探针互相等），更晚落盘的 health= / rollback= 由 G) 延迟复核。
+    try:
         _report_update_runner_result(wait_sec=8)
         _cleanup_update_leftovers()
+    except Exception as exc:  # noqa: BLE001
+        _log_upgrade("WARN", "启动钩子：读执行器结果 / 清理残留异常（{}）".format(exc))
 
+    # —— E) AppExit ——
+    try:
         # AppExit 策略归**安装器**所有（P0-7）：setup.iss / install.bat 统一设
-        # `Default Ignore` + `0 Ignore`（防端口冲突时 NSSM 死循环重启）。
+        # Default Ignore + 0 Ignore（防端口冲突时 NSSM 死循环重启）。
         # 这里**不再写回 Restart** —— 旧行为每次启动都把 v2.0.2.3 刚修的
         #「端口占用无限重启循环」修复原样撤销，且与 setup.iss 的 Ignore 打架。
         _log_upgrade("INFO", "AppExit 策略由安装器维持（Default Ignore / 0 Ignore），启动钩子不再覆盖")
-        # v2.0.4.0 例外：AppExit 被写成**空串**时（NSSM 合法值里没有空值，会让
-        # NSSM 每次启停都报 "Parameter AppExit requires a subparameter"）自愈回合法值。
+        # v2.0.4.0 例外 / 审计 E2：不是「Default Ignore + 0 Ignore」就纠偏（绝不写 Restart）。
         appexit = _ensure_nssm_appexit_sane()
         if appexit:
             _log_upgrade("INFO", "AppExit 现状：{}".format(appexit))
+    except Exception as exc:  # noqa: BLE001
+        _log_upgrade("WARN", "启动钩子：AppExit 自愈异常（{}）".format(exc))
 
+    # —— F) 托盘自启 ——
+    try:
         # v2.0.6.2：托盘自启项自愈 —— 新任务没法靠旧版本的 /TASKS 传，
         # 只能由服务每次启动自己对齐（详见 _ensure_tray_autostart_sane 的注释）
         tray = _ensure_tray_autostart_sane()
         _log_upgrade("INFO", "托盘自启项：action={} want={} 现值={}".format(
             tray.get("action"), tray.get("want"), tray.get("current") or "不存在"))
     except Exception as exc:  # noqa: BLE001
-        _log_upgrade("WARN", "启动钩子异常: {}".format(exc))
+        _log_upgrade("WARN", "启动钩子：托盘自启对齐异常（{}）".format(exc))
+
+    # —— G) 延迟复核执行器结果（审计 G1）——
+    # 同步只做「看一眼」（上面最多等 8 秒）；health= 与 rollback= 都更晚才落盘，
+    # 这里起 daemon 线程 75 秒后再读一次，读完删 rc 防重复上报（不阻塞 HTTP 绑定）。
+    try:
+        _start_deferred_runner_recheck()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("启动升级结果延迟复核线程失败: %s", exc)
 
 
 def _report_update_runner_result(wait_sec=0):
@@ -1996,20 +2238,24 @@ def _report_update_runner_result(wait_sec=0):
     v2.0.4.2 新增；v2.0.4.3 加 `wait_sec` —— 服务是由安装器在 `ssPostInstall` 拉起来的，
     那一刻执行器还在等 installer 进程退出（随后才写 rc），立刻读会读空。
     所以发现执行器还在时，最多等 `wait_sec` 秒（只在刚升级完的那一次启动发生）。
+
+    审计 G1：返回 True 表示这次真的读到了 rc（延迟复核线程据此决定是否删除 rc）。
+    审计 A2：rollback 结论区分 OK / FAIL / SKIP / USELESS 四种 —— USELESS 表示回滚脚本
+    成功了但回滚后仍不健康，**绝不能**当成「回滚成功」上报。
     """
     rc = _rc_path()
     deadline = time.time() + max(0, int(wait_sec or 0))
     while not os.path.isfile(rc) and os.path.isfile(_wrapper_path()) and time.time() < deadline:
         time.sleep(1.0)
     if not os.path.isfile(rc):
-        return
+        return False
     try:
         with open(rc, "r", encoding="utf-8", errors="replace") as f:
             lines = [l.strip() for l in f if l.strip()]
     except OSError:
-        return
+        return False
     if not lines:
-        return
+        return False
     detail = " / ".join(lines)
     failed = any(("installer_rc=" in l and not l.endswith("=0")) for l in lines)
     if failed:
@@ -2034,6 +2280,12 @@ def _report_update_runner_result(wait_sec=0):
                              "多半只是启动慢于探测窗口。若反复出现，请看 logs\\service_stderr.log".format(detail))
     elif health == "SKIP":
         _log_upgrade("WARN", "升级看门狗：本次没做 HTTP 健康探测（缺内嵌 python 或探测脚本），只看服务状态")
+    elif health == "PORT_BUSY":
+        # 审计 A2：探针两轮都失败，但 service_stderr.log 里有 FATAL / bind —— 端口被占。
+        # 旧代码同样绑不上，回滚零收益，执行器已跳过回滚（rollback=SKIP）。
+        _log_upgrade("WARN", "升级看门狗：探测失败疑似**端口被占用**（service_stderr.log 里有 FATAL/bind 字样）；"
+                             "旧代码同样绑不上端口，自动回滚零收益，已跳过（rollback=SKIP）。"
+                             "请先解决端口冲突，或改配置里的 ui_port 后重启服务")
 
     # v2.0.11.0：自动回滚结论。执行器在「两轮都不健康」时会用升级前那份备份还原代码 ——
     #   成功：本进程跑的是**回滚后**的代码（若回滚回了旧版本，那个旧版本不认识这行，
@@ -2059,6 +2311,66 @@ def _report_update_runner_result(wait_sec=0):
         )
     elif rollback == "SKIP":
         _log_upgrade("WARN", "升级看门狗：没做自动回滚（缺备份 / 内嵌 python / 回滚脚本），只做了重启重试")
+    elif rollback == "USELESS":
+        # 审计 A2：回滚脚本成功（rollback=OK 已落盘），但回滚后最后一次 health 仍非 OK ——
+        # 回滚没有救回来，可能要继续人工处理。绝不宣称「回滚成功」。
+        _log_upgrade("ERROR", "升级看门狗：自动回滚**没有奏效**（rollback=USELESS：回滚脚本成功，"
+                              "但回滚后服务仍不健康）—— 可能需要人工处理：请重新运行安装包，"
+                              "或在 Web UI「配置 → 自动升级」里手动回滚")
+        _set_update_state(
+            update_state="error",
+            update_progress_message="回滚后仍不健康，可能需要人工处理",
+            update_last_error="上次升级失败，回滚后仍不健康，可能需要人工处理（详见 logs\\upgrade.log）",
+        )
+    return True
+
+
+# 审计 G1：同步钩子只能等 8 秒（那时 rc 里通常只有 installer_rc 一行），
+# health=（5 秒 ping + 20 秒探测）与 rollback=（32 秒+）都还没落盘；但又不能同步等 ——
+# 探针探的正是本进程的 HTTP 端口，两边互等就是死锁。
+# 所以：同步「看一眼」，75 秒后再复核一次并把结论写进状态机（daemon 线程，不影响启动）。
+DEFERRED_RECHECK_DELAY_SEC = 75
+
+
+def _deferred_runner_recheck(delay_sec=None):
+    """延迟复核执行器结果（审计 G1）。返回是否真的读到并上报了。
+
+    服务是安装器在 ssPostInstall 里拉起的：同步钩子只能等 8 秒，那时执行器通常才刚写完
+    installer_rc=；health= 与 rollback= 更晚落盘。本函数 sleep ~75 秒后再读一次，
+    把 health= / rollback= 的结论真正写进状态机（UI 才看得到「回滚了 / 回滚失败 / 回滚无用」）。
+
+    读完**删除 rc**，防止同一份结果被下一次启动重复上报；陈旧清理是 5 分钟
+    （UPDATE_LEFTOVER_STALE_SEC），75 秒的间隔来得及，不会被提前删掉。
+    """
+    wait = DEFERRED_RECHECK_DELAY_SEC if delay_sec is None else delay_sec
+    try:
+        time.sleep(max(0.0, float(wait)))
+    except (TypeError, ValueError):
+        time.sleep(DEFERRED_RECHECK_DELAY_SEC)
+    if not os.path.isfile(_rc_path()):
+        return False
+    try:
+        reported = _report_update_runner_result(wait_sec=0)
+    except Exception as exc:  # noqa: BLE001  延迟线程不能因为一次异常静默消失
+        logger.warning("延迟复核升级结果异常: %s", exc)
+        return False
+    if not reported:
+        return False
+    try:
+        os.remove(_rc_path())
+        _log_upgrade("INFO", "延迟复核完成：执行器结果已写入状态并清理（防重复上报）")
+    except OSError as exc:
+        logger.warning("清理执行器结果文件失败: %s", exc)
+    return True
+
+
+def _start_deferred_runner_recheck(delay_sec=None):
+    """起一个 daemon 线程做延迟复核（不阻塞启动钩子 / 不拖慢 HTTP 绑定，审计 G1）。"""
+    wait = DEFERRED_RECHECK_DELAY_SEC if delay_sec is None else delay_sec
+    thread = threading.Thread(target=_deferred_runner_recheck, args=(wait,),
+                              name="drcom-upgrade-recheck", daemon=True)
+    thread.start()
+    return thread
 
 
 def _cleanup_update_leftovers():
@@ -2100,12 +2412,19 @@ def _cleanup_update_leftovers():
             )
         except (OSError, subprocess.TimeoutExpired):
             pass
-    # 4) 已经装上的安装包
+    # 4) 已经装上的安装包（审计 E4 / I9：产物名以 setup.iss 为准）
+    # 新前缀 StardustFlashLink-Setup-v* + 历史前缀 DrcomAutoLogin-Setup-v* 都认，
+    # 否则改名之后旧残留永远清不掉（12 MB × 每次升级）。
     try:
         for name in os.listdir(_update_tmp_dir()):
-            if not (name.startswith("DrcomAutoLogin-Setup-v") and name.endswith(".exe")):
+            matched_prefix = None
+            for prefix in (INSTALLER_FILENAME_PREFIX, LEGACY_INSTALLER_FILENAME_PREFIX):
+                if name.startswith(prefix) and name.endswith(".exe"):
+                    matched_prefix = prefix
+                    break
+            if matched_prefix is None:
                 continue
-            ver = name[len("DrcomAutoLogin-Setup-v"):-len(".exe")]
+            ver = name[len(matched_prefix):-len(".exe")]
             if _compare_versions(VERSION, ver) == 0:
                 try:
                     os.remove(os.path.join(_update_tmp_dir(), name))
