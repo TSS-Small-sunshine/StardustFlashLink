@@ -47,6 +47,19 @@ impl Channel {
         self != Channel::Release
     }
 
+    /// **纯函数**：这条通道能不能收到 `candidate` 通道的版本？
+    ///
+    /// 自动更新的通道语义（与 2.x「只认非 prerelease」同源，只是分得更细 ✓）：
+    ///   - `Release` 只收 `Release`；
+    ///   - `Rc` 收 `Rc` / `Release`；
+    ///   - `Preview` 收 `Preview` / `Rc` / `Release`；
+    ///   - `Snapshot` 全收（开发/尝鲜 ✓）。
+    ///
+    /// 单调性由 `rank` 保证：**订阅越靠前的通道，能收到的越多** ✓。
+    pub fn accepts(self, candidate: Channel) -> bool {
+        candidate.rank() >= self.rank()
+    }
+
     /// 同一版本号内部的先后：snapshot < preview < rc < release。
     fn rank(self) -> u8 {
         match self {
@@ -226,5 +239,27 @@ mod tests {
         assert_eq!(Channel::parse("stable"), Some(Channel::Release));
         assert_eq!(Channel::parse(" beta "), Some(Channel::Preview));
         assert_eq!(Channel::parse("???"), None);
+    }
+
+    #[test]
+    fn subscription_channels_accept_only_what_they_should() {
+        // 正式通道：只收正式版（预览版/候选版一律不收 ✓ —— 这是 3.0 不打扰 2.x 用户的关键）
+        assert!(Channel::Release.accepts(Channel::Release));
+        assert!(!Channel::Release.accepts(Channel::Rc));
+        assert!(!Channel::Release.accepts(Channel::Preview));
+        assert!(!Channel::Release.accepts(Channel::Snapshot));
+        // 候选通道：收 RC + 正式版
+        assert!(Channel::Rc.accepts(Channel::Rc));
+        assert!(Channel::Rc.accepts(Channel::Release));
+        assert!(!Channel::Rc.accepts(Channel::Preview));
+        // 预览通道：收 preview / rc / release（**不收 snapshot** —— 快照只挂 CI artifact ✓）
+        assert!(Channel::Preview.accepts(Channel::Preview));
+        assert!(Channel::Preview.accepts(Channel::Rc));
+        assert!(Channel::Preview.accepts(Channel::Release));
+        assert!(!Channel::Preview.accepts(Channel::Snapshot));
+        // 快照通道：全收
+        for candidate in [Channel::Snapshot, Channel::Preview, Channel::Rc, Channel::Release] {
+            assert!(Channel::Snapshot.accepts(candidate), "快照通道应全收: {:?}", candidate);
+        }
     }
 }

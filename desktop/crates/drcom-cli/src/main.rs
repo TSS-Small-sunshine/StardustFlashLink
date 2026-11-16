@@ -14,8 +14,12 @@ mod server;
 
 use drcom_core::net::{self, PlainHttp};
 use drcom_core::{
-    channel::Version, config::Config, logfile::RotatingLog, platform, portal, protocol,
-    scheduler::Scheduler, secret, service, session, timefmt, Outcome, Status,
+    channel::{Channel, Version},
+    config::Config,
+    logfile::RotatingLog,
+    platform, portal, protocol,
+    scheduler::Scheduler,
+    secret, service, session, timefmt, update, Outcome, Status,
 };
 use std::time::{Duration, SystemTime};
 
@@ -63,6 +67,7 @@ fn run(args: Vec<String>) -> i32 {
         Some("autostart") => autostart_cmd(&args[1..]),
         Some("service") => service_cmd(&args[1..]),
         Some("checksum") => checksum_cmd(&args[1..]),
+        Some("update") => update_cmd(&args[1..]),
         Some("package-files") => package_files_cmd(&args[1..]),
         Some("archive") => archive_cmd(&args[1..]),
         Some("serve") => serve(&args[1..]),
@@ -90,6 +95,8 @@ fn print_help() {
          autostart on|off|status [--dry-run]    开机自启（当前用户级，免管理员 ✓；跑的是无界面循环）\n  \
          service install|uninstall|start|stop|restart|status [--dry-run]   注册成常驻服务（Windows 走 NSSM ✓）\n  \
          checksum [文件]             算 SHA-256（不给文件就算自己 ✓）—— 打包校验 / 升级凭据 ✓\n  \
+         update check [--channel C]  检查更新（只检查/下载/校验，**不自我替换** ✓）\n  \
+         update download <路径> [--channel C]   检查 + 下载 + SHA256 校验（失败会清理半成品 ✓）\n  \
          package-files --out DIR [--target T] [--exe E] [--arch A]   写出该平台随包分发的说明文件\n  \
          archive --out F.zip DIR...  打包目录成 ZIP（用自带实现 ✓，不需要外部 zip/tar ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
@@ -573,6 +580,144 @@ fn checksum_cmd(args: &[String]) -> i32 {
             eprintln!("{}", e);
             1
         }
+    }
+}
+
+/// update check / download：M4 自动更新的**第一块**（只检查 / 下载 / 校验，不自我替换 ✓）。
+///
+/// 通道默认取配置里的 update_channel（正式版 → 只认正式版 ✓；预览 → 认 preview/rc ✓），
+/// 可用 --channel 临时覆盖；auto_update_enabled 只影响「自动」，手动检查照跑 ✓。
+fn update_cmd(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("check") => update_check_cmd(&args[1..]),
+        Some("download") => update_download_cmd(&args[1..]),
+        Some(other) => {
+            eprintln!("未知的 update 子命令：{}（可用：check / download）", other);
+            2
+        }
+        None => {
+            eprintln!("用法: update check [--channel snapshot|preview|rc|release]");
+            eprintln!("      update download <目标路径> [--channel snapshot|preview|rc|release]");
+            2
+        }
+    }
+}
+
+/// **纯函数**：解析这次要用的通道（--channel 覆盖 > 配置 update_channel ✓）。
+fn resolve_update_channel(override_value: Option<&str>, config: &Config) -> Result<Channel, String> {
+    match override_value {
+        Some(raw) => Channel::parse(raw).ok_or_else(|| {
+            format!("通道写错了：{}（可用：snapshot / preview / rc / release）", raw)
+        }),
+        None => Ok(update::channel_from_config(config)),
+    }
+}
+
+/// 读配置：坏配置不阻塞检查（2.x 只读回退 / 默认值由 legacy 层处理 ✓）。
+fn config_for_update() -> (Config, String) {
+    match drcom_core::legacy::load_config() {
+        Ok(read) => {
+            let hint = if read.is_legacy() { read.legacy_hint() } else { String::new() };
+            (read.config, hint)
+        }
+        Err(error) => {
+            eprintln!("（读配置失败，先按默认值检查：{}）", error);
+            (Config::default(), String::new())
+        }
+    }
+}
+
+fn command_channel(args: &[String], config: &Config) -> Option<Channel> {
+    match resolve_update_channel(take_opt(args, "--channel").as_deref(), config) {
+        Ok(channel) => Some(channel),
+        Err(error) => {
+            eprintln!("{}", error);
+            None
+        }
+    }
+}
+
+/// update check：打印当前通道 / 最新版本 / 是否有更新 / 资产名 / 大小 / SHA256 / 下载 URL ✓。
+fn update_check_cmd(args: &[String]) -> i32 {
+    let (config, legacy_hint) = config_for_update();
+    let Some(channel) = command_channel(args, &config) else { return 2 };
+    println!("{} 自动更新检查", drcom_core::APP_NAME);
+    println!("当前版本: {}", drcom_core::app_version_string());
+    println!(
+        "自动更新: {}",
+        if config.auto_update_enabled {
+            "已启用 ✓"
+        } else {
+            "未启用（这次是手动检查 ✓）"
+        }
+    );
+    if !legacy_hint.is_empty() {
+        println!("配置来源: {}", legacy_hint);
+    }
+    // HTTPS 走系统 curl（std 没有 TLS；见 drcom_core::net::CurlHttp 的说明 ✓）
+    let http = net::CurlHttp;
+    let check = update::check_for_update(drcom_core::app_version(), channel, &http);
+    for line in update::report_lines(&check, channel) {
+        println!("{}", line);
+    }
+    match check {
+        update::UpdateCheck::UpToDate | update::UpdateCheck::Available { .. } => 0,
+        _ => 1,
+    }
+}
+
+/// update download：检查 + 下载 + SHA256 校验，**不安装 / 不自我替换** ✓。
+fn update_download_cmd(args: &[String]) -> i32 {
+    let raw_target = match args.first() {
+        Some(value) if !value.starts_with("--") => value.clone(),
+        _ => {
+            eprintln!("用法: update download <目标路径> [--channel snapshot|preview|rc|release]");
+            eprintln!("（目标路径可以是文件；给一个已存在的目录时用资产名当文件名 ✓）");
+            return 2;
+        }
+    };
+    let (config, legacy_hint) = config_for_update();
+    let Some(channel) = command_channel(args, &config) else { return 2 };
+    println!("{} 自动更新下载", drcom_core::APP_NAME);
+    println!("当前版本: {}", drcom_core::app_version_string());
+    if !legacy_hint.is_empty() {
+        println!("配置来源: {}", legacy_hint);
+    }
+    let http = net::CurlHttp;
+    let check = update::check_for_update(drcom_core::app_version(), channel, &http);
+    for line in update::report_lines(&check, channel) {
+        println!("{}", line);
+    }
+    let update::UpdateCheck::Available { asset, .. } = &check else {
+        println!("没有可下载的更新（没有改动任何文件 ✓）。");
+        return 1;
+    };
+    let dest = download_destination(&raw_target, &asset.name);
+    println!();
+    println!("开始下载并校验（SHA256 缺失会直接拒绝 ✓）...");
+    match update::download_and_verify(&http, asset, &dest) {
+        Ok(bytes) => {
+            println!("下载完成: {}（{} 字节）", dest.display(), bytes);
+            println!("SHA256: {}", asset.sha256.as_deref().unwrap_or("（缺失）"));
+            println!(
+                "文件已校验通过；**M4 这一块不会自我替换 / 安装**（Windows 正在运行的 exe 会被锁 ✗）"
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("{}", error);
+            1
+        }
+    }
+}
+
+/// **纯函数**：目标路径是已存在的目录 → 用资产名当文件名（避免把文件写成目录名 ✗）。
+fn download_destination(raw: &str, asset_name: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(raw);
+    if path.is_dir() {
+        path.join(asset_name)
+    } else {
+        path
     }
 }
 
@@ -1340,5 +1485,63 @@ mod tests {
         let shown = secret::scrub_url(&url);
         assert!(!shown.contains("TopSecret"), "干跑打印了密码 ✗: {}", shown);
         assert!(!shown.contains("http://"), "干跑打印了整条 URL ✗: {}", shown);
+    }
+
+    #[test]
+    fn update_cmd_validates_input_without_touching_the_network() {
+        assert_eq!(update_cmd(&[]), 2, "缺子命令要给用法 ✓");
+        assert_eq!(update_cmd(&["nope".to_string()]), 2, "未知子命令要给用法 ✓");
+        assert_eq!(
+            update_cmd(&["download".to_string()]),
+            2,
+            "download 缺目标路径要给用法 ✓"
+        );
+        // 通道写错 → 在联网之前就返回 2（测试因此不依赖真实网络 ✓）
+        assert_eq!(
+            update_cmd(&["check".to_string(), "--channel".to_string(), "nope".to_string()]),
+            2
+        );
+        assert_eq!(
+            update_cmd(&[
+                "download".to_string(),
+                "x.zip".to_string(),
+                "--channel".to_string(),
+                "??".to_string()
+            ]),
+            2
+        );
+    }
+
+    #[test]
+    fn update_channel_resolution_prefers_override_then_config() {
+        let mut cfg = Config::default();
+        assert_eq!(resolve_update_channel(None, &cfg).unwrap(), Channel::Release);
+        cfg.update_channel = drcom_core::config::UpdateChannel::Preview;
+        assert_eq!(resolve_update_channel(None, &cfg).unwrap(), Channel::Preview);
+        assert_eq!(resolve_update_channel(Some("snapshot"), &cfg).unwrap(), Channel::Snapshot);
+        assert_eq!(resolve_update_channel(Some("RC"), &cfg).unwrap(), Channel::Rc);
+        assert_eq!(resolve_update_channel(Some(" release "), &cfg).unwrap(), Channel::Release);
+        let err = resolve_update_channel(Some("nope"), &cfg).unwrap_err();
+        assert!(err.contains("通道写错了"), "{}", err);
+        assert!(err.contains("preview"), "错误里要列出可用通道: {}", err);
+    }
+
+    #[test]
+    fn download_destination_uses_asset_name_for_existing_dirs() {
+        let dir = std::env::temp_dir().join(format!("drcom-update-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(
+            download_destination(&dir.display().to_string(), "pkg.zip"),
+            dir.join("pkg.zip"),
+            "目录 → 用资产名 ✓"
+        );
+        let explicit = dir.join("explicit.zip");
+        assert_eq!(
+            download_destination(&explicit.display().to_string(), "pkg.zip"),
+            explicit,
+            "文件路径要原样用 ✓"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
