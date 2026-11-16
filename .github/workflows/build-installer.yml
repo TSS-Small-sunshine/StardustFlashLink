@@ -167,7 +167,7 @@ jobs:
             '        }',
             '    }',
             '    return $false',
-            '}',
+            '}'
           )
           Set-Content -LiteralPath $helper -Value $lines -Encoding utf8
 
