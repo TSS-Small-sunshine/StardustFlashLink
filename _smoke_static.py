@@ -3131,6 +3131,499 @@ check("维护 R2-J1：卸载显式清理托盘 Run 值与偏好键（不只靠 I
       and "DrcomAutoLoginTray" in _src_uninst2)
 
 
+# ============================================================
+# 维护第三轮（2026-11 升级链审计：D1 / D2 / D3 / D5 / F1 / F2）
+# 对应 _维护报告/audit/upgrade.md「自动升级链剩余 P2」；
+# 断言测行为（TEMP 沙箱 / 替身 / 假脚本内容），**不联网、不真装、不启动安装器**。
+# ============================================================
+_R3_MISSING = object()
+_R3_NAMES = (
+    "LOG_DIR", "UPGRADE_LOG_FILE", "logger", "BASE_DIR", "NSSM_PATH", "TOOLS_DIR",
+    "STATE", "STATE_LOCK", "UPDATE_LOCK", "STOP_EVENT",
+    "_load_config", "_save_config", "_now_iso",
+    "_check_disk_free_mb", "_probe_local_health", "_check_github_latest",
+    "_download_installer", "_launch_installer", "_read_nssm_appexit",
+)
+_r3_saved = {_k: au.__dict__.get(_k, _R3_MISSING) for _k in _R3_NAMES}
+_r3_saved_temp = os.environ.get("TEMP")
+_r3_root = tempfile.mkdtemp(prefix="drcom_r3_")
+_r3_app = os.path.join(_r3_root, "app")
+_r3_logs = os.path.join(_r3_root, "logs")
+for _d in (_r3_app, _r3_logs):
+    os.makedirs(_d, exist_ok=True)
+os.environ["TEMP"] = _r3_root
+_r3_state = {}
+_r3_logger = logging.getLogger("smoke_auto_update_r3")
+_r3_logger.addHandler(logging.NullHandler())
+au._attach(
+    logger=_r3_logger, state=_r3_state, state_lock=threading.Lock(), update_lock=threading.Lock(),
+    tools_dir=os.path.join(_r3_root, "tools"), nssm_path=os.path.join(_r3_root, "tools", "nssm.exe"),
+    upgrade_log_file=os.path.join(_r3_logs, "upgrade.log"), log_dir=_r3_logs, base_dir=_r3_app,
+    load_config=lambda: {}, save_config=lambda *a: None,
+    now_iso=lambda: "2026-11-16T00:00:00", stop_event=threading.Event())
+_r3_nssm_stub = os.path.join(_r3_root, "nssm_stub.exe")
+pathlib.Path(_r3_nssm_stub).write_bytes(b"stub")   # _do_update_now 会先判 isfile
+
+
+def _r3_log():
+    _lp = au.UPGRADE_LOG_FILE
+    return pathlib.Path(_lp).read_text(encoding="utf-8") if os.path.isfile(_lp) else ""
+
+
+def _r3_reset_log():
+    try:
+        if os.path.isfile(au.UPGRADE_LOG_FILE):
+            os.remove(au.UPGRADE_LOG_FILE)
+    except OSError:
+        pass
+
+
+def _r3_clear_files():
+    for _fp in (au._rc_path(), au._wrapper_path(), au._health_probe_path(),
+                au._rollback_script_path(), os.path.join(_r3_root, "drcom_rollback.rc")):
+        try:
+            if os.path.isfile(_fp):
+                os.remove(_fp)
+        except OSError:
+            pass
+
+
+# —— D5：生成脚本先 py_compile 校验（校验对象是脚本文件，不是项目模块）——
+_r3_good = os.path.join(_r3_root, "ok_script.py")
+_r3_bad = os.path.join(_r3_root, "bad_script.py")
+pathlib.Path(_r3_good).write_text("VALUE = 1\n", encoding="utf-8")
+pathlib.Path(_r3_bad).write_text("def broken(:\n    pass\n", encoding="utf-8")
+_r3_good_ok, _r3_good_detail = au._py_compile_script(_r3_good, "测试脚本")
+_r3_bad_ok, _r3_bad_detail = au._py_compile_script(_r3_bad, "测试脚本")
+check("维护 R3-D5：_py_compile_script 语法正确放行、语法错误拦截（并清理 .pyc 残留）",
+      _r3_good_ok is True and _r3_bad_ok is False
+      and "语法校验失败" in _r3_bad_detail
+      and not os.path.isfile(_r3_bad + ".pyc"),
+      repr((_r3_good_detail, _r3_bad_detail)))
+check("维护 R3-D5：校验器优先用随包内嵌 python，缺内嵌时退回当前解释器",
+      callable(getattr(au, "_upgrade_python_executable", None))
+      and isinstance(au._upgrade_python_executable(), str)
+      and os.path.isfile(au._upgrade_python_executable()),
+      repr(au._upgrade_python_executable()))
+
+# 正常模板生成的回滚脚本必须能过校验（默认升级路径不被误伤）
+for _n in ("联网_service.py", "version.py", "protocol.py", "web_api.py", "eula.py", "auto_update.py"):
+    pathlib.Path(os.path.join(_r3_app, _n)).write_text("# fake %s\n" % _n, encoding="utf-8")
+_r3_bk = au._backup_modules(version="1.2.3", note="维护第三轮")
+_r3_scr = au._write_rollback_script(backup_dir=_r3_bk, rc_path=os.path.join(_r3_root, "r3.rc"))
+_r3_scr_ok, _r3_scr_detail = au._py_compile_script(_r3_scr, "回滚脚本") if _r3_scr else (False, "未生成")
+check("维护 R3-D5：正常生成的回滚脚本/健康探针都能过 py_compile（升级路径不被误伤）",
+      bool(_r3_bk) and bool(_r3_scr) and _r3_scr_ok
+      and os.path.isfile(_r3_scr), repr((_r3_scr, _r3_scr_detail)))
+
+# 探针脚本语法坏掉（假内容）→ 同样必须在启动安装器之前中止
+_r3_saved_build_probe = au._build_health_probe_script
+_r3_probe_raised = None
+_r3_reset_log()
+try:
+    au._build_health_probe_script = lambda *a, **k: "def broken(:\n    pass\n"
+    au._launch_installer(os.path.join(_r3_root, "Fake-Setup.exe"), 8848, None)
+except au._GeneratedScriptError as _r3_probe_exc:
+    _r3_probe_raised = _r3_probe_exc
+finally:
+    au._build_health_probe_script = _r3_saved_build_probe
+check("维护 R3-D5：健康探测脚本语法校验失败也中止升级（不写执行器、不启动安装器）",
+      isinstance(_r3_probe_raised, au._GeneratedScriptError)
+      and not os.path.isfile(au._wrapper_path())
+      and "健康探测脚本生成后语法校验失败" in _r3_log(),
+      repr((_r3_probe_raised, _r3_log()[-140:])))
+_r3_clear_files()
+
+# 用假（语法坏掉的）模板内容触发：回滚脚本生成后校验失败 → 必须中止升级、不启动安装器
+_r3_saved_tpl = au._ROLLBACK_TEMPLATE
+_r3_saved_disk3 = au._check_disk_free_mb
+_r3_saved_cfg3 = au._load_config
+_r3_saved_probe3 = au._probe_local_health
+_r3_saved_latest3 = au._check_github_latest
+_r3_saved_dl3 = au._download_installer
+_r3_saved_appexit3 = au._read_nssm_appexit
+_r3_saved_nssm3 = au.NSSM_PATH
+_r3_saved_popen3 = au.subprocess.Popen
+_r3_popen_calls = []
+_r3_write_bad = None
+_r3_abort = None
+_r3_raised = None
+_r3_proc_stub = types.SimpleNamespace(pid=4321)
+
+
+def _r3_popen_guard(*a, **k):
+    """拦住「启动安装器」的 Popen：只记录 + 返回假进程，绝不真跑（py_compile 的子进程照常放行）。"""
+    _r3_name = str(a[0]) if a else ""
+    _r3_popen_calls.append(_r3_name)
+    if "Setup" in _r3_name:
+        return _r3_proc_stub
+    return _r3_saved_popen3(*a, **k)
+
+
+def _r3_fake_download(url, dest_path, expected_size, progress_callback=None, expected_sha256=None):
+    pathlib.Path(dest_path).write_bytes(b"fake-installer")
+    return 15
+
+
+try:
+    _r3_reset_log()
+    # ① 生成器本身：语法坏模板 → 返回 None 并删掉坏脚本（手动回滚路径的降级行为）
+    au._ROLLBACK_TEMPLATE = "def broken(:\n    pass\n"
+    _r3_write_bad = au._write_rollback_script(backup_dir=_r3_bk)
+    _r3_bad_deleted = not os.path.isfile(au._rollback_script_path())
+    # ② 升级路径：_do_update_now → _launch_installer 真跑校验 → 抛 _GeneratedScriptError
+    au.NSSM_PATH = _r3_nssm_stub
+    au._check_disk_free_mb = lambda: 99999
+    au._load_config = lambda: {"update_min_free_disk_mb": 0, "ui_port": 8848}
+    au._probe_local_health = lambda *a, **k: (True, "http=200 ok=true")
+    au._check_github_latest = lambda: ("9.9.9", "https://example.invalid/x.exe", "0" * 64, 1, None)
+    au._download_installer = _r3_fake_download
+    au._read_nssm_appexit = lambda *a, **k: None
+    au.subprocess.Popen = _r3_popen_guard
+    _r3_abort = au._do_update_now()
+finally:
+    au._ROLLBACK_TEMPLATE = _r3_saved_tpl
+    au.NSSM_PATH = _r3_saved_nssm3
+    au._check_disk_free_mb = _r3_saved_disk3
+    au._load_config = _r3_saved_cfg3
+    au._probe_local_health = _r3_saved_probe3
+    au._check_github_latest = _r3_saved_latest3
+    au._download_installer = _r3_saved_dl3
+    au._read_nssm_appexit = _r3_saved_appexit3
+    au.subprocess.Popen = _r3_saved_popen3
+_r3_abort_log = _r3_log()
+check("维护 R3-D5：回滚脚本生成后语法校验失败 → 升级中止（中文 error），不写执行器、不启动安装器",
+      isinstance(_r3_abort, dict) and _r3_abort.get("ok") is False
+      and "已中止升级" in (_r3_abort.get("error") or "")
+      and "语法校验失败" in (_r3_abort.get("error") or "")
+      and not [c for c in _r3_popen_calls if "Setup" in c]
+      and not os.path.isfile(au._wrapper_path())
+      and _r3_state.get("update_state") == "error"
+      and "语法校验失败" in (_r3_state.get("update_last_error") or "")
+      and "本次升级中止" in _r3_abort_log,
+      repr((_r3_abort, _r3_popen_calls, _r3_state.get("update_state"))))
+check("维护 R3-D5：手动回滚路径拿不到坏脚本（返回 None 且坏脚本已删除）",
+      _r3_write_bad is None and _r3_bad_deleted,
+      repr((_r3_write_bad, _r3_bad_deleted)))
+_r3_attempt_after_abort = au._read_update_attempt()
+check("维护 R3-D5：校验失败算一次失败尝试（熔断计数照常，不会无限重试）",
+      _r3_attempt_after_abort.get("state") == "failed"
+      and int(_r3_attempt_after_abort.get("count") or 0) >= 1,
+      repr(_r3_attempt_after_abort))
+check("维护 R3-D5：_GeneratedScriptError 是 OSError 子类（旧兜底逻辑不失效）",
+      issubclass(au._GeneratedScriptError, OSError)
+      and "except _GeneratedScriptError" in src_upd
+      and "raise_on_invalid=True" in src_upd)
+_r3_clear_files()
+
+# —— D3：回滚脚本优先用内嵌 python（缺内嵌退回 sys.executable），注释与代码一致 ——
+_r3_py_used = au._upgrade_python_executable()
+check("维护 R3-D3：回滚/校验统一走 _upgrade_python_executable（内嵌优先，退回 sys.executable）",
+      isinstance(_r3_py_used, str) and os.path.isfile(_r3_py_used)
+      and "args = [_upgrade_python_executable(), path" in src_upd
+      and 'sys.executable, path, "--backup"' not in src_upd,
+      repr(_r3_py_used))
+
+# —— D1：manifest 原子写（.tmp + os.replace）——
+_r3_real_replace = os.replace
+_r3_replace_calls = []
+
+
+def _r3_rec_replace(src, dst):
+    _r3_replace_calls.append((str(src), str(dst)))
+    return _r3_real_replace(src, dst)
+
+
+os.replace = _r3_rec_replace
+try:
+    _r3_bk_atomic = au._backup_modules(version="1.2.4", note="原子写")
+finally:
+    os.replace = _r3_real_replace
+_r3_man_path = os.path.join(_r3_bk_atomic or "", au.BACKUP_MANIFEST_NAME)
+check("维护 R3-D1：manifest 原子写（先写 .tmp 再 os.replace，不留半截清单）",
+      bool(_r3_bk_atomic) and os.path.isfile(_r3_man_path)
+      and any(s.endswith("manifest.json.tmp") and d == _r3_man_path for s, d in _r3_replace_calls)
+      and not os.path.isfile(_r3_man_path + ".tmp"),
+      repr(_r3_replace_calls))
+check("维护 R3-D1：清单读回可用（原子写之后 _list_backups 仍认这份备份）",
+      any(b["version"] == "1.2.4" for b in au._list_backups()))
+
+# —— D1 / D2：prune 清理半成品（无 manifest 且超过 1 天）但绝不误删新目录；keep 语义真实生效 ——
+_r3_app_keep = os.path.join(_r3_root, "app_keep")
+os.makedirs(_r3_app_keep, exist_ok=True)
+_r3_saved_base3 = au.BASE_DIR
+_r3_old_mtime = time.time() - 8 * 86400
+try:
+    au.BASE_DIR = _r3_app_keep
+    # 4 份「合法但已过期」的备份：最新 2 份必须被 keep 住，另外 2 份按 7 天删
+    _r3_keep_plan = (("7.0.1", "2027-01-01T00:00:00"), ("7.0.2", "2027-01-02T00:00:00"),
+                     ("7.0.3", "2027-01-03T00:00:00"), ("7.0.4", "2027-01-04T00:00:00"))
+    for _ver, _created in _r3_keep_plan:
+        _bd = au._backup_dir_for(_ver)
+        os.makedirs(_bd)
+        pathlib.Path(os.path.join(_bd, "version.py")).write_text("# %s\n" % _ver, encoding="utf-8")
+        au._write_backup_manifest(_bd, {"version": _ver, "created_at": _created,
+                                        "files": {"version.py": "x"},
+                                        "rollback_files": ["version.py"]})
+        os.utime(_bd, (_r3_old_mtime, _r3_old_mtime))
+    # 半成品：旧（8 天前，必须清掉） / 新（mtime 现在，可能正在备份，绝不能动）
+    _r3_orphan_old = au._backup_dir_for("8.8.8")
+    os.makedirs(_r3_orphan_old)
+    pathlib.Path(os.path.join(_r3_orphan_old, "version.py")).write_text("# half\n", encoding="utf-8")
+    os.utime(_r3_orphan_old, (_r3_old_mtime, _r3_old_mtime))
+    _r3_orphan_new = au._backup_dir_for("8.8.7")
+    os.makedirs(_r3_orphan_new)
+    pathlib.Path(os.path.join(_r3_orphan_new, "version.py")).write_text("# half\n", encoding="utf-8")
+    _r3_reset_log()
+    au._prune_backups()
+    _r3_left = sorted(os.listdir(au._backup_root()))
+    _r3_prune_log = _r3_log()
+finally:
+    au.BASE_DIR = _r3_saved_base3
+check("维护 R3-D1：半成品备份目录（有目录、无合法 manifest 且 mtime 超过 1 天）被清理",
+      "8.8.8" not in _r3_left and "清理半成品备份目录" in _r3_prune_log
+      and "8.8.8" in _r3_prune_log,
+      repr(_r3_left))
+check("维护 R3-D1：mtime 新的半成品目录（可能正在备份）绝不误删",
+      "8.8.7" in _r3_left, repr(_r3_left))
+check("维护 R3-D2：prune keep 不再死代码 —— 全部过期也至少保留最新 2 份，其余按 7 天删",
+      "7.0.4" in _r3_left and "7.0.3" in _r3_left
+      and "7.0.2" not in _r3_left and "7.0.1" not in _r3_left,
+      repr(_r3_left))
+
+# —— F1：抢锁失败不再静默丢弃（写 last_error / state=error / upgrade.log）——
+_r3_reset_log()
+au._set_update_state(update_state=None, update_last_error=None, update_progress_message="")
+_r3_state["update_lock"] = True
+try:
+    _r3_f1_update = au._do_update_now()
+    _r3_f1_check = au._do_check_now()
+finally:
+    _r3_state["update_lock"] = False
+_r3_f1_log = _r3_log()
+check("维护 R3-F1：_do_update_now / _do_check_now 抢锁失败 → 中文 last_error + state=error + 升级日志",
+      isinstance(_r3_f1_update, dict) and _r3_f1_update.get("ok") is False
+      and isinstance(_r3_f1_check, dict) and _r3_f1_check.get("ok") is False
+      and "另一项升级任务正在进行，本次请求未执行" in (_r3_f1_update.get("error") or "")
+      and _r3_state.get("update_state") == "error"
+      and "本次请求未执行" in (_r3_state.get("update_last_error") or "")
+      and "另一项升级任务正在进行" in _r3_f1_log,
+      repr((_r3_f1_update, _r3_f1_check, _r3_state.get("update_last_error"))))
+
+# —— F2：reset_update_attempt 清空熔断计时（3 次失败后自动重试恢复），且未 attach 时不炸 ——
+au._write_update_attempt("9.9.9", count=3, state="failed")
+_r3_blocked_before, _r3_blocked_reason = au._auto_retry_blocked("9.9.9")
+_r3_reset_log()
+_r3_reset_ok = au.reset_update_attempt("冒烟重置")
+_r3_blocked_after, _r3_blocked_after_reason = au._auto_retry_blocked("9.9.9")
+_r3_reset_log_txt = _r3_log()
+check("维护 R3-F2：reset_update_attempt 清空失败计时（3 次熔断 → 自动重试恢复）",
+      _r3_blocked_before is True and "已停止自动重试" in _r3_blocked_reason
+      and _r3_reset_ok is True
+      and not os.path.isfile(au._attempt_file())
+      and _r3_blocked_after is False,
+      repr((_r3_blocked_before, _r3_blocked_after, _r3_reset_ok)))
+check("维护 R3-F2：重置落一条中文 upgrade.log（UI 后续接线的入口有据可查）",
+      "已重置自动升级熔断" in _r3_reset_log_txt, repr(_r3_reset_log_txt[-160:]))
+check("维护 R3-F2：死分支 state==\"success\" 已删除（成功只走 _clear_update_attempt）",
+      '    if rec.get("state") == "success":' not in src_upd
+      and "def reset_update_attempt(" in src_upd)
+_r3_na_saved = {_k: au.__dict__.get(_k, _R3_MISSING) for _k in
+                ("LOG_DIR", "UPGRADE_LOG_FILE", "logger")}
+for _k in _r3_na_saved:
+    au.__dict__.pop(_k, None)
+try:
+    _r3_na_result = au.reset_update_attempt("未 attach")
+finally:
+    for _k, _v in _r3_na_saved.items():
+        if _v is _R3_MISSING:
+            au.__dict__.pop(_k, None)
+        else:
+            au.__dict__[_k] = _v
+check("维护 R3-F2：reset_update_attempt 未 attach（无 LOG_DIR）时不炸（返回 False）",
+      _r3_na_result is False, repr(_r3_na_result))
+
+# —— 沙箱收尾：还原注入点 / TEMP，别影响隐私守卫与版本一致性 ——
+_r3_clear_files()
+for _k, _v in _r3_saved.items():
+    if _v is _R3_MISSING:
+        au.__dict__.pop(_k, None)
+    else:
+        au.__dict__[_k] = _v
+if _r3_saved_temp is None:
+    os.environ.pop("TEMP", None)
+else:
+    os.environ["TEMP"] = _r3_saved_temp
+shutil.rmtree(_r3_root, ignore_errors=True)
+
+
+# ============================================================
+# 维护第三轮（2026-11：metrics / profiles / protocol / CI）
+# C-11 / C-18 / C-21 / C-24 / C-25 / P2-7 / P2-11 / P2-12 / P2-16
+# ============================================================
+
+# —— R3-C24：面板延迟测量加 TTL 缓存（请求线程不再每次最多卡 3 秒）——
+_mt3 = importlib.import_module("metrics")
+_mt3_calls = []
+_mt3_orig_measure = _mt3.measure_latency
+_mt3.measure_latency = lambda h, p: (_mt3_calls.append((h, p)), 17)[1]
+try:
+    _mt3._LATENCY_CACHE = {"key": None, "at": 0.0, "value": None}
+    _l1 = _mt3.cached_latency("10.0.0.1", 80, now_epoch=1000)
+    _l2 = _mt3.cached_latency("10.0.0.1", 80, now_epoch=1010)
+    _l3 = _mt3.cached_latency("10.0.0.1", 80, now_epoch=1040)
+    _l4 = _mt3.cached_latency("10.0.0.2", 80, now_epoch=1041)
+finally:
+    _mt3.measure_latency = _mt3_orig_measure
+check("维护 R3-C24：延迟测量 30 秒 TTL 缓存（同目标复用，超时/换目标才重测）",
+      (_l1, _l2, _l3, _l4) == (17, 17, 17, 17) and len(_mt3_calls) == 3,
+      "calls=%d" % len(_mt3_calls))
+
+# —— R3-C25：轮转瞬间丢文件不再丢整段归档（重试一次）——
+_mt3_seq = {"n": 0}
+_mt3_orig_once = _mt3._read_log_once
+
+
+def _mt3_flaky(path, max_bytes):
+    _mt3_seq["n"] += 1
+    if _mt3_seq["n"] == 1:
+        raise FileNotFoundError(path)
+    return ["轮转后读到的行"]
+
+
+_mt3._read_log_once = _mt3_flaky
+try:
+    _rot_lines = _mt3.read_log_tail("whatever.log")
+finally:
+    _mt3._read_log_once = _mt3_orig_once
+check("维护 R3-C25：日志轮转瞬间读不到文件会重试一次（不丢整段归档）",
+      _rot_lines == ["轮转后读到的行"] and _mt3_seq["n"] >= 2,
+      repr((_rot_lines, _mt3_seq["n"])))
+
+# —— R3-C11：方案保存与切换用同一套合法取值（不再「能存不能切」）——
+_pf3 = importlib.import_module("profiles")
+check("维护 R3-C11：方案保存就按切换口径校验（间隔 / 账号 / 后缀 / host）",
+      _pf3.validate_values({"auto_check_interval_min": 10}) != []
+      and _pf3.validate_values({"account": "abc123"}) != []
+      and _pf3.validate_values({"suffix": "@xx"}) != []
+      and _pf3.validate_values({"host": "a b"}) != []
+      and _pf3.validate_values({"auto_check_interval_min": 30, "account": "2023001",
+                                "suffix": "@yd", "host": "172.16.80.3"}) == [],
+      repr(_pf3.validate_values({"auto_check_interval_min": 10})))
+_pf3._attach(allowed_intervals=(15, 30), allowed_suffixes=("", "@yd"))
+try:
+    _pf3_ok15 = _pf3.validate_values({"auto_check_interval_min": 15}) == []
+    _pf3_bad5 = _pf3.validate_values({"auto_check_interval_min": 5}) != []
+finally:
+    _pf3._attach(allowed_intervals=(5, 15, 30, 60, 120),
+                 allowed_suffixes=("", "@yd", "@dx", "@lt"))
+check("维护 R3-C11：服务层注入的合法取值会被方案校验使用（单一来源）",
+      _pf3_ok15 and _pf3_bad5, repr((_pf3_ok15, _pf3_bad5)))
+
+# —— R3-C21：host 白名单 + 网关给的 v4ip / olmac 先校验形状 ——
+check("维护 R3-C21：配置校验拒绝带空格 / 斜杠的 host（结构性防御）",
+      svc._validate_config(dict(svc._default_config(), host="a b")) != []
+      and svc._validate_config(dict(svc._default_config(), host="a/b")) != []
+      and svc._validate_config(dict(svc._default_config(), host="172.16.80.3")) == [])
+
+
+class _R3Resp(object):
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_proto3 = importlib.import_module("protocol")
+_r3_open = _proto3.urllib.request.urlopen
+try:
+    _proto3.urllib.request.urlopen = lambda req, timeout=None: _R3Resp(
+        b'cb({"result":1,"v4ip":"10.9.9.9/evil","olmac":"ZZ:QQ"})')
+    _r3_ip_bad, _r3_mac_bad = _proto3.discover_network("10.0.0.1")
+    _proto3.urllib.request.urlopen = lambda req, timeout=None: _R3Resp(
+        b'cb({"result":1,"v4ip":"10.1.2.3","olmac":"aa:bb:cc:dd:ee:ff"})')
+    _r3_ip_ok, _r3_mac_ok = _proto3.discover_network("10.0.0.1")
+finally:
+    _proto3.urllib.request.urlopen = _r3_open
+check("维护 R3-C21：网关给的 v4ip / olmac 过形状白名单（坏值不拼进登录 URL）",
+      _r3_ip_bad != "10.9.9.9/evil" and _r3_mac_bad == ""
+      and _r3_ip_ok == "10.1.2.3" and _r3_mac_ok == "AABBCCDDEEFF",
+      repr((_r3_ip_bad, _r3_mac_bad, _r3_ip_ok, _r3_mac_ok)))
+
+# —— R3-C18：wait_network 可被停止信号打断（不再等满 timeout）——
+_r3_event = threading.Event()
+_r3_orig_stop = _proto3._STOP_EVENT
+_r3_orig_conn = _proto3.socket.create_connection
+_proto3._STOP_EVENT = _r3_event
+_proto3.socket.create_connection = lambda *a, **k: (_ for _ in ()).throw(OSError("不可达"))
+threading.Timer(1.0, _r3_event.set).start()
+_r3_t0 = time.time()
+try:
+    _r3_wait = _proto3.wait_network("10.255.255.1", 9, 30)
+finally:
+    _proto3._STOP_EVENT = _r3_orig_stop
+    _proto3.socket.create_connection = _r3_orig_conn
+_r3_cost = time.time() - _r3_t0
+check("维护 R3-C18：wait_network 收到停止信号立即返回（不再等完 timeout）",
+      _r3_wait is False and _r3_cost < 5, "cost=%.2fs" % _r3_cost)
+
+# —— R3-CI：注入面 / quotePath / 双线白名单 / 批处理延迟展开 ——
+_wf3 = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+_pr3 = pathlib.Path(".github/scripts/pr_review.py").read_text(encoding="utf-8")
+check("维护 R3-CI：PR 机器人 git 调用关闭 core.quotePath（中文文件名不再被转义）",
+      "core.quotePath=false" in _pr3)
+check("维护 R3-CI：双线隔离白名单包含主服务脚本 联网_service.py",
+      "联网_service.py" in _pr3)
+_inst3 = pathlib.Path("install.bat").read_text(encoding="utf-8", errors="replace")
+_uninst3 = pathlib.Path("uninstall.bat").read_text(encoding="utf-8", errors="replace")
+check("维护 R3-CI：批处理里不再用会被提前展开的 %ERRORLEVEL%",
+      "%ERRORLEVEL%" not in _inst3 and "%ERRORLEVEL%" not in _uninst3,
+      "install=%d uninstall=%d" % (_inst3.count("%ERRORLEVEL%"), _uninst3.count("%ERRORLEVEL%")))
+
+
+# —— R3-F2：熔断重置已接线（业务函数 + API 字段只增）——
+_src_upd3 = pathlib.Path("auto_update.py").read_text(encoding="utf-8")
+_src_web3 = pathlib.Path("web_api.py").read_text(encoding="utf-8")
+check("维护 R3-F2：reset_update_attempt 可用，且 /api/update/install 支持 reset_attempt 字段",
+      "def reset_update_attempt(" in _src_upd3
+      and "reset_attempt" in _src_web3
+      and "reset_update_attempt(" in _src_web3)
+
+# —— R3-CI：输入注入面 / quotePath / 双线白名单 / 批处理延迟展开 ——
+_wf3 = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+_pb3 = pathlib.Path(".github/workflows/pr-bot.yml").read_text(encoding="utf-8")
+_pr3b = pathlib.Path(".github/scripts/pr_review.py").read_text(encoding="utf-8")
+check("维护 R3-CI：workflow 输入通过 env 注入（run 块里不再直接拼表达式）",
+      "INPUT_TITLE" in _wf3 and "$env:INPUT_TITLE" in _wf3
+      and "GIT_REF" in _wf3 and "$env:GIT_REF" in _wf3
+      and _wf3.count("github.event.inputs.title") == 1,
+      "count=%d" % _wf3.count("github.event.inputs.title"))
+check("维护 R3-CI：PR Bot 的 base_ref 也走 env（不再拼进 shell）",
+      "BASE_REF" in _pb3 and '--base-ref "$BASE_REF"' in _pb3
+      and _pb3.count("github.base_ref") == 2,
+      "count=%d" % _pb3.count("github.base_ref"))
+check("维护 R3-CI：PR 机器人 git 调用关闭 core.quotePath（中文文件名不再被转义）",
+      _pr3b.count("core.quotePath=false") >= 2,
+      "count=%d" % _pr3b.count("core.quotePath=false"))
+check("维护 R3-CI：双线隔离白名单包含主服务脚本 联网_service.py",
+      "联网_service.py" in _pr3b)
+_inst3 = pathlib.Path("install.bat").read_text(encoding="utf-8", errors="replace")
+_uninst3 = pathlib.Path("uninstall.bat").read_text(encoding="utf-8", errors="replace")
+check("维护 R3-CI：批处理不再用会被括号块提前展开的 %ERRORLEVEL%",
+      "=%ERRORLEVEL%" not in _inst3 and "=%ERRORLEVEL%" not in _uninst3,
+      "install=%d uninstall=%d" % (_inst3.count("=%ERRORLEVEL%"), _uninst3.count("=%ERRORLEVEL%")))
+check("维护 R3-CI：卸载脚本不再硬编码桌面 / 开始菜单路径（OneDrive 重定向也能删）",
+      "%USERPROFILE%\\Desktop" not in _uninst3
+      and "%APPDATA%\\Microsoft" not in _uninst3)
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -3219,7 +3712,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.2", version.VERSION == "2.1.3.2", version.VERSION)
+check("版本 = 2.1.3.3", version.VERSION == "2.1.3.3", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
