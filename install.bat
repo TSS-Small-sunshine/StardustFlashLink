@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.2)
+REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.3)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
 REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
 REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
@@ -20,7 +20,7 @@ REM ============================================================
 net session >nul 2>&1
 if errorlevel 1 (
     echo [INFO] 当前非管理员，重启提升权限...
-    set "ELEVATE_PS1_NAME=drcom_elevate_%RANDOM%.ps1"
+    set "ELEVATE_PS1_NAME=drcom_elevate_!RANDOM!.ps1"
     powershell -NoProfile -Command "try { $ErrorActionPreference='Stop'; $p = Join-Path ([IO.Path]::GetTempPath()) $env:ELEVATE_PS1_NAME; $body = 'Start-Process -FilePath $args[0] -Verb RunAs'; [IO.File]::WriteAllText($p, $body, (New-Object Text.UTF8Encoding $true)); Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$p,$env:INSTALL_BAT_PATH } catch { Write-Host ('ELEVATE_FAIL: ' + $_.Exception.Message); exit 1 }"
     exit /b
 )
@@ -36,7 +36,7 @@ set "LOG_DIR=!SCRIPT_DIR!\logs"
 
 echo.
 echo ============================================================
-echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.2)
+echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.3)
 echo ============================================================
 echo   脚本目录: !SCRIPT_DIR!
 echo ============================================================
@@ -72,7 +72,7 @@ if "!PYTHON!"=="" (
     )
 )
 if "!PYTHON!"=="" (
-    for /d %%d in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+    for /d %%d in ("!LOCALAPPDATA!\Programs\Python\Python3*") do (
         if not defined PYTHON if exist "%%d\python.exe" set "PYTHON=%%d\python.exe"
     )
 )
@@ -110,9 +110,11 @@ if exist "!NSSM!" (
 
     REM 把目标 zip 路径 + .ps1 名称放到环境变量（Unicode 安全）
     set "NSSM_ZIP_PATH=!TMP!\nssm.zip"
-    set "NSSM_DL_PS1_NAME=drcom_nssm_dl_%RANDOM%.ps1"
+    set "NSSM_DL_PS1_NAME=drcom_nssm_dl_!RANDOM!.ps1"
     powershell -NoProfile -Command "try { $ErrorActionPreference='Stop'; $p = Join-Path ([IO.Path]::GetTempPath()) $env:NSSM_DL_PS1_NAME; $body='try { Invoke-WebRequest -Uri ''https://nssm.cc/release/nssm-2.24.zip'' -OutFile $env:NSSM_ZIP_PATH -UseBasicParsing; Write-Host ''NSSM_OK'' } catch { Write-Host (''NSSM_FAIL: '' + $_.Exception.Message); exit 1 }'; [IO.File]::WriteAllText($p, $body, (New-Object Text.UTF8Encoding $true)); & powershell -NoProfile -ExecutionPolicy Bypass -File $p; $rc=$LASTEXITCODE; Remove-Item $p -Force -ErrorAction SilentlyContinue; exit $rc } catch { Write-Host ('FAIL: ' + $_.Exception.Message); exit 1 }"
-    set "NSSM_DL_RC=%ERRORLEVEL%"
+    REM 审计 P2-16：块内取退出码必须用延迟展开写法 —— 百分号写法在解析整个 if 块时就已展开，
+    REM 拿到的是块执行前的陈旧值：下载失败却判成功 / 反之，后面 tar 才炸、错误信息误导 ✗
+    set "NSSM_DL_RC=!ERRORLEVEL!"
     if !NSSM_DL_RC! neq 0 (
         echo [ERROR] 下载 NSSM 失败，请检查网络后重试
         pause
@@ -167,7 +169,7 @@ if errorlevel 1 (
 
 "!NSSM!" set DrcomAutoLogin AppDirectory "!SCRIPT_DIR!"
 "!NSSM!" set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"
-"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.2）"
+"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.3）"
 "!NSSM!" set DrcomAutoLogin Start SERVICE_AUTO_START
 "!NSSM!" set DrcomAutoLogin AppStdout "!LOG_DIR!\service_stdout.log"
 "!NSSM!" set DrcomAutoLogin AppStderr "!LOG_DIR!\service_stderr.log"
@@ -196,11 +198,12 @@ REM 把快捷方式名 + .ps1 名称放到环境变量（Unicode 安全）
 set "SHORTCUT_NAME=Dr.COM 配置.url"
 set "SHORTCUT_PS1_NAME=drcom_shortcut_%RANDOM%.ps1"
 powershell -NoProfile -Command "try { $ErrorActionPreference='Stop'; $p = Join-Path ([IO.Path]::GetTempPath()) $env:SHORTCUT_PS1_NAME; $body='$ErrorActionPreference=''Stop''; $s=[Environment]::GetFolderPath(''StartMenu''); $n=$env:SHORTCUT_NAME; $content=''[InternetShortcut]''+[Environment]::NewLine+''URL=http://127.0.0.1:8848''; $desktopCandidates=@([Environment]::GetFolderPath(''Desktop''), (Join-Path $env:USERPROFILE ''Desktop''), (Join-Path $env:PUBLIC ''Desktop'')); $desktop=$null; foreach ($c in $desktopCandidates) { if ($c -and (Test-Path -LiteralPath $c -PathType Container)) { $desktop=$c; break } }; $ok=$false; try { if ($desktop) { [IO.File]::WriteAllText((Join-Path $desktop $n), $content, [Text.Encoding]::ASCII); $ok=$true } else { Write-Host ''DESKTOP_SKIP: no valid Desktop path'' }; [IO.File]::WriteAllText((Join-Path $s (Join-Path ''Programs'' $n)), $content, [Text.Encoding]::ASCII); Write-Host ''SHORTCUT_OK''; exit 0 } catch { Write-Host (''SHORTCUT_FAIL: ''+$_.Exception.Message); exit 1 }'; [IO.File]::WriteAllText($p, $body, (New-Object Text.UTF8Encoding $true)); & powershell -NoProfile -ExecutionPolicy Bypass -File $p; $rc=$LASTEXITCODE; Remove-Item $p -Force -ErrorAction SilentlyContinue; exit $rc } catch { Write-Host ('FAIL: ' + $_.Exception.Message); exit 1 }"
-set "SHORTCUT_RC=%ERRORLEVEL%"
+REM 审计 P2-16：统一用延迟展开的退出码（这里虽在块外，但与块内写法保持同一口径）
+set "SHORTCUT_RC=!ERRORLEVEL!"
 if !SHORTCUT_RC! neq 0 (
     echo [WARN] 创建快捷方式失败，可手动打开 http://127.0.0.1:8848
 ) else (
-    echo [INFO] 桌面快捷方式已创建: %USERPROFILE%\Desktop\Dr.COM 配置.url
+    echo [INFO] 桌面快捷方式已创建: !SHORTCUT_NAME!（实际目录由 PowerShell GetFolderPath 解析，兼容 OneDrive 重定向）
     echo [INFO] 开始菜单快捷方式已创建
 )
 

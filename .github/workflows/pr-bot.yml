@@ -33,14 +33,19 @@ jobs:
           fetch-depth: 0
 
       - name: 取基线分支（用于 diff）
-        run: git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+        env:
+          # 审计 P2-7：base_ref 由 PR 作者选择的目标分支决定 —— 不能直接拼进 shell ✗
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
 
       - name: 自动审核
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 审计 P2-7：同上 —— 通过 env 注入，不把表达式拼进 shell
+          BASE_REF: ${{ github.base_ref }}
         run: |
           python3 .github/scripts/pr_review.py \
             --event "$GITHUB_EVENT_PATH" \
             --repo "$GITHUB_REPOSITORY" \
             --token "$GITHUB_TOKEN" \
-            --base-ref "${{ github.base_ref }}"
+            --base-ref "$BASE_REF"

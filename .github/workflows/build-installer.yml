@@ -39,6 +39,19 @@ concurrency:
 jobs:
   build:
     runs-on: windows-latest
+    # 审计 P2-7：GitHub 表达式只在 env: 里求值，禁止拼进 shell 脚本正文 ——
+    # workflow_dispatch 标题 / 分支名 / tag 名里若带引号、分号或 $(...)，拼进 PowerShell 就是命令注入。
+    # 脚本里一律读 $env:XXX（push 事件没有 inputs，对应值为空串，语义与原来的空表达式一致）。
+    env:
+      INPUT_TITLE: ${{ github.event.inputs.title }}
+      INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+      INPUT_ALLOW_REPUBLISH: ${{ github.event.inputs.allow_republish }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+      GIT_REF: ${{ github.ref }}
+      REPO_SLUG: ${{ github.repository }}
+      COMMIT_SHA: ${{ github.sha }}
+      RUN_NUMBER: ${{ github.run_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,8 +148,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ("${{ github.ref_type }}" -eq "tag") {
-            $v = "${{ github.ref_name }}" -replace '^v',''
+          if ($env:REF_TYPE -eq "tag") {
+            $v = "$env:REF_NAME" -replace '^v',''
           } else {
             # 从 version.py 读 VERSION（避免硬编码）
             $versionFile = "version.py"
@@ -230,7 +243,7 @@ jobs:
           $titleFile = Join-Path $env:RUNNER_TEMP "release-title-installer.txt"
           $renderArgs = @(
             ".github/scripts/render_release_notes.py",
-            "--repo", "${{ github.repository }}",
+            "--repo", $env:REPO_SLUG,
             "--template", "packaging/RELEASE-NOTES-installer.md",
             "--channel", "installer",
             "--version", "$env:APP_VERSION",
@@ -239,8 +252,8 @@ jobs:
             "--asset", $exe.Name,
             "--size", "$($exe.Length)",
             "--sha256", $sha,
-            "--commit", "${{ github.sha }}",
-            "--run", "${{ github.run_number }}",
+            "--commit", $env:COMMIT_SHA,
+            "--run", $env:RUN_NUMBER,
             "--prev-tag", "$env:APP_PREV_TAG",
             "--out-file", $notesFile,
             "--title-out", $titleFile
@@ -248,14 +261,14 @@ jobs:
           & python @renderArgs
           if ($LASTEXITCODE -ne 0) { throw "发布说明渲染失败（详见上面的 [错误] 行）" }
 
-          if ("${{ github.event.inputs.dry_run }}" -eq "true") {
+          if ($env:INPUT_DRY_RUN -eq "true") {
             Write-Host "===== dry_run：渲染结果（不创建 / 不覆盖 release）====="
             Get-Content $notesFile -Raw
             exit 0
           }
 
-          if ("${{ github.ref }}" -ne "refs/heads/main") {
-            Write-Host "::warning::非 main 的构建只产出安装包 artifact，不发布 release（审计 P2-6；ref=${{ github.ref }}）"
+          if ($env:GIT_REF -ne "refs/heads/main") {
+            Write-Host "::warning::非 main 的构建只产出安装包 artifact，不发布 release（审计 P2-6；ref=$env:GIT_REF）"
             exit 0
           }
 
@@ -283,7 +296,7 @@ jobs:
           $titleFile = Join-Path $env:RUNNER_TEMP "release-title-$tag.txt"
           $renderArgs = @(
             ".github/scripts/render_release_notes.py",
-            "--repo", "${{ github.repository }}",
+            "--repo", $env:REPO_SLUG,
             "--template", "packaging/RELEASE-NOTES.md",
             "--channel", "versioned",
             "--version", "$env:APP_VERSION",
@@ -292,8 +305,8 @@ jobs:
             "--asset", $exe.Name,
             "--size", "$($exe.Length)",
             "--sha256", $sha,
-            "--commit", "${{ github.sha }}",
-            "--run", "${{ github.run_number }}",
+            "--commit", $env:COMMIT_SHA,
+            "--run", $env:RUN_NUMBER,
             "--prev-tag", "$env:APP_PREV_TAG",
             "--out-file", $notesFile,
             "--title-out", $titleFile
@@ -301,14 +314,14 @@ jobs:
           & python @renderArgs
           if ($LASTEXITCODE -ne 0) { throw "发布说明渲染失败（详见上面的 [错误] 行）" }
 
-          if ("${{ github.event.inputs.dry_run }}" -eq "true") {
+          if ($env:INPUT_DRY_RUN -eq "true") {
             Write-Host "===== dry_run：渲染结果（不创建 / 不覆盖 release）====="
             Get-Content $notesFile -Raw
             exit 0
           }
 
-          if ("${{ github.ref }}" -ne "refs/heads/main") {
-            Write-Host "::warning::非 main 的构建只产出安装包 artifact，不发布正式版 release（审计 P2-6；ref=${{ github.ref }}）"
+          if ($env:GIT_REF -ne "refs/heads/main") {
+            Write-Host "::warning::非 main 的构建只产出安装包 artifact，不发布正式版 release（审计 P2-6；ref=$env:GIT_REF）"
             exit 0
           }
 
@@ -317,13 +330,13 @@ jobs:
           $title = (Get-Content $titleFile -Raw).Trim()
           $old = gh release view $tag --json name 2>$null | ConvertFrom-Json
           if ($old -and $old.name) { $title = $old.name }
-          if ("${{ github.event.inputs.title }}" -ne "") { $title = "${{ github.event.inputs.title }}" }
+          if ($env:INPUT_TITLE -ne "") { $title = $env:INPUT_TITLE }
           # 审计 P1-1：同名版本 release 已存在 = version.py 没递增。旧行为是
           # delete + create（tag 被挪到新提交、同版本换本体）—— 已装客户端拿 remote==local
           # 就判「已是最新」，这次构建的补丁永远到不了用户 ✗。
           # 默认拒绝覆盖（CI 只给 warning，不红）；确需重发同一版本时显式 allow_republish。
           gh release view $tag 2>$null | Out-Null
-          if ($LASTEXITCODE -eq 0 -and "${{ github.event.inputs.allow_republish }}" -ne "true") {
+          if ($LASTEXITCODE -eq 0 -and $env:INPUT_ALLOW_REPUBLISH -ne "true") {
             Write-Host "::warning::v$env:APP_VERSION 的 release 已存在 —— 版本号没有递增，已跳过正式版发布（installer 固定链接照常更新）。要重发同一版本请用 workflow_dispatch 且 allow_republish=true；否则请先 bump version.py。"
             gh release view $tag --json url,tagName,isPrerelease,assets
             exit 0
