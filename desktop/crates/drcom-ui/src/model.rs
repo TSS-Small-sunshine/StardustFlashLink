@@ -33,7 +33,9 @@ pub struct Dashboard {
 pub fn collect() -> Dashboard {
     let status = Status::collect();
     let os = platform::Os::current();
-    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    // 读配置统一走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时只读沿用 ✓
+    let read = drcom_core::legacy::load_config_or_default();
+    let cfg = read.config.clone();
     let errors = cfg.validate();
 
     Dashboard {
@@ -55,16 +57,33 @@ pub fn collect() -> Dashboard {
             None => "未启用方案".to_string(),
         },
         data_dir_line: shorten(&status.data_dir, 42),
-        config_line: if !platform::config_path().exists() {
-            "未初始化".to_string()
-        } else if errors.is_empty() {
-            "正常".to_string()
-        } else {
-            format!("{} 个问题", errors.len())
-        },
+        // 2.x 只读兼容时必须在界面上说清来源（不然用户以为已经迁移完了 ✗，审计 P1-3）
+        config_line: config_line_of(read.from, platform::config_path().exists(), errors.len()),
         service_line: os.service_flavor().to_string(),
         // 只是初值 ✓ —— 真正的状态由 worker 线程每秒刷进界面 ✓
         background_line: "后台检查启动中…".to_string(),
+    }
+}
+
+/// 配置状态行（**纯函数** → 单测能覆盖 ✓）。
+///
+/// 2.x 只读兼容时**必须**显示来源（审计 P1-3）：否则界面说「未初始化 / 正常」，
+/// 用户会以为 3.0 已经在用自己的配置了 ✗。
+pub fn config_line_of(from: drcom_core::LoadedFrom, own_config_exists: bool, errors: usize) -> String {
+    if from.is_legacy() {
+        return if errors == 0 {
+            "来自 2.x 安装目录（只读兼容）".to_string()
+        } else {
+            format!("来自 2.x（只读兼容）· {} 个问题", errors)
+        };
+    }
+    if !own_config_exists {
+        return "未初始化".to_string();
+    }
+    if errors == 0 {
+        "正常".to_string()
+    } else {
+        format!("{} 个问题", errors)
     }
 }
 
@@ -110,20 +129,31 @@ pub fn shorten(text: &str, limit: usize) -> String {
 /// 「立即检查」：读配置 + 密码 → 跑一次 [`session::check_once`] → （颜色, 文本）✓
 pub fn run_check() -> (String, String) {
     let cfg_path = platform::config_path();
-    let mut cfg = match Config::load(&cfg_path) {
-        Ok(cfg) => cfg,
-        // 配置文件还不存在 = **首次运行的正常状态** ✓ → 给可执行的指引，而不是抛系统错误 ✗
-        Err(_) if !cfg_path.exists() => {
-            return (
-                "warn".to_string(),
-                format!(
-                    "还没初始化配置（首次运行正常 ✓）\n需要先在下面这个文件里填认证网关与账号：\n{}\n字段：host（网关地址）、account（账号）、suffix（后缀）",
-                    cfg_path.display()
-                ),
-            );
-        }
+    // 读配置走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时**只读**沿用 2.x 的 ✓
+    let read = match drcom_core::legacy::load_config() {
+        Ok(read) => read,
         Err(e) => return ("danger".to_string(), e),
     };
+    // 两边都没有配置 = **首次运行的正常状态** ✓ → 给可执行的指引，而不是抛系统错误 ✗
+    if read.from == drcom_core::LoadedFrom::Default {
+        return (
+            "warn".to_string(),
+            format!(
+                "还没初始化配置（首次运行正常 ✓）\n需要先在下面这个文件里填认证网关与账号：\n{}\n字段：host（网关地址）、account（账号）、suffix（后缀）",
+                cfg_path.display()
+            ),
+        );
+    }
+    // 2.x 只读兼容：在结果里写明来源，别让用户以为已经迁移到 3.0 了 ✗
+    let legacy_note = if read.is_legacy() {
+        format!(
+            "来源：{}（只读兼容，2.x 的文件不会被改动 ✓）\n",
+            read.legacy_hint()
+        )
+    } else {
+        String::new()
+    };
+    let mut cfg = read.config;
 
     // 位置自适应：Wi-Fi 命中自动方案就切过去（**尾缀一起换** ✓，这就是「校内公共场合不带 @yd」的落地）
     let mut adapt_note = String::new();
@@ -148,7 +178,8 @@ pub fn run_check() -> (String, String) {
         return (
             "warn".to_string(),
             format!(
-                "账号还没填 —— 请在 {} 里写 account\n（密码写到 {}，一行密码；只有安装包模板提示行算注释）",
+                "{}账号还没填 —— 请在 {} 里写 account\n（密码写到 {}，一行密码；只有安装包模板提示行算注释）",
+                legacy_note,
                 cfg_path.display(),
                 platform::password_path().display()
             ),
@@ -173,7 +204,8 @@ pub fn run_check() -> (String, String) {
         return (
             "warn".to_string(),
             format!(
-                "{}{}\n（当前 Wi-Fi: {} · 本机 IP: {}）\n—— 去「设置」里把白名单改对，或关掉网络位置守卫 ✓",
+                "{}{}{}\n（当前 Wi-Fi: {} · 本机 IP: {}）\n—— 去「设置」里把白名单改对，或关掉网络位置守卫 ✓",
+                legacy_note,
                 adapt_note,
                 verdict.reason,
                 probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
@@ -187,7 +219,8 @@ pub fn run_check() -> (String, String) {
     (
         kind.to_string(),
         format!(
-            "{}{}\n（在线探测: {:?} · 回调: {}）\n—— 3.0 预览版目前只做「一次检查」，常驻后台在 M3 ✓",
+            "{}{}{}\n（在线探测: {:?} · 回调: {}）\n—— 3.0 预览版目前只做「一次检查」，常驻后台在 M3 ✓",
+            legacy_note,
             adapt_note,
             report.outcome.summary_cn(),
             report.online,
@@ -340,8 +373,8 @@ pub struct SettingsView {
 
 /// 「测试连接」：用**表单里的值**跑一次检查（**不保存** ✓）。
 pub fn settings_test(input: &FormInput) -> (String, String) {
-    let config_path = platform::config_path();
-    let base = Config::load(&config_path).unwrap_or_default();
+    // 基线走 legacy 兼容层：3.0 还没配置、2.x 有时，表单里显示 2.x 的值（只读，不改 2.x ✓）
+    let base = drcom_core::legacy::load_config_or_default().config;
     let form = input.to_form(&base);
     let errors = form.validate(&base);
     if !errors.is_empty() {
@@ -383,7 +416,7 @@ pub fn settings_test(input: &FormInput) -> (String, String) {
 
 /// 读配置 → 设置窗口的显示数据 ✓（只读 ✓）
 pub fn settings_view() -> SettingsView {
-    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    let cfg = drcom_core::legacy::load_config_or_default().config;
     let input = FormInput::from_config(&cfg);
     let form = input.to_form(&cfg);
     let has_password = drcom_core::password::is_set();
@@ -411,7 +444,8 @@ pub fn settings_view() -> SettingsView {
 /// 保存设置（界面点「保存」）→（颜色, 文案）✓
 pub fn settings_save(input: &FormInput) -> (String, String) {
     let config_path = platform::config_path();
-    let base = Config::load(&config_path).unwrap_or_default();
+    // 基线走 legacy 兼容层：3.0 还没配置、2.x 有时，表单里显示 2.x 的值（只读，不改 2.x ✓）
+    let base = drcom_core::legacy::load_config_or_default().config;
     let form = input.to_form(&base);
     match form.save_to(&base, &config_path, &drcom_core::password::path()) {
         Ok(()) => (
@@ -443,7 +477,7 @@ pub struct ProfilesView {
 
 /// 读配置 → 方案页数据 ✓（只读 ✓）
 pub fn profiles_view() -> ProfilesView {
-    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    let cfg = drcom_core::legacy::load_config_or_default().config;
     profiles_view_of(&cfg)
 }
 
@@ -490,7 +524,8 @@ fn profile_name_ready(name: &str) -> Result<String, String> {
 /// 把**当前表单里的值**存成一个新方案（名字 + 匹配 Wi-Fi 名来自界面 ✓）。
 pub fn profile_save(input: &FormInput, name: &str, match_ssids: &str) -> (String, String) {
     let config_path = platform::config_path();
-    let base = Config::load(&config_path).unwrap_or_default();
+    // 基线走 legacy 兼容层：3.0 还没配置、2.x 有时，表单里显示 2.x 的值（只读，不改 2.x ✓）
+    let base = drcom_core::legacy::load_config_or_default().config;
     let normalized = match profile_name_ready(name) {
         Ok(value) => value,
         Err(e) => return ("danger".to_string(), e),
@@ -525,8 +560,8 @@ pub fn profile_save(input: &FormInput, name: &str, match_ssids: &str) -> (String
 /// 应用（切到）某个方案 ✓
 pub fn profile_activate(name: &str) -> (String, String) {
     let config_path = platform::config_path();
-    let mut cfg = match Config::load(&config_path) {
-        Ok(cfg) => cfg,
+    let mut cfg = match drcom_core::legacy::load_config() {
+        Ok(read) => read.config,
         Err(e) => return ("danger".to_string(), e),
     };
     match drcom_core::profiles::activate(&mut cfg, name) {
@@ -548,8 +583,8 @@ pub fn profile_activate(name: &str) -> (String, String) {
 /// 删除某个方案 ✓（删「当前方案」只清标记，**配置值不动** ✓）
 pub fn profile_delete(name: &str) -> (String, String) {
     let config_path = platform::config_path();
-    let mut cfg = match Config::load(&config_path) {
-        Ok(cfg) => cfg,
+    let mut cfg = match drcom_core::legacy::load_config() {
+        Ok(read) => read.config,
         Err(e) => return ("danger".to_string(), e),
     };
     match drcom_core::profiles::delete(&mut cfg, name) {
@@ -564,8 +599,8 @@ pub fn profile_delete(name: &str) -> (String, String) {
 /// 打开 / 关闭「按 Wi-Fi 自动切换」✓
 pub fn profile_set_auto(enabled: bool) -> (String, String) {
     let config_path = platform::config_path();
-    let mut cfg = match Config::load(&config_path) {
-        Ok(cfg) => cfg,
+    let mut cfg = match drcom_core::legacy::load_config() {
+        Ok(read) => read.config,
         Err(e) => return ("danger".to_string(), e),
     };
     cfg.profiles_auto_switch = enabled;
@@ -629,6 +664,24 @@ mod tests {
         assert!(!dash.target_line.is_empty());
         assert!(dash.channel_line.contains("预览版"), "{}", dash.channel_line);
         assert!(dash.service_line.len() > 3);
+    }
+
+    #[test]
+    fn config_line_shows_the_legacy_source_instead_of_pretending_it_is_ours() {
+        use drcom_core::LoadedFrom;
+        // 2.x 只读兼容：必须显示来源，不许说「未初始化 / 正常」✗（审计 P1-3）
+        assert_eq!(
+            config_line_of(LoadedFrom::Legacy, false, 0),
+            "来自 2.x 安装目录（只读兼容）"
+        );
+        let with_errors = config_line_of(LoadedFrom::Legacy, false, 2);
+        assert!(with_errors.contains("2.x"), "{}", with_errors);
+        assert!(with_errors.contains("2 个问题"), "{}", with_errors);
+        assert!(!config_line_of(LoadedFrom::Legacy, false, 0).contains("未初始化"));
+        // 3.0 自己的配置：原有口径不变 ✓
+        assert_eq!(config_line_of(LoadedFrom::Own, true, 0), "正常");
+        assert_eq!(config_line_of(LoadedFrom::Own, false, 0), "未初始化");
+        assert_eq!(config_line_of(LoadedFrom::Own, true, 3), "3 个问题");
     }
 
     #[test]

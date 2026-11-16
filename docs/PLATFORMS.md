@@ -123,7 +123,10 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 ## 5. 开放决策
 
 1. ~~UI 壳：Tauri 还是 Slint？~~ **已定：Slint 原生控件**（2026-09-28，理由见第 2 节）✓
-2. **配置迁移**：3.0 直接读 2.x 的 `config.json` / `password.txt`（推荐，老用户零迁移成本）？
+2. ~~配置迁移：3.0 直接读 2.x 的 `config.json` / `password.txt`？~~ **已定：只读兼容回退**（2026-11-16）✓
+   —— 3.0 数据目录没有自己的文件时，自动只读读取 2.x 安装目录（默认 `%ProgramFiles%\DrcomAutoLogin`，
+   可用 `DRCOM_DATA_DIR` 覆盖）；**绝不写回 / 移动 / 改名 2.x 文件**，界面与 `/api/status` 会标明来源；
+   代码见 `core/src/legacy.rs`（审计 P1-3）。
 3. **Linux 守护**：默认 `systemd --user`（无需 root）✓，是否需要额外支持 OpenRC（Alpine 等）？
 4. **ARMv7 上的 GUI**：交叉编译 Slint（需要 GL/X 的 sysroot）打算放到 M3 收尾；
    ARMv7 在 M1–M2 阶段先保证 **headless 核心**可用（树莓派/服务器场景本来就不需要界面 ✓）。

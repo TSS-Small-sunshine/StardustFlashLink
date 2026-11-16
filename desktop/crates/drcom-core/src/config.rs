@@ -224,6 +224,17 @@ impl Config {
         }
     }
 
+    /// **严格只读**地解析配置文件：**解析失败也不备份 / 不改名 / 不写盘** ✓。
+    ///
+    /// 为什么单独一个入口：2.x 安装目录里的 `config.json` **不是 3.0 的数据**（R3 / 审计 P1-3），
+    /// 3.0 只允许读它 ✗ —— 而 [`Config::load`] 在解析失败时会把文件改名成 `.bad-*`，
+    /// 那等于**擅自改动了 2.x 的文件** ✗。legacy 兼容路径必须走这个函数 ✓。
+    pub fn load_readonly(path: &Path) -> Result<Config, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("读不了配置文件 {}: {}", path.display(), e))?;
+        Config::from_json(&text)
+    }
+
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -469,6 +480,24 @@ mod tests {
             "保存默认值之后备份必须还在 ✓"
         );
         assert!(tmp_leftovers(&dir).is_empty(), "保存走 atomicfile，不留 tmp ✓");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn readonly_load_never_touches_a_corrupt_file() {
+        let dir = temp_dir("readonly");
+        let path = dir.join("config.json");
+        let broken = "{\"port\": \"不是数字\"}";
+        std::fs::write(&path, broken).unwrap();
+        // legacy 路径用这个：只读、不解救、不改名 —— 2.x 的文件一个字节都不许动 ✗
+        let err = Config::load_readonly(&path).expect_err("坏配置仍然是 Err");
+        assert!(err.contains("解析失败"), "错误要可读: {}", err);
+        assert!(path.exists(), "只读解析**不许**把文件改名/删掉 ✗");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken, "内容必须逐字节不变 ✓");
+        assert!(bad_backups(&dir).is_empty(), "只读解析不许留 .bad-* 备份 ✗: {:?}", bad_backups(&dir));
+        // 正常文件照样读得出来 ✓
+        std::fs::write(&path, "{\"host\":\"10.1.2.3\"}").unwrap();
+        assert_eq!(Config::load_readonly(&path).unwrap().host, "10.1.2.3");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

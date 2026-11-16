@@ -16,7 +16,7 @@
 //! 判定逻辑（[`should_run`]）是纯函数 → 单测覆盖 ✓；真正的检查复用 CLI 那条链路
 //! （`guard_allows` → `session::check_once` ✓），所以两边行为一致 ✓。
 
-use drcom_core::{config::Config, net::PlainHttp, netwatch, platform, service, session};
+use drcom_core::{net::PlainHttp, netwatch, service, session};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -124,8 +124,9 @@ fn now_clock() -> String {
 
 /// 跑一次检查（与 CLI 同一条链路 ✓）。
 fn check_once() -> String {
-    let cfg = match Config::load(&platform::config_path()) {
-        Ok(cfg) => cfg,
+    // 读配置走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时只读沿用 2.x 的账号/网关 ✓
+    let cfg = match drcom_core::legacy::load_config() {
+        Ok(read) => read.config,
         Err(e) => return format!("读配置失败：{}", e),
     };
     if !cfg.auto_check_enabled {
@@ -179,7 +180,8 @@ fn run_loop(state: Arc<Mutex<WorkerState>>, stop: Arc<AtomicBool>) {
         }
 
         // ② 便宜通道：主用地址变了 → 立刻查 ✓
-        let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+        // 同上：便宜通道只关心网关地址，读法保持一致 ✓
+        let cfg = drcom_core::legacy::load_config_or_default().config;
         let address = drcom_core::net::local_ip_towards(&cfg.host, cfg.port);
         let mut decision = watcher.observe_address(address);
 

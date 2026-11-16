@@ -120,7 +120,9 @@ impl SettingsForm {
     /// 保存到默认位置 ✓
     pub fn save(&self) -> Result<(), String> {
         let config_path = platform::config_path();
-        let base = Config::load(&config_path).unwrap_or_default();
+        // 基线走 legacy 兼容层：3.0 还没配置、2.x 有时，保存出来的是一份**新的 3.0 配置**
+        // （取 2.x 的值 + 表单改动），2.x 的文件本身一个字节不动 ✓（审计 P1-3）。
+        let base = crate::legacy::load_config_or_default().config;
         self.save_to(&base, &config_path, &password::path())
     }
 }
