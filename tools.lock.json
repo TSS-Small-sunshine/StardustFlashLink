@@ -1,0 +1,99 @@
+{
+  "lock_version": 1,
+  "updated_at": "2026-11-16",
+  "generator": "supply-fixer（审计 P2-4 / J7 供应链收口）",
+  "scope": "CI（.github/workflows/build-installer.yml）、本地构建（packaging/build.ps1）、源码部署安装脚本（install.bat）真正下载的**固定版本**上游文件。哈希值由本机实际下载后用 Get-FileHash -Algorithm SHA256 计算（2026-11-16），不是抄自网页。",
+  "usage": "所有消费方只在这里读 URL / SHA256 / size_bytes；shell / YAML / bat 里不允许再出现哈希字面量。缺条目时按各自策略降级（见 not_locked 与各脚本注释）。",
+  "tools": [
+    {
+      "name": "nssm",
+      "version": "2.24",
+      "url": "https://nssm.cc/release/nssm-2.24.zip",
+      "sha256": "727d1e42275c605e0f04aba98095c38a8e1e46def453cdffce42869428aa6743",
+      "size_bytes": 351793,
+      "required": true,
+      "used_by": [
+        ".github/workflows/build-installer.yml",
+        "packaging/build.ps1",
+        "install.bat"
+      ],
+      "purpose": "Windows 服务包装器。压缩包内 nssm-2.24/win64/nssm.exe 会被复制为仓库根的 tools/nssm.exe，打包进安装包，并以 LocalSystem 身份注册/常驻 DrcomAutoLogin 服务；源码部署时由 install.bat 直接调用。三处消费方都把它当主选源：哈希不匹配必须阻断（CI 直接红，install.bat 中止安装）。"
+    },
+    {
+      "name": "python-embed-3.12.10",
+      "version": "3.12.10",
+      "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+      "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+      "size_bytes": 11133606,
+      "required": false,
+      "preferred": true,
+      "fallback_order": 1,
+      "used_by": [
+        ".github/workflows/build-installer.yml",
+        "packaging/build.ps1"
+      ],
+      "purpose": "内嵌 Python 运行时（官方 Windows embeddable package, amd64）。首选版本，解压到仓库根的 python/ 目录，由 setup.iss 的 [Files] 打包成 {app}\\python\\python.exe，让目标机无需预装 Python。非 required：条目缺失时只 warning 回退（上游小版本可能被撤下），但条目存在时哈希不符 = 必须构建失败。"
+    },
+    {
+      "name": "python-embed-3.12.9",
+      "version": "3.12.9",
+      "url": "https://www.python.org/ftp/python/3.12.9/python-3.12.9-embed-amd64.zip",
+      "sha256": "615861fb801e8b04c847598db4e1e46e4b046295017caa37cb5486dde72b5865",
+      "size_bytes": 11098289,
+      "required": false,
+      "preferred": false,
+      "fallback_order": 2,
+      "used_by": [
+        ".github/workflows/build-installer.yml",
+        "packaging/build.ps1"
+      ],
+      "purpose": "内嵌 Python 候选 2（同上用途）。首选版本被撤下时的回退项。"
+    },
+    {
+      "name": "python-embed-3.11.9",
+      "version": "3.11.9",
+      "url": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+      "sha256": "009d6bf7e3b2ddca3d784fa09f90fe54336d5b60f0e0f305c37f400bf83cfd3b",
+      "size_bytes": 11249023,
+      "required": false,
+      "preferred": false,
+      "fallback_order": 3,
+      "used_by": [
+        ".github/workflows/build-installer.yml",
+        "packaging/build.ps1"
+      ],
+      "purpose": "内嵌 Python 候选 3（同上用途）。3.12 线全部不可用时的回退项。"
+    }
+  ],
+  "not_locked": [
+    {
+      "name": "innosetup-official-silent-installer",
+      "url": "https://jrsoftware.org/download.php/is.exe",
+      "enforced": false,
+      "reason": "URL 不带版本号（服务端 302 到当前最新 6.x 安装器），内容随上游发版而变；写死哈希等于每次 Inno Setup 升级都让构建红。CI 主路径是 `choco install innosetup`（同样不锁版本），这个只是 choco 失败时的兜底。风险评估：ISCC 只参与编译，不进安装包、也不以服务身份常驻目标机，供应链风险低于 nssm / 内嵌 Python。若要收口 P2-4 剩余项：改成 choco install innosetup --version=<6.x.y> 并锁 nupkg，或从这里下载后按本文件格式补一条 tools 条目。"
+    },
+    {
+      "name": "chinese-simplified-isl",
+      "url": "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl",
+      "enforced": false,
+      "mirror_urls": [
+        "https://gh-proxy.com/https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl",
+        "https://ghproxy.net/https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl",
+        "https://cdn.jsdelivr.net/gh/jrsoftware/issrc@main/Files/Languages/ChineseSimplified.isl"
+      ],
+      "reason": "取自 issrc 仓库 **main 分支**（浮动引用，非 tag/commit），内容随上游提交变化，今天算出的哈希明天可能就不同；镜像还会改变字节（代理/网关）。正确处理是先把引用固定到某个 commit SHA 再锁哈希，但 issrc 的语言文件仍在活跃更新，本仓库选择「只做内容形状校验」（现有逻辑：>1000 字节 + 前 200 字节含 ; 注释 / [LangOptions] / LanguageName）并记录本风险。"
+    },
+    {
+      "name": "choco-innosetup-package",
+      "url": "choco:innosetup",
+      "enforced": false,
+      "reason": "`choco install innosetup --no-progress -y` 没有 --version，取 Chocolatey 社区源当前最新版 → ISCC 版本漂移、构建不可复现。这是 P2-4 / P3-4 的剩余项，本文件不写死哈希（nupkg 内容与版本绑定，choco 不提供稳定内容哈希）。收口建议：CI 改为 `--version=6.x.y` 并在 Step Summary 记录版本。"
+    }
+  ],
+  "notes": [
+    "为什么跳过浮动资源：汉字语言文件与官方 is.exe 的 URL 都不含版本号，且上游会持续更新；对它们写死哈希会把「上游正常升级」变成「构建必红」，与 P2-4 想要的「可复现 + 防投毒」并不等价。它们已记录在 not_locked 里，构建时打 ::warning:: 暴露风险，而不是假装已校验。",
+    "维护方式：升级 nssm / 内嵌 Python 时必须实际下载新文件 → Get-FileHash -Algorithm SHA256 → 更新本文件的 sha256 / size_bytes / version / updated_at，并在 CHANGELOG 说明。绝不允许从网页或他人报告里抄哈希。",
+    "校验口径：消费方比对小写 64 位十六进制；size_bytes 只作辅助提示（以 SHA256 为准）。required=true 的条目（nssm）在 CI 里缺失 = 构建红；required=false 的条目缺失 = ::warning:: 回退，保证 Python 小版本退役时不至于完全构建不了。",
+    "本文件是纯数据（无注释、UTF-8 无 BOM、LF 行尾），由 Python / PowerShell 的 JSON 解析器直接读取。"
+  ]
+}

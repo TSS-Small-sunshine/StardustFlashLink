@@ -308,6 +308,24 @@ try:
                                            "clear_password": True})[0], 400)
 
     # ============================================================
+    # 维护第四轮（审计 C-26）：删方案要一并删掉它的专属密码文件 ——
+    # 否则「删掉 → 再建同名方案」会静默继承旧密码（用户看不到这条凭据还留着）。
+    # ============================================================
+    _pf_mod.save_profile("临时", {"host": "10.1.2.3", "auto_check_interval_min": 30})
+    _own["临时"] = True
+    _reloads.clear()
+    _st, _b = _post_json("/api/profiles/delete", {"name": "临时"})
+    _check("维护 R4-C26：删除方案会一并删专属密码文件（同名重建不继承旧密码）",
+           (_st, (_b or {}).get("ok"), (_b or {}).get("password_removed"),
+            "临时" in _own, len(_reloads)),
+           (200, True, True, False, 1))
+    _own["无密"] = False
+    _pf_mod.save_profile("无密", {"host": "10.1.2.3"})
+    _st, _b = _post_json("/api/profiles/delete", {"name": "无密"})
+    _check("维护 R4-C26：没有专属密码的方案 → 删除成功且 password_removed=False",
+           (_st, (_b or {}).get("ok"), (_b or {}).get("password_removed")), (200, True, False))
+
+    # ============================================================
     # 维护第二轮（审计 H1）：/api/update/* 的契约以前零覆盖 —— 状态码 / 字段漂移
     # 只有用户在界面上手点才发现。这里用替身把 HTTP 层的契约钉住。
     # ============================================================

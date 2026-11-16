@@ -1,6 +1,6 @@
 <#
 ============================================================
-  build.ps1 - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 - Inno Setup 安装包构建脚本 (v2.1.3.3)
+  build.ps1 - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 - Inno Setup 安装包构建脚本 (v2.1.3.4)
 
   为什么从 build.bat 改写为 PowerShell:
     1. cmd 的文件存在性判断（if-exist）在该机器某些 context 下即使文件存在也返回 false
@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 # ============================================================
 #   常量
 # ============================================================
-$AppVersionText  = 'v2.1.3.3'
+$AppVersionText  = 'v2.1.3.4'
 $LogPath         = $null   # 在路径解析后赋值
 $LangUrl         = 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl'
 $LangManualUrl   = 'https://github.com/jrsoftware/issrc/tree/main/Files/Languages'
@@ -142,6 +142,87 @@ function Stop-Build {
     exit 1
 }
 
+# ============================================================
+#   供应链校验（审计 P2-4 / J7）：上游二进制哈希锁
+#   哈希的唯一来源 = 仓库根的 tools.lock.json（本文件不写死任何哈希值）。
+#   策略（本地构建故意比 CI 宽松：上游小版本退役不该让本地构建彻底卡死）：
+#     - lock 缺失 / 解析失败 / 没有该 URL 的条目 -> [WARN] 放行（仅保留原有大小检查）
+#     - 条目存在但 SHA256 不匹配 -> 直接 Stop-Build：
+#       nssm.exe 会以 LocalSystem 注册成服务、内嵌 Python 是运行库，
+#       放着不匹配的文件继续打包 = 把未经校验的二进制发给所有用户 ✗
+# ============================================================
+$script:ToolsLockPath = $null
+$script:ToolsLockDoc  = $null
+
+function Get-ToolsLockPath {
+    param([string[]]$Candidates)
+    foreach ($p in $Candidates) {
+        if (-not [string]::IsNullOrEmpty($p) -and (Test-Path -LiteralPath $p -PathType Leaf)) { return $p }
+    }
+    return $null
+}
+function Get-ToolsLockDocument {
+    param([string]$LockPath)
+    if ([string]::IsNullOrEmpty($LockPath)) { return $null }
+    try {
+        return (Get-Content -LiteralPath $LockPath -Raw -Encoding UTF8 | ConvertFrom-Json)
+    } catch {
+        Write-Warn ('tools.lock.json 解析失败（' + $_.Exception.Message + '），本次跳过哈希校验')
+        return $null
+    }
+}
+function Get-ToolsLockEntry {
+    param($Lock, [string]$Url)
+    if ($null -eq $Lock) { return $null }
+    foreach ($t in @($Lock.tools)) {
+        if ($null -ne $t -and $t.url -and (([string]$t.url).Trim() -eq $Url)) { return $t }
+    }
+    return $null
+}
+function Test-ToolsLockedFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Url,
+        [string]$Label = '下载物'
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Stop-Build -Message ($Label + ' 不存在，无法做供应链校验: ' + $Path)
+    }
+    if ($null -eq $script:ToolsLockPath) {
+        Write-Warn ($Label + ' 跳过哈希校验：没有找到 tools.lock.json（不阻断构建，但供应链未收口）')
+        return $false
+    }
+    if ($null -eq $script:ToolsLockDoc) {
+        Write-Warn ($Label + ' 跳过哈希校验：tools.lock.json 无法解析（不阻断构建）')
+        return $false
+    }
+    $entry = Get-ToolsLockEntry -Lock $script:ToolsLockDoc -Url $Url
+    if ($null -eq $entry) {
+        Write-Warn ($Label + ' 跳过哈希校验：tools.lock.json 里没有这个 URL 的条目（不阻断构建）: ' + $Url)
+        return $false
+    }
+    $expected = ([string]$entry.sha256).Trim().ToLower()
+    if ($expected -notmatch '^[0-9a-f]{64}$') {
+        Stop-Build -Message ('tools.lock.json 里 ' + $Label + ' 的 sha256 不是 64 位十六进制: ' + $expected)
+    }
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower()
+    $size   = (Get-Item -LiteralPath $Path).Length
+    if ($entry.size_bytes -and ([int64]$entry.size_bytes -ne $size)) {
+        Write-Warn ($Label + ' 大小与 lock 记录不一致（期望 ' + $entry.size_bytes + ' 字节，实际 ' + $size + ' 字节），以 SHA256 判定为准')
+    }
+    if ($actual -ne $expected) {
+        Stop-Build -Message ($Label + ' SHA256 校验不匹配：期望 ' + $expected + '（tools.lock.json），实际 ' + $actual) -Hint @(
+            '        下载来源: ' + $Url,
+            '        可能原因: 上游文件被替换 / 网络或代理投毒 / 本机缓存了旧版本 / tools.lock.json 过期',
+            '        处置: 若确认要升级上游版本，先实际下载新文件，用 Get-FileHash -Algorithm SHA256 算哈希，',
+            '              再更新 tools.lock.json 的 sha256 / size_bytes / version / updated_at，然后重跑。',
+            '              不要为了让构建过而绕过本校验。'
+        )
+    }
+    Write-Info ('校验通过: ' + $Label + ' 版本 ' + $entry.version + '，SHA256 ' + $actual + '，' + $size + ' 字节（来源 ' + $Url + '）')
+    return $true
+}
+
 $script:ExitCode = 1
 
 try {
@@ -156,6 +237,21 @@ try {
     Write-Info ('项目目录: ' + $ProjectDir)
     Write-Info ('输出目录: ' + $OutputDir)
     Write-Info ('日志文件: ' + $LogPath)
+    # 供应链锁（审计 P2-4 / J7）：仓库根优先，其次 packaging/（兼容旧布局）
+    $script:ToolsLockPath = Get-ToolsLockPath -Candidates @(
+        (Join-Path $ProjectDir 'tools.lock.json'),
+        (Join-Path $PackagingDir 'tools.lock.json')
+    )
+    if ($script:ToolsLockPath) {
+        $script:ToolsLockDoc = Get-ToolsLockDocument -LockPath $script:ToolsLockPath
+        if ($script:ToolsLockDoc) {
+            Write-Info ('供应链锁: ' + $script:ToolsLockPath + '（' + (@($script:ToolsLockDoc.tools).Count) + ' 个固定版本上游文件）')
+        } else {
+            Write-Warn ('供应链锁不可用: ' + $script:ToolsLockPath + '（本次下载物只做大小检查）')
+        }
+    } else {
+        Write-Warn '未找到 tools.lock.json —— NSSM / 内嵌 Python 将只做大小检查，建议补回该文件'
+    }
     Write-Host ''
 
     # ============================================================
@@ -399,6 +495,9 @@ try {
         if (-not (Test-Path -LiteralPath $nssmZip -PathType Leaf)) {
             Stop-Build -Message ('下载后压缩包不存在: ' + $nssmZip)
         }
+        # 审计 P2-4：nssm.exe 会被打包进安装包，并以 LocalSystem 身份注册 / 常驻服务，
+        # 是全链路影响面最大的一项 —— 下载完立刻按 tools.lock.json 校验。
+        Test-ToolsLockedFile -Path $nssmZip -Url $NssmUrl -Label 'NSSM 2.24 压缩包' | Out-Null
         Write-Info ('正在解压: ' + $nssmZip)
         try {
             if (-not (Test-Path -LiteralPath $nssmTmp -PathType Container)) {
@@ -488,6 +587,13 @@ try {
                 if ($pyZipSize -le 5000000) {
                     $pyErr = ('压缩包只有 ' + $pyZipSize + ' 字节 (<= 5000000)，疑似错误页')
                 }
+            }
+
+            # 校验 3（审计 P2-4）：按 tools.lock.json 比对 SHA256。
+            # lock 缺条目 -> 只 warning 放行（Python 小版本退役时不至于完全构建不了）；
+            # 哈希不匹配 -> Stop-Build（不静默换下一个候选：那是投毒信号，不是可用性问题）。
+            if (-not $pyErr) {
+                Test-ToolsLockedFile -Path $pyZip -Url $pyUrl -Label ('内嵌 Python 压缩包 ' + [System.IO.Path]::GetFileName($pyUrl)) | Out-Null
             }
 
             if (-not $pyErr) {
