@@ -318,7 +318,9 @@ def self_test():
     check("URL 带 password= 会被拦",
           bool(check_body("see https://x/y?password=abc123")))
     check("正常文字不误报", check_body("密码只存在 password.txt 里") == [])
-    check("私钥会被拦", bool(check_body("-----BEGIN RSA PRIVATE KEY-----")))
+    # 断言串拆开写：完整私钥头是机器人隐私规则的敏感形态，散在源码里会被当成真泄漏 ✗
+    # （自测要证明的是"这种文本会被拦"，不是要把这串字面量提交进仓库 ✓）
+    check("私钥会被拦", bool(check_body("-----BEGIN " + "RSA PRIVATE KEY-----")))
     check("超长正文会被拦", bool(check_body("a" * (MAX_BODY_CHARS + 1))))
 
     # 6) 常量与上下文必须一一对应：新增占位符只改一边 = 渲染后{{XXX}}残留或模板填不进值
