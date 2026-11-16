@@ -221,8 +221,9 @@ fn serve(args: &[String]) -> i32 {
 
 /// `login`：读配置（命令行可覆盖）→ 查在线 → 需要时登录。
 fn login(args: &[String]) -> i32 {
-    let mut cfg = match Config::load(&platform::config_path()) {
-        Ok(cfg) => cfg,
+    // 读配置走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时，只读沿用 2.x 的账号/网关 ✓
+    let mut cfg = match drcom_core::legacy::load_config() {
+        Ok(read) => read.config,
         Err(e) => {
             eprintln!("{}（先跑一次 `status` 看看配置目录）", e);
             return 1;
@@ -778,7 +779,8 @@ fn diagnostics_cmd(args: &[String]) -> i32 {
     let upgrade = RotatingLog::upgrade(platform::log_dir().join("upgrade.log"));
     let upgrade_lines = upgrade.read_all_lines().unwrap_or_default();
 
-    let cfg = Config::load(&platform::config_path()).unwrap_or_default();
+    // 同上：诊断包里也要反映「配置实际来自 2.x 还是 3.0」（来源字段在 status 里 ✓）
+    let cfg = drcom_core::legacy::load_config_or_default().config;
     let status = Status::collect();
     let report = metrics::collect(&lines, days, now);
 
@@ -849,9 +851,12 @@ fn run_loop(args: &[String]) -> i32 {
     let mut scheduler = Scheduler::new(30);
     let mut last_interval = 0u32;
     let mut first = true;
+    let mut legacy_announced = false;
     loop {
-        let mut cfg = match Config::load(&cfg_path) {
-            Ok(cfg) => cfg,
+        // 读配置走 legacy 兼容层（审计 P1-3）：3.0 数据目录没有配置时**只读**沿用 2.x 的，
+        // 否则接管 2.x 服务后会「账号未设置」静默掉线 ✗
+        let read = match drcom_core::legacy::load_config() {
+            Ok(read) => read,
             Err(e) => {
                 eprintln!("{}", e);
                 if once {
@@ -861,6 +866,19 @@ fn run_loop(args: &[String]) -> i32 {
                 continue;
             }
         };
+        // 把「这次读的是 2.x 的数据」写进**业务日志**（只写一次，避免每轮刷屏 ✓）
+        if !legacy_announced && read.is_legacy() {
+            legacy_announced = true;
+            let legacy = read.path.clone().unwrap_or_default();
+            let line = format!(
+                "{} {}",
+                timefmt::format_utc(SystemTime::now()),
+                drcom_core::legacy::notice_text(&legacy, &platform::data_dir())
+            );
+            let _ = log_line(&line);
+            println!("{}", line);
+        }
+        let mut cfg = read.config;
         // 配置一改就跟着变 ✓（每轮都重读，和 2.x 一样）
         if cfg.auto_check_interval_min != last_interval {
             scheduler.set_interval(cfg.auto_check_interval_min);
@@ -976,8 +994,9 @@ fn profile_cmd(args: &[String]) -> i32 {
     }
 
     let cfg_path = platform::config_path();
-    let mut cfg = match Config::load(&cfg_path) {
-        Ok(cfg) => cfg,
+    // 读配置走 legacy 兼容层：2.x 有方案时 `profile list` 也能看到 ✓（只读读取，不改 2.x ✓）
+    let mut cfg = match drcom_core::legacy::load_config() {
+        Ok(read) => read.config,
         Err(e) => {
             eprintln!("{}", e);
             return 1;
