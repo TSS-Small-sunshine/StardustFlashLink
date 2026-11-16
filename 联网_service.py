@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.1）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.2）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -766,6 +766,35 @@ class NetworkWatcher:
         return True, "Wi-Fi {} → {}".format(previous, ssid)
 
 
+def compute_periodic_wait_sec(interval_sec, backoff_until, now=None):
+    """周期线程这一轮该等多久（秒）。纯函数，便于单测。
+
+    历史 bug（v2.0.2 修复）：原代码写 max(interval, delta)，导致
+      - 开机早期网络未稳 → _startup_trigger 触发 run_once → wait_network 失败 → 5min 退避
+      - run_periodic 第一次循环读 BACKOFF.until 后仍按 max 算出 30min interval
+      - 用户感知：自启动后 30+ 分钟内没有任何登录尝试
+    正确语义：退避已到期 → 尽快重试；否则取 min(interval, delta) 让退避生效。
+
+    审计 C-08：退避**到期**时旧实现返回 0 —— 内层 while 直接跳过，接着 run_once 若抢不到
+    RUN_LOCK（用户刚点「立即登录」/ startup 的 wait_network 最长 60s）会立即返回且不改退避，
+    下一圈 bu 仍是过期时间 → 0 秒空转死循环（每圈读配置 + UDP 探测 + 一行日志，能刷爆日志）。
+    现在到期至少等一个 NETWATCH_TICK_SEC 再重试 ✓。
+    """
+    now = now or datetime.now()
+    wait_sec = interval_sec
+    if backoff_until:
+        try:
+            delta = (datetime.fromisoformat(backoff_until) - now).total_seconds()
+        except ValueError:
+            return wait_sec
+        if delta <= 0:
+            wait_sec = NETWATCH_TICK_SEC       # 审计 C-08：不允许 0（否则忙时 0 秒空转）
+        elif delta < interval_sec:
+            wait_sec = delta
+        # else: delta >= interval → 保持 interval（周期性不能比 interval 还短）
+    return wait_sec
+
+
 def run_periodic():
     """周期自检：尊重 auto_check_enabled 与 BACKOFF.until。
 
@@ -786,27 +815,7 @@ def run_periodic():
 
             interval_sec = int(cfg.get("auto_check_interval_min") or 30) * 60
 
-            # 计算 wait_sec：取 interval 与剩余退避时间的较小者。
-            # 历史 bug（v2.0.2 修复）：原代码写 max(interval, delta)，导致
-            #   - 开机早期网络未稳 → _startup_trigger 触发 run_once → wait_network 失败 → 5min 退避
-            #   - run_periodic 第一次循环读 BACKOFF.until 后仍按 max 算出 30min interval
-            #   - 用户感知：自启动后 30+ 分钟内没有任何登录尝试
-            # 正确语义：退避已到期（delta<=0）→ 立即重试；否则取 min(interval, delta) 让退避生效
-            bu = _backoff_until()
-            wait_sec = interval_sec
-            if bu:
-                try:
-                    bu_dt = datetime.fromisoformat(bu)
-                    delta = (bu_dt - datetime.now()).total_seconds()
-                    if delta <= 0:
-                        # 退避到期：立即触发一次 run_once（不等 interval）
-                        wait_sec = 0
-                    elif delta < interval_sec:
-                        # 退避 < interval：服从退避（按 delta 比 interval 大 → max 写法的旧 bug）
-                        wait_sec = delta
-                    # else: delta >= interval → 保持 interval（合理：周期性不能比 interval 还短）
-                except ValueError:
-                    pass
+            wait_sec = compute_periodic_wait_sec(interval_sec, _backoff_until())
 
             # 写 next_check_at 用于 UI 显示
             with STATE_LOCK:
@@ -1068,12 +1077,9 @@ def main():
         stop_event=STOP_EVENT,
     )
 
-    # 4.9 启动钩子：检查是否刚升级过（升级结果确认 / AppExit 自愈 / 备份清理）。
-    #     必须在 4.8 之后 —— 见上面第 4 步的说明。
-    try:
-        _auto_update_mod._post_upgrade_startup()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("启动钩子异常: %s", exc)
+    # 4.9 启动钩子：见下面「5.5」—— 审计 G3 把它挪到 HTTP 绑定之后、丢进后台线程。
+    #     （旧实现在绑定前同步等待升级执行器结果最长 8 秒：慢机器上会拖到健康探针窗口边缘，
+    #      让探针误判「新版起不来」→ 触发误回滚 ✗）
 
     # 5. 启动后台线程
     startup_thread = threading.Thread(target=_startup_trigger, name="startup-trigger", daemon=True)
@@ -1098,6 +1104,18 @@ def main():
     _set_state(service_started_at=_now_iso())
     logger.info("Web UI 已就绪: http://127.0.0.1:%s", ui_port)
     logger.info("启动线程与周期自检线程已启动")
+
+    # 5.5（审计 G3）升级启动钩子：必须在端口绑定**之后**、且不要在启动路径上同步阻塞。
+    # 它要读执行器结果（最长等 8 秒）/ 自愈 AppExit / 对齐托盘自启 / 清理旧备份 ——
+    # 都是文件与注册表操作，放后台线程即可；否则会拖慢 /api/health 的可达时间，
+    # 让刚装好的新版被探针误判成「起不来」而回滚。
+    def _post_upgrade_startup_safe():
+        try:
+            _auto_update_mod._post_upgrade_startup()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("启动钩子异常: %s", exc)
+
+    threading.Thread(target=_post_upgrade_startup_safe, name="post-upgrade", daemon=True).start()
 
     try:
         HTTP_SERVER.serve_forever()

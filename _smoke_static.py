@@ -621,8 +621,12 @@ check("v2.0.4.2 启动钩子读执行器结果", "_report_update_runner_result("
 check("v2.0.4.2 升级残留会被清理", "_cleanup_update_leftovers()" in src_upd)
 check("v2.0.4.2 不再用备份 hash 误判升级成功",
       "升级完成（v{}）：当前脚本与备份不同" not in src_upd)
+# 维护第二轮（审计 E2）：读取函数加了 subvalue 参数（默认仍是 (默认) 值），
+# I7 要求 Default 与 "0" 两个子值都读 —— 断言跟着改到新签名，语义不变。
 check("v2.0.4.2 AppExit 按 nssm 子键结构读取",
-      "APPEXIT_SUBKEY" in src_upd and "QueryValueEx(k, APPEXIT_DEFAULT_VALUE)" in src_upd)
+      "APPEXIT_SUBKEY" in src_upd
+      and "def _read_nssm_appexit(subvalue=APPEXIT_DEFAULT_VALUE)" in src_upd
+      and "QueryValueEx(k, subvalue)" in src_upd)
 check("v2.0.4.2 nssm set AppExit 拆成两个 argv",
       '"AppExit", subparam.strip(), value.strip()' in src_upd)
 
@@ -724,7 +728,9 @@ else:
     _rfile = os.path.join(_rdir, "r.txt")
     _rcmd = os.path.join(_rdir, "redir.cmd")
     with open(_rcmd, "w", encoding="utf-8", newline="") as _f:
-        # 注意 newline=""：文本模式的通用换行转换会把 \r\n 变成 \r\r\n，cmd 会整行失效。
+        # 注意 newline=""（审计 G5 更正措辞）：Windows 文本模式默认会把字符串里的 CRLF
+        # 再转换一次、生成 CR CR LF。cmd 实测**能容忍**这种行尾（不是「整行失效」），
+        # 但生成物应与预期一致，所以生成批处理/执行器时一律 newline=""。
         _f.write('@echo off\r\nset "RC=' + _rfile + '"\r\n>>"%RC%" echo installer_rc=0\r\n')
     subprocess.run(["cmd", "/c", _rcmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
     _rtxt = pathlib.Path(_rfile).read_text(encoding="utf-8", errors="replace") if os.path.isfile(_rfile) else ""
@@ -994,8 +1000,10 @@ _wrap_rb = au._build_update_wrapper(
 check("v2.0.11.0 执行器：两轮不健康 → 停服务 → 回滚 → 起服务 → 再探（顺序钉死）",
       "--tag auto" in _wrap_rb and "--expect 1.2.3" in _wrap_rb and "--tag after-rollback" in _wrap_rb
       and _wrap_rb.index("--tag retry") < _wrap_rb.index("--tag auto") < _wrap_rb.index("--tag after-rollback"))
+# 维护第二轮（审计 A2）：执行器新增「端口被占 → 跳过回滚」分支，也落一条 rollback=SKIP，
+# 所以这里从 3 处变 4 处（缺件三处 + 端口占用一处）。
 check("v2.0.11.0 执行器：缺件（python / 回滚脚本 / 备份）落 rollback=SKIP",
-      _wrap_rb.count("echo rollback=SKIP") == 3, str(_wrap_rb.count("echo rollback=SKIP")))
+      _wrap_rb.count("echo rollback=SKIP") == 4, str(_wrap_rb.count("echo rollback=SKIP")))
 check("v2.0.11.0 执行器：收尾把回滚脚本也删掉", 'del /f /q "C:\\T\\drcom_rollback.py"' in _wrap_rb)
 check("v2.0.11.0 执行器：回滚路径同样不外泄凭据",
       "password" not in _wrap_rb.lower() and "PWD" not in _wrap_rb)
@@ -2277,7 +2285,9 @@ check("维护 M-7：加密 zip → 400 且给中文可读原因（不再 500 + �
       repr((_st7, _b7)))
 
 # 超限 body（4MB 上限 + 1MB）：必须先排空再关连接，客户端才收得到 413
-_st8, _b8, _conn8 = _post_import_m(b"\0" * (_wa.CONFIG_IMPORT_MAX_BYTES + 1024 * 1024))
+# 只超上限 1 字节：服务端把 body 全部排空后再关连接，Windows 不会因"未读数据"发 RST，
+# 断言才稳定（曾经用 +1MB，排空上限 4MB 挡不住那 1MB，偶发 ConnectionAborted ✗）。
+_st8, _b8, _conn8 = _post_import_m(b"\0" * (_wa.CONFIG_IMPORT_MAX_BYTES + 1))
 check("维护 M-8：导入超限 → 客户端真的收到 413（不是连接被重置）",
       _st8 == 413 and (_conn8 or "").lower() == "close", repr((_st8, _b8, _conn8)))
 
@@ -2354,6 +2364,771 @@ if _m7_had_logger:
     _wa.logger = _m7_saved_logger
 else:
     del _wa.logger
+
+
+# ============================================================
+# 维护第二轮（2026-11 升级链审计：A2 / G1 / G2 / E1 / E2 / F3 / B1+B2 / C1 / G5 / E4）
+# 对应 _维护报告/audit/upgrade.md；断言测行为（打桩 / 替身），**不联网、不真装**。
+# 每条都先钉「旧行为会怎样错」，再钉「现在必须怎样」。
+# ============================================================
+import hashlib  # noqa: E402
+import types  # noqa: E402
+
+_R2_MISSING = object()
+_R2_NAMES = (
+    "LOG_DIR", "UPGRADE_LOG_FILE", "logger", "BASE_DIR", "NSSM_PATH",
+    "STATE", "STATE_LOCK", "UPDATE_LOCK", "STOP_EVENT",
+    "_load_config", "_check_github_latest", "_check_disk_free_mb", "_now_iso",
+    "_probe_local_health", "_download_installer", "_do_download_installer",
+    "_launch_installer", "_set_nssm_appexit", "_read_nssm_appexit",
+    "_ensure_nssm_appexit_sane", "_ensure_tray_autostart_sane", "_cleanup_update_leftovers",
+    "_start_deferred_runner_recheck", "_deferred_runner_recheck",
+    "_do_check_now", "subprocess", "GITHUB_DOWNLOAD_MIRRORS",
+    "_auto_update_disabled_logged",
+)
+_r2_saved = {k: au.__dict__.get(k, _R2_MISSING) for k in _R2_NAMES}
+_r2_saved_temp = os.environ.get("TEMP")
+
+_r2_root = tempfile.mkdtemp(prefix="drcom_r2_")
+_r2_app = os.path.join(_r2_root, "app")
+_r2_logs = os.path.join(_r2_root, "logs")
+_r2_bin = os.path.join(_r2_root, "bin")
+for _d in (_r2_app, _r2_logs, _r2_bin):
+    os.makedirs(_d, exist_ok=True)
+os.environ["TEMP"] = _r2_root
+_r2_state = {}
+_r2_attach_logger = logging.getLogger("smoke_auto_update_r2")
+_r2_attach_logger.addHandler(logging.NullHandler())
+au._attach(
+    logger=_r2_attach_logger, state=_r2_state, state_lock=threading.Lock(), update_lock=threading.Lock(),
+    tools_dir=os.path.join(_r2_root, "tools"), nssm_path=os.path.join(_r2_root, "tools", "nssm.exe"),
+    upgrade_log_file=os.path.join(_r2_logs, "upgrade.log"), log_dir=_r2_logs, base_dir=_r2_app,
+    load_config=lambda: {}, save_config=lambda *a: None,
+    now_iso=lambda: "2026-11-16T00:00:00", stop_event=threading.Event())
+_r2_nssm_stub = os.path.join(_r2_root, "nssm_stub.exe")
+pathlib.Path(_r2_nssm_stub).write_bytes(b"stub")   # _ensure_nssm_appexit_sane 会先判 isfile
+
+
+def _r2_write_rc(lines):
+    with open(au._rc_path(), "w", encoding="utf-8") as _f:
+        _f.write("\n".join(lines) + "\n")
+
+
+def _r2_read_log():
+    _p = au.UPGRADE_LOG_FILE
+    return pathlib.Path(_p).read_text(encoding="utf-8") if os.path.isfile(_p) else ""
+
+
+def _r2_clear_files():
+    for _p in (au._rc_path(), au._wrapper_path(), au._health_probe_path(), au._rollback_script_path()):
+        try:
+            if os.path.isfile(_p):
+                os.remove(_p)
+        except OSError:
+            pass
+
+
+def _r2_run_report(lines):
+    """清掉旧日志 / rc → 写入合成 rc → 跑一次收尾读取，返回 (reported, upgrade.log 全文)。"""
+    for _p in (au.UPGRADE_LOG_FILE, au._rc_path()):
+        try:
+            if os.path.isfile(_p):
+                os.remove(_p)
+        except OSError:
+            pass
+    _r2_write_rc(lines)
+    _reported = au._report_update_runner_result(wait_sec=0)
+    return _reported, _r2_read_log()
+
+
+# —— B1：预发布后缀必须「低于」同版本正式版；fix/hotfix/patch 维持设计意图 999 ——
+_r2_cv = au._compare_versions
+check("维护 R2-B1：rc / alpha / beta / pre / dev 低于同版本正式版",
+      _r2_cv("2.1.3.0", "2.1.3.0-rc1") == 1
+      and _r2_cv("2.1.3.1", "2.1.3.1-beta") == 1
+      and _r2_cv("2.1.3.0", "2.1.3.0-alpha2") == 1
+      and _r2_cv("2.1.3.0", "2.1.3.0-pre") == 1
+      and _r2_cv("2.1.3.0", "2.1.3.0-dev") == 1,
+      repr([_r2_cv("2.1.3.0", v) for v in ("2.1.3.0-rc1", "2.1.3.0-alpha2", "2.1.3.0-pre", "2.1.3.0-dev")]))
+check("维护 R2-B1：fix / hotfix / patch 仍高于同主版本（设计意图 999 不变）",
+      _r2_cv("2.1.3.0", "2.1.3-fix") == -1
+      and _r2_cv("2.1.3.0", "2.1.3-hotfix") == -1
+      and _r2_cv("2.1.3.0", "2.1.3-patch") == -1)
+check("维护 R2-B1：普通版本比较没被改坏（三段==四段 / 递增 / v 前缀）",
+      _r2_cv("2.1.3", "2.1.3.0") == 0 and _r2_cv("2.1.3.0", "2.1.3.1") == -1
+      and _r2_cv("2.1.3.0", "v2.1.4") == -1 and au._parse_version("abc") == ())
+
+# —— B2：远端版本无法解析 → error，不再静默「已是最新」；白名单两处共用 ——
+_r2_saved_check = au._check_github_latest
+try:
+    au._check_github_latest = lambda: ("abc", "https://example.invalid/x.exe", None, None, None)
+    au._set_update_state(update_state=None, update_last_error=None, update_available=True)
+    _r2_chk = au._do_check_now()
+    _r2_chk_ok = (isinstance(_r2_chk, dict) and _r2_chk.get("ok") is False
+                  and au._get_update_field("update_state") == "error"
+                  and "无法解析" in (au._get_update_field("update_last_error") or "")
+                  and au._get_update_field("update_available") is False)
+    _r2_chk_snapshot = (au._get_update_field("update_state"), au._get_update_field("update_last_error"))
+    # ② 白名单分支：带路径穿越的 tag
+    au._check_github_latest = lambda: ("../evil", "https://example.invalid/x.exe", None, None, None)
+    au._set_update_state(update_state=None, update_last_error=None)
+    _r2_chk2 = au._do_check_now()
+    _r2_chk2_ok = (au._get_update_field("update_state") == "error"
+                   and "无法解析" in (au._get_update_field("update_last_error") or ""))
+finally:
+    au._check_github_latest = _r2_saved_check
+check("维护 R2-B2：远端版本无法解析 → update_state=error + 中文 last_error（不再当「已是最新」）",
+      _r2_chk_ok and _r2_chk2_ok, repr(_r2_chk_snapshot))
+check("维护 R2-B2：版本白名单抽成 _valid_remote_version()，_do_update_now / _do_check_now 共用",
+      callable(getattr(au, "_valid_remote_version", None))
+      and au._valid_remote_version("2.1.4.0") is True
+      and au._valid_remote_version("../evil") is False
+      and src_upd.count("_valid_remote_version(") >= 3,
+      str(src_upd.count("_valid_remote_version(")))
+
+# —— E4 / I9：安装包暂存名与 setup.iss 的产物名一致，清理前缀同步 ——
+check("维护 R2-E4：暂存名改成 StardustFlashLink-Setup-v{ver}.exe（I9 实际产物名）",
+      au.INSTALLER_FILENAME_PATTERN.format(ver="2.1.4.0") == "StardustFlashLink-Setup-v2.1.4.0.exe"
+      and au.INSTALLER_FILENAME_PREFIX == "StardustFlashLink-Setup-v"
+      and au.LEGACY_INSTALLER_FILENAME_PREFIX == "DrcomAutoLogin-Setup-v"
+      and '"StardustFlashLink-Setup-v{ver}.exe"' in src_upd)
+if os.name != "nt":
+    print("SKIP  维护 R2-E4：清理残留行为级断言（非 Windows）")
+else:
+    _r2_pkg_names = (
+        "StardustFlashLink-Setup-v%s.exe" % au.VERSION,
+        "DrcomAutoLogin-Setup-v%s.exe" % au.VERSION,      # 历史产物名
+        "StardustFlashLink-Setup-v9.9.8.exe",             # 别的版本 → 必须留着
+    )
+    for _n in _r2_pkg_names:
+        pathlib.Path(os.path.join(_r2_root, _n)).write_bytes(b"x")
+    au._cleanup_update_leftovers()
+    check("维护 R2-E4：清理升级残留同时认新老前缀（只删本版本，别版本的包不碰）",
+          not os.path.isfile(os.path.join(_r2_root, _r2_pkg_names[0]))
+          and not os.path.isfile(os.path.join(_r2_root, _r2_pkg_names[1]))
+          and os.path.isfile(os.path.join(_r2_root, _r2_pkg_names[2])),
+          repr(sorted(os.listdir(_r2_root))))
+    try:
+        os.remove(os.path.join(_r2_root, _r2_pkg_names[2]))
+    except OSError:
+        pass
+
+# —— A2a：升级前健康基线（探不通就中止升级，绝不继续装）——
+_r2_saved_disk = au._check_disk_free_mb
+_r2_saved_cfg = au._load_config
+_r2_saved_probe = au._probe_local_health
+_r2_saved_launch = au._launch_installer
+_r2_launch_hits = []
+au.NSSM_PATH = _r2_nssm_stub
+au._check_disk_free_mb = lambda: 99999
+au._load_config = lambda: {"update_min_free_disk_mb": 0, "ui_port": 8848}
+au._probe_local_health = lambda ui_port=None, timeout_sec=None: (
+    False, "ConnectionRefusedError: [WinError 10061] 由于目标计算机积极拒绝，无法连接")
+au._check_github_latest = lambda: (_ for _ in ()).throw(AssertionError("不健康时不该去 check GitHub"))
+au._launch_installer = lambda *a, **k: _r2_launch_hits.append(("launch", a)) or {"mode": "stub"}
+try:
+    _r2_res_bad = au._do_update_now()
+finally:
+    au._check_disk_free_mb = _r2_saved_disk
+    au._load_config = _r2_saved_cfg
+    au._probe_local_health = _r2_saved_probe
+    au._launch_installer = _r2_saved_launch
+check("维护 R2-A2a：升级前健康基线不通 → 中止升级（不下载、不装）+ 中文提示先修服务",
+      isinstance(_r2_res_bad, dict) and _r2_res_bad.get("ok") is False
+      and "不健康" in (_r2_res_bad.get("error") or "")
+      and "先修复服务" in (_r2_res_bad.get("error") or "")
+      and not _r2_launch_hits
+      and au._get_update_field("update_state") == "error"
+      and "不健康" in (au._get_update_field("update_last_error") or ""),
+      repr((_r2_res_bad, _r2_launch_hits)))
+# 基线通过的路径要能继续（本用例远端 == 本机 → 走到「已是最新」，证明没被基线卡死）
+au._check_disk_free_mb = lambda: 99999
+au._load_config = lambda: {"update_min_free_disk_mb": 0, "ui_port": 8848}
+au._probe_local_health = lambda ui_port=None, timeout_sec=None: (True, "http=200 ok=true")
+au._check_github_latest = lambda: (au.VERSION, "https://example.invalid/x.exe", "0" * 64, 1, None)
+au._launch_installer = lambda *a, **k: _r2_launch_hits.append(("launch", a)) or {"mode": "stub"}
+try:
+    _r2_res_ok = au._do_update_now()
+finally:
+    au._check_disk_free_mb = _r2_saved_disk
+    au._load_config = _r2_saved_cfg
+    au._probe_local_health = _r2_saved_probe
+    au._check_github_latest = _r2_saved_check
+    au._launch_installer = _r2_saved_launch
+check("维护 R2-A2a：健康基线通过才继续（本例走到「已是最新」，不再卡住升级流程）",
+      "已是最新" in (_r2_res_ok.get("error") or "") and not _r2_launch_hits,
+      repr(_r2_res_ok))
+check("维护 R2-A2a：健康基线复用端口规范化与探针超时口径",
+      "def _probe_local_health(ui_port=None, timeout_sec=None)" in src_upd
+      and "_normalize_ui_port(ui_port)" in src_upd
+      and "HEALTH_PROBE_TIMEOUT_SEC" in src_upd)
+# 行为级：真跑一次 _probe_local_health（对着假 /api/health 服务 → 健康；空端口 → 不健康）
+_r2_srv_ok = _ThreadingHTTPServer(("127.0.0.1", 0), _HealthStub)
+_r2_port_ok = _r2_srv_ok.server_address[1]
+threading.Thread(target=_r2_srv_ok.serve_forever, daemon=True).start()
+_r2_srv_free = _ThreadingHTTPServer(("127.0.0.1", 0), _HealthStub)
+_r2_port_free = _r2_srv_free.server_address[1]
+_r2_srv_free.server_close()          # 关掉 → 端口空出来（探测必须判「不健康」）
+try:
+    _r2_h_ok, _r2_h_detail = au._probe_local_health(_r2_port_ok, timeout_sec=2)
+    _r2_h_bad, _r2_h_bad_detail = au._probe_local_health(_r2_port_free, timeout_sec=1)
+finally:
+    _r2_srv_ok.shutdown()
+check("维护 R2-A2a：真实探测行为 —— 假 /api/health 在 → 健康；空端口 → 不健康",
+      _r2_h_ok is True and "http=200" in _r2_h_detail and _r2_h_bad is False,
+      repr((_r2_h_ok, _r2_h_detail, _r2_h_bad, _r2_h_bad_detail)))
+
+
+# —— A2b：执行器归因（端口被占 → PORT_BUSY + 跳过回滚；回滚=OK 但仍不健康 → USELESS）——
+_r2_wrap_txt = au._build_update_wrapper(
+    r"C:\T\StardustFlashLink-Setup-v9.9.9.exe", r"D:\App", r"C:\T\l.log", r"C:\T\r.txt", "MyTask",
+    python_path=r"C:\App\python\python.exe", probe_path=r"C:\T\drcom_health_probe.py", ui_port=8848,
+    backup_dir=r"D:\App\backup\1.2.3", rollback_path=r"C:\T\drcom_rollback.py")
+check("维护 R2-A2b：执行器先归因端口占用（find FATAL/bind），再决定回滚；USELESS 判定在 after-rollback 探针之后",
+      _r2_wrap_txt.index('find /i "FATAL"') < _r2_wrap_txt.index("--tag auto")
+      and _r2_wrap_txt.index('find /i "bind"') < _r2_wrap_txt.index("--tag auto")
+      and _r2_wrap_txt.index("health=PORT_BUSY") < _r2_wrap_txt.index("--tag auto")
+      and _r2_wrap_txt.index("rollback=USELESS") > _r2_wrap_txt.index("--tag after-rollback")
+      and _r2_wrap_txt.index('find /i "rollback=OK"') > _r2_wrap_txt.index("--tag after-rollback")
+      and '"%APP%' in _r2_wrap_txt,
+      "PORT_BUSY@%d auto@%d after@%d" % (_r2_wrap_txt.index("health=PORT_BUSY"),
+                                         _r2_wrap_txt.index("--tag auto"),
+                                         _r2_wrap_txt.index("--tag after-rollback")))
+
+if os.name != "nt":
+    print("SKIP  维护 R2-A2b：执行器行为级断言（非 Windows，没有 cmd）")
+    print("SKIP  维护 R2-E1：schtasks 行为级断言（非 Windows）")
+else:
+    # 替身：安装器 / sc / schtasks / ping 全部换成「秒退」的存量 exe（复制 hostname.exe），
+    # 只验证执行器的**判定与落盘**，绝不真装、绝不碰真服务。
+    _r2_host_stub = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "hostname.exe")
+    for _n in ("ping.exe", "sc.exe", "schtasks.exe", "installer.exe"):
+        shutil.copy2(_r2_host_stub, os.path.join(_r2_bin, _n))
+    _r2_probe_py = os.path.join(_r2_root, "probe_fail.py")
+    _r2_probe_src = """import sys
+a = sys.argv[1:]
+rc = a[a.index('--rc') + 1] if '--rc' in a else ''
+if rc:
+    open(rc, 'a', encoding='utf-8').write('health=FAIL' + chr(10))
+sys.exit(1)
+"""
+    pathlib.Path(_r2_probe_py).write_text(_r2_probe_src, encoding="utf-8")
+    _r2_rollback_src = """import os
+import sys
+a = sys.argv[1:]
+rc = a[a.index('--rc') + 1] if '--rc' in a else ''
+open(rc, 'a', encoding='utf-8').write('rollback=OK' + chr(10) + 'rollback_version=1.2.3' + chr(10))
+open(os.path.join(os.path.dirname(rc), 'rollback_called.marker'), 'w').write('1')
+sys.exit(0)
+"""
+
+    def _r2_run_wrapper(tag, app_dir, busy_log=None):
+        """把生成的执行器真跑一遍（全部替身）；返回 rc 里的非空行。"""
+        _rollback = os.path.join(_r2_root, "rollback_ok_%s.py" % tag)
+        pathlib.Path(_rollback).write_text(_r2_rollback_src, encoding="utf-8")
+        # 执行器收尾会 del 掉探针与回滚脚本 —— 每次重跑都要重新落盘（同一个替身复用）
+        pathlib.Path(_r2_probe_py).write_text(_r2_probe_src, encoding="utf-8")
+        _bk = os.path.join(app_dir, "backup", "1.2.3")
+        os.makedirs(os.path.join(app_dir, "logs"), exist_ok=True)
+        os.makedirs(_bk, exist_ok=True)
+        _stderr_log = os.path.join(app_dir, "logs", "service_stderr.log")
+        if busy_log is None:
+            if os.path.isfile(_stderr_log):
+                os.remove(_stderr_log)
+        else:
+            pathlib.Path(_stderr_log).write_text(busy_log, encoding="utf-8")
+        _marker = os.path.join(_r2_root, "rollback_called.marker")
+        if os.path.isfile(_marker):
+            os.remove(_marker)
+        _rc = os.path.join(_r2_root, "rc_%s.txt" % tag)
+        _log = os.path.join(_r2_root, "installer_%s.log" % tag)
+        if os.path.isfile(_rc):
+            os.remove(_rc)
+        _script = au._build_update_wrapper(
+            os.path.join(_r2_bin, "installer.exe"), app_dir, _log, _rc, "DrcomAutoLogin-AutoUpdate",
+            sc_path=os.path.join(_r2_bin, "sc.exe"),
+            schtasks_path=os.path.join(_r2_bin, "schtasks.exe"),
+            python_path=sys.executable, probe_path=_r2_probe_py, ui_port=18899,
+            backup_dir=_bk, rollback_path=_rollback)
+        _wrapper = os.path.join(_r2_root, "wrap_%s.cmd" % tag)
+        au._write_update_wrapper(_wrapper, _script)
+        _env = dict(os.environ)
+        _env["PATH"] = _r2_bin + os.pathsep + _env.get("PATH", "")
+        _env["PYTHONIOENCODING"] = "utf-8"
+        subprocess.run(["cmd", "/c", _wrapper], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=120, env=_env)
+        if not os.path.isfile(_rc):
+            return []
+        return [l.strip() for l in pathlib.Path(_rc).read_text(encoding="utf-8", errors="replace").splitlines()
+                if l.strip()]
+
+    _r2_lines_busy = _r2_run_wrapper(
+        "busy", _r2_app, busy_log="[x] FATAL: bind 127.0.0.1:18899 failed\n")
+    check("维护 R2-A2b：端口被占 → 落 health=PORT_BUSY + rollback=SKIP（不回滚，旧代码同样绑不上）",
+          "health=PORT_BUSY" in _r2_lines_busy and "rollback=SKIP" in _r2_lines_busy
+          and not any(l.startswith("rollback=OK") for l in _r2_lines_busy)
+          and not os.path.isfile(os.path.join(_r2_root, "rollback_called.marker"))
+          and any(l.startswith("service=") for l in _r2_lines_busy),
+          repr(_r2_lines_busy))
+    _r2_lines_useless = _r2_run_wrapper("useless", _r2_app)
+    _r2_rb_lines = [l for l in _r2_lines_useless if l.startswith("rollback=")]
+    check("维护 R2-A2b：回滚=OK 但回滚后仍不健康 → 追加 rollback=USELESS（最后一条为准）",
+          _r2_rb_lines == ["rollback=OK", "rollback=USELESS"]
+          and os.path.isfile(os.path.join(_r2_root, "rollback_called.marker")),
+          repr(_r2_lines_useless))
+
+# —— A2c：收尾上报必须区分 OK / FAIL / SKIP / USELESS ——
+_r2_reported, _r2_report_log = _r2_run_report(
+    ["installer_rc=0", "health=FAIL", "health=FAIL", "rollback=OK",
+     "rollback_version=1.2.3", "rollback=USELESS", "service=STOPPED"])
+check("维护 R2-A2c：rollback=USELESS → update_state=error + 明说「回滚后仍不健康，可能需要人工处理」",
+      _r2_reported is True and au._get_update_field("update_state") == "error"
+      and "回滚后仍不健康" in (au._get_update_field("update_last_error") or "")
+      and "人工处理" in (au._get_update_field("update_last_error") or ""),
+      repr((au._get_update_field("update_state"), au._get_update_field("update_last_error"))))
+check("维护 R2-A2c：USELESS 绝不宣称回滚成功（日志是 ERROR +「没有奏效」）",
+      "没有奏效" in _r2_report_log and "已自动回滚到备份版本" not in _r2_report_log,
+      repr(_r2_report_log[-160:]))
+_r2_reported_ok, _r2_report_ok = _r2_run_report(
+    ["installer_rc=0", "health=FAIL", "health=OK", "rollback=OK", "rollback_version=1.2.3"])
+check("维护 R2-A2c：rollback=OK 仍按成功口径上报（不误伤既有分支）",
+      _r2_reported_ok is True and "已自动回滚" in _r2_report_ok
+      and "已自动回滚" in (au._get_update_field("update_last_error") or ""),
+      repr((_r2_report_ok[-140:], au._get_update_field("update_last_error"))))
+_r2_reported_skip, _r2_report_skip = _r2_run_report(
+    ["installer_rc=0", "health=PORT_BUSY", "rollback=SKIP"])
+check("维护 R2-A2c：PORT_BUSY 单独给中文结论（先解决端口冲突/改 ui_port）",
+      "端口被占用" in _r2_report_skip and "没做自动回滚" in _r2_report_skip,
+      repr(_r2_report_skip[-160:]))
+
+# —— G1：启动钩子延迟复核（只读一次 rc → 75 秒后再读一次并删 rc 防重复上报）——
+check("维护 R2-G1：延迟复核函数存在、延迟约 75 秒、daemon 线程可单独调用",
+      callable(getattr(au, "_deferred_runner_recheck", None))
+      and callable(getattr(au, "_start_deferred_runner_recheck", None))
+      and au.DEFERRED_RECHECK_DELAY_SEC >= 60
+      and "_start_deferred_runner_recheck()" in src_upd
+      and "_report_update_runner_result(wait_sec=8)" in src_upd)   # 同步等待保留（防与探针互相等）
+if os.path.isfile(au._rc_path()):
+    os.remove(au._rc_path())
+check("维护 R2-G1：没有 rc 时延迟复核什么都不做（不误报、不抛异常）",
+      au._deferred_runner_recheck(0) is False)
+for _p in (au.UPGRADE_LOG_FILE, au._rc_path()):
+    try:
+        if os.path.isfile(_p):
+            os.remove(_p)
+    except OSError:
+        pass
+_r2_write_rc(["installer_rc=0", "health=FAIL", "rollback=FAIL"])
+au._set_update_state(update_state=None, update_last_error=None, update_progress_message="")
+_r2_defer_thread = au._start_deferred_runner_recheck(0)
+_r2_defer_thread.join(10)
+check("维护 R2-G1：延迟复核线程真跑了 → update_state=error + last_error 含「回滚」",
+      _r2_defer_thread.daemon and not _r2_defer_thread.is_alive()
+      and au._get_update_field("update_state") == "error"
+      and "回滚" in (au._get_update_field("update_last_error") or ""),
+      repr((au._get_update_field("update_state"), au._get_update_field("update_last_error"))))
+check("维护 R2-G1：复核读完就删 rc（同一份结果不会被下一次启动重复上报）",
+      not os.path.isfile(au._rc_path()))
+
+# —— G2：TEMP 不可用只跳过「旧式备份扫描」，后段自愈必须照常 ——
+_r2_no_temp = os.path.join(_r2_root, "no_such_temp_dir")
+os.environ["TEMP"] = _r2_no_temp
+_r2_calls = []
+_r2_saved_cleanup = au._cleanup_update_leftovers
+_r2_saved_appexit = au._ensure_nssm_appexit_sane
+_r2_saved_tray = au._ensure_tray_autostart_sane
+_r2_saved_defer_start = au._start_deferred_runner_recheck
+au._cleanup_update_leftovers = lambda: _r2_calls.append("cleanup")
+au._ensure_nssm_appexit_sane = lambda: (_r2_calls.append("appexit"), "Ignore")[1]
+au._ensure_tray_autostart_sane = lambda: (_r2_calls.append("tray"), {"action": "keep", "want": True, "current": "x"})[1]
+au._start_deferred_runner_recheck = lambda *a, **k: _r2_calls.append("defer")
+try:
+    au._post_upgrade_startup()
+finally:
+    au._cleanup_update_leftovers = _r2_saved_cleanup
+    au._ensure_nssm_appexit_sane = _r2_saved_appexit
+    au._ensure_tray_autostart_sane = _r2_saved_tray
+    au._start_deferred_runner_recheck = _r2_saved_defer_start
+    os.environ["TEMP"] = _r2_root
+check("维护 R2-G2：TEMP 不可用 → 只跳过旧式备份；备份清理 / 升级结论 / AppExit / 托盘 / 延迟复核照常执行",
+      {"cleanup", "appexit", "tray", "defer"} <= set(_r2_calls), repr(_r2_calls))
+check("维护 R2-G2：TEMP 不可用会明确记 WARN（不是静默吞掉整段自愈）",
+      "%TEMP% 不可用" in _r2_read_log(), repr(_r2_read_log()[-140:]))
+
+# —— E1：schtasks /run 失败 → 退回 DETACHED 直启前先删一次性任务 ——
+if os.name == "nt":
+    class _R2Proc(object):
+        def __init__(self, rc):
+            self.returncode = rc
+            self.pid = 4321
+
+    _r2_saved_subproc = au.subprocess
+    _r2_e1_calls = []
+    _r2_e1_delete_rc = [0]
+
+    def _r2_fake_subproc_run(cmd, **kwargs):
+        _r2_e1_calls.append(list(cmd))
+        if "/delete" in cmd:
+            return _R2Proc(_r2_e1_delete_rc[0])
+        if "/create" in cmd:
+            return _R2Proc(0)
+        if "/run" in cmd:
+            return _R2Proc(1)          # /run 失败 → 必须走「删任务 + 退回直启」
+        return _R2Proc(0)
+
+    def _r2_with_subproc_shim(fn):
+        au.subprocess = types.SimpleNamespace(
+            run=_r2_fake_subproc_run,
+            Popen=lambda *a, **k: _R2Proc(4321),
+            TimeoutExpired=_r2_saved_subproc.TimeoutExpired,
+            DEVNULL=_r2_saved_subproc.DEVNULL,
+        )
+        try:
+            return fn()
+        finally:
+            au.subprocess = _r2_saved_subproc
+
+    _r2_launch = _r2_with_subproc_shim(
+        lambda: au._launch_installer(os.path.join(_r2_root, "Fake-Setup.exe")))
+    _r2_e1_cmds = [" ".join(c) for c in _r2_e1_calls]
+    check("维护 R2-E1：schtasks /run 失败 → 先 /delete 一次性任务，再退回 DETACHED 直启",
+          _r2_launch.get("mode") == "detached"
+          and any("/create" in c for c in _r2_e1_cmds)
+          and any("/run" in c for c in _r2_e1_cmds)
+          and any("/delete" in c and au.UPDATE_TASK_NAME in c for c in _r2_e1_cmds)
+          and [i for i, c in enumerate(_r2_e1_cmds) if "/create" in c][0]
+          < [i for i, c in enumerate(_r2_e1_cmds) if "/delete" in c][0],
+          repr(_r2_e1_cmds))
+    _r2_e1_delete_rc[0] = 1             # /delete 自己也失败 → 不致命，仍退回直启
+    _r2_launch2 = _r2_with_subproc_shim(
+        lambda: au._launch_installer(os.path.join(_r2_root, "Fake-Setup.exe")))
+    check("维护 R2-E1：/delete 失败不致命（记 WARN，仍退回 DETACHED 直启）",
+          _r2_launch2.get("mode") == "detached", repr(_r2_launch2))
+    _r2_clear_files()
+
+# —— E2：AppExit 自愈判据 =「Default 与 0 两个都等于 Ignore」——
+def _r2_appexit_case(values):
+    """用替身跑一次 _ensure_nssm_appexit_sane，返回 (返回值, nssm set 调用, 终值)。"""
+    _state = dict(values)
+    _calls = []
+
+    def _fake_read(subvalue=au.APPEXIT_DEFAULT_VALUE):
+        return _state.get(subvalue)
+
+    def _fake_set(subparam, value):
+        _calls.append((subparam, value))
+        _state["" if subparam == "Default" else subparam] = value
+        return True
+
+    _saved_read, _saved_set, _saved_nssm = au._read_nssm_appexit, au._set_nssm_appexit, au.NSSM_PATH
+    au._read_nssm_appexit = _fake_read
+    au._set_nssm_appexit = _fake_set
+    au.NSSM_PATH = _r2_nssm_stub
+    try:
+        _fixed = au._ensure_nssm_appexit_sane()
+    finally:
+        au._read_nssm_appexit = _saved_read
+        au._set_nssm_appexit = _saved_set
+        au.NSSM_PATH = _saved_nssm
+    return _fixed, _calls, _state
+
+
+_r2_ax_fixed1, _r2_ax_calls1, _r2_ax_state1 = _r2_appexit_case({"": "Restart", "0": "Ignore"})
+check("维护 R2-E2：Default=Restart → Default 与 0 两个子值都纠偏成 Ignore（绝不写 Restart）",
+      _r2_ax_fixed1 == "Ignore"
+      and ("Default", "Ignore") in _r2_ax_calls1 and ("0", "Ignore") in _r2_ax_calls1
+      and all(v != "Restart" for _, v in _r2_ax_calls1)
+      and _r2_ax_state1 == {"": "Ignore", "0": "Ignore"},
+      repr((_r2_ax_calls1, _r2_ax_state1)))
+_r2_ax_fixed2, _r2_ax_calls2, _r2_ax_state2 = _r2_appexit_case({"": "Ignore", "0": None})
+check("维护 R2-E2：缺 0 子值（或 0 不是 Ignore）也要纠偏 —— 判据是「两个都等于 Ignore」",
+      ("0", "Ignore") in _r2_ax_calls2 and _r2_ax_state2["0"] == "Ignore",
+      repr(_r2_ax_calls2))
+_r2_ax_fixed3, _r2_ax_calls3, _r2_ax_state3 = _r2_appexit_case({"": "Ignore", "0": "Ignore"})
+check("维护 R2-E2：已合规（Default Ignore + 0 Ignore）→ 一次 nssm set 都不发",
+      _r2_ax_calls3 == [] and _r2_ax_fixed3 == "Ignore", repr(_r2_ax_calls3))
+check("维护 R2-E2：读取函数支持读子值（签名钉住，默认仍读 (默认) 值）",
+      "def _read_nssm_appexit(subvalue=APPEXIT_DEFAULT_VALUE)" in src_upd
+      and '_read_nssm_appexit("0")' in src_upd)
+
+# —— F3：默认关闭时后台线程只记一次 INFO；等待 30s → 300s；启用行为不变 ——
+class _R2Logger(object):
+    def __init__(self):
+        self.lines = []
+
+    def info(self, msg, *a):
+        self.lines.append(msg % a if a else msg)
+
+    def warning(self, msg, *a):
+        self.lines.append("WARN " + (msg % a if a else msg))
+
+    def error(self, msg, *a):
+        self.lines.append("ERROR " + (msg % a if a else msg))
+
+    def exception(self, msg, *a):
+        self.lines.append("EXC " + (msg % a if a else msg))
+
+
+class _R2Stop(object):
+    def __init__(self, plan):
+        self.plan = list(plan)
+        self.waits = []
+
+    def is_set(self):
+        return False
+
+    def wait(self, sec):
+        self.waits.append(sec)
+        return self.plan.pop(0) if self.plan else True
+
+
+_r2_loop_logger = _R2Logger()
+_r2_saved_loop = {k: au.__dict__.get(k, _R2_MISSING) for k in
+                  ("logger", "_load_config", "_do_check_now", "STOP_EVENT", "_auto_update_disabled_logged")}
+au.logger = _r2_loop_logger
+au._load_config = lambda: {"auto_update_enabled": False}
+_r2_stop_disabled = _R2Stop([False, False, True])
+au.STOP_EVENT = _r2_stop_disabled
+au._auto_update_disabled_logged = False
+try:
+    au._auto_update_loop()
+    _r2_disabled_logs = [l for l in _r2_loop_logger.lines if "auto_update_enabled" in l]
+    au._load_config = lambda: {"auto_update_enabled": True, "update_check_interval_hours": 6}
+    au._do_check_now = lambda: {"ok": True, "update_available": False}
+    _r2_stop_enabled = _R2Stop([False, True])
+    au.STOP_EVENT = _r2_stop_enabled
+    au._auto_update_loop()
+finally:
+    for _k, _v in _r2_saved_loop.items():
+        if _v is _R2_MISSING:
+            au.__dict__.pop(_k, None)
+        else:
+            au.__dict__[_k] = _v
+check("维护 R2-F3：默认关闭时后台线程只记一条 INFO（不再每 30 秒刷一条）",
+      len(_r2_disabled_logs) == 1, repr(_r2_disabled_logs))
+check("维护 R2-F3：关闭时等待改成 300 秒；启用时仍按 update_check_interval_hours 周期（行为不变）",
+      au.AUTO_UPDATE_DISABLED_WAIT_SEC == 300
+      and _r2_stop_disabled.waits[:3] == [30, 300, 300]
+      and _r2_stop_enabled.waits == [30, 6 * 3600],
+      repr((_r2_stop_disabled.waits, _r2_stop_enabled.waits)))
+
+# —— C1：SHA256 校验挪进镜像循环（每镜像下完即校验，不符换下一个）——
+_r2_saved_download = au._download_installer
+_r2_saved_do_download = au._do_download_installer
+_r2_saved_mirrors = au.GITHUB_DOWNLOAD_MIRRORS
+_r2_good = b"GOOD-INSTALLER-BYTES" * 64
+_r2_good_digest = hashlib.sha256(_r2_good).hexdigest()
+_r2_dest = os.path.join(_r2_root, "dl_test.exe")
+_r2_tried = []
+
+
+def _r2_fake_mixed_download(url, dest_path, expected_size, cb, timeout):
+    _r2_tried.append(url)
+    if "gh-proxy.com" not in url:  # 第一个镜像（主源）返回 200 + HTML 错误页（校园网/限流常见）
+        pathlib.Path(dest_path).write_bytes(b"<html>429 Too Many Requests</html>")
+        return 31
+    pathlib.Path(dest_path).write_bytes(_r2_good)   # 下一个镜像给真包 → 必须换成它
+    return len(_r2_good)
+
+
+au.GITHUB_DOWNLOAD_MIRRORS = (None, "https://gh-proxy.com")
+au._do_download_installer = _r2_fake_mixed_download
+try:
+    _r2_written = au._download_installer("https://example.invalid/pkg.exe", _r2_dest,
+                                         len(_r2_good), None, expected_sha256=_r2_good_digest)
+    _r2_content_ok = pathlib.Path(_r2_dest).read_bytes() == _r2_good
+finally:
+    au._download_installer = _r2_saved_download
+    au._do_download_installer = _r2_saved_do_download
+    au.GITHUB_DOWNLOAD_MIRRORS = _r2_saved_mirrors
+check("维护 R2-C1：镜像逐个校验 —— 坏镜像（HTML 错误页）删掉换下一个，最终文件好且校验通过",
+      _r2_written == len(_r2_good) and _r2_content_ok
+      and any("gh-proxy.com" in u for u in _r2_tried),
+      repr((_r2_tried, _r2_written)))
+
+
+def _r2_fake_bad_download(url, dest_path, expected_size, cb, timeout):
+    _r2_tried.append(url)
+    pathlib.Path(dest_path).write_bytes(b"junk-not-an-installer")
+    return 22
+
+
+au.GITHUB_DOWNLOAD_MIRRORS = (None, "https://gh-proxy.com")
+au._do_download_installer = _r2_fake_bad_download
+if os.path.isfile(_r2_dest):
+    os.remove(_r2_dest)
+_r2_sha_error = ""
+try:
+    au._download_installer("https://example.invalid/pkg.exe", _r2_dest, 22, None,
+                           expected_sha256=_r2_good_digest)
+except OSError as _exc:
+    _r2_sha_error = str(_exc)
+finally:
+    au._download_installer = _r2_saved_download
+    au._do_download_installer = _r2_saved_do_download
+    au.GITHUB_DOWNLOAD_MIRRORS = _r2_saved_mirrors
+check("维护 R2-C1：所有镜像校验都不符 → 报错且不留下被篡改的安装器（逐镜像清理）",
+      "SHA256" in _r2_sha_error and not os.path.isfile(_r2_dest), repr(_r2_sha_error))
+check("维护 R2-C1：digest 只信主源（下载镜像仍保留，API 镜像禁用）",
+      "gh-proxy.com" in src_upd.split("GITHUB_DOWNLOAD_MIRRORS")[1]
+      and "gh-proxy" not in src_upd.split("GITHUB_API_MIRRORS = (")[1].split(")")[0]
+      and "expected_sha256" in src_upd)
+
+# —— G5：执行器落盘不再出现 CR CR LF（newline="" + 已拼好的 CRLF）——
+_r2_wrap_path = os.path.join(_r2_root, "wrap_g5.cmd")
+_r2_wrap_enc = au._write_update_wrapper(_r2_wrap_path, _r2_wrap_txt)
+_r2_wrap_raw = pathlib.Path(_r2_wrap_path).read_bytes()
+check("维护 R2-G5：执行器落盘 CR CR LF 计数为 0（此前应为 53 处）",
+      _r2_wrap_raw.count(b"\r\r\n") == 0 and _r2_wrap_raw.count(b"\r\n") > 10,
+      "CRLF=%d CRCRLF=%d enc=%s" % (_r2_wrap_raw.count(b"\r\n"),
+                                    _r2_wrap_raw.count(b"\r\r\n"), _r2_wrap_enc))
+check("维护 R2-G5：落盘统一走 _write_update_wrapper（newline 传空串，不重复转换）",
+      "def _write_update_wrapper(path, script)" in src_upd
+      and 'newline=""' in src_upd
+      and "newline=\"\\r\\n\"" not in src_upd)
+
+# —— 沙箱收尾：还原注入点 / TEMP，别影响后面的隐私守卫与版本一致性 ——
+_r2_clear_files()
+for _k, _v in _r2_saved.items():
+    if _v is _R2_MISSING:
+        au.__dict__.pop(_k, None)
+    else:
+        au.__dict__[_k] = _v
+if _r2_saved_temp is None:
+    os.environ.pop("TEMP", None)
+else:
+    os.environ["TEMP"] = _r2_saved_temp
+
+
+
+# ============================================================
+# 维护第二轮（2026-11：核心 / 托盘 / 协议 / CI 审计）
+# C-08 / C-09 / C-14 / C-15 / C-20 / G3 / P2-5 / P2-6 / P2-8 / J1
+# 行为级；不联网、不真装、不起真实服务进程。
+# ============================================================
+
+# —— R2-C08：周期线程退避到期不再 0 秒空转 ——
+import datetime as _dtm2   # noqa: E402
+_future2 = (_dtm2.datetime.now() + _dtm2.timedelta(seconds=60)).isoformat(timespec="seconds")
+check("维护 R2-C08：退避到期至少等一个 tick（不再 0 秒空转刷日志）",
+      svc.compute_periodic_wait_sec(1800, "2000-01-01T00:00:00") == svc.NETWATCH_TICK_SEC
+      and svc.compute_periodic_wait_sec(1800, None) == 1800,
+      repr((svc.compute_periodic_wait_sec(1800, "2000-01-01T00:00:00"),
+            svc.compute_periodic_wait_sec(1800, None))))
+check("维护 R2-C08：退避未到期时按剩余时间等（不会被 interval 吃掉）",
+      abs(svc.compute_periodic_wait_sec(1800, _future2) - 60) < 5,
+      repr(svc.compute_periodic_wait_sec(1800, _future2)))
+
+# —— R2-G3：升级启动钩子挪到 HTTP 绑定之后（不再拖慢 /api/health 首轮探测）——
+_main_src2 = src_svc[src_svc.index("def main():"):]
+check("维护 R2-G3：升级启动钩子排在端口绑定之后、丢进后台线程",
+      _main_src2.index("_post_upgrade_startup") > _main_src2.index("ThreadingHTTPServer(")
+      and "post-upgrade" in _main_src2,
+      "hook 必须在 bind 之后")
+
+# —— R2-C09：is_online 的 None（未知）不再被当成「掉线 + 照发登录」——
+_proto2 = importlib.import_module("protocol")
+_p2_keys = ("_RUN_LOCK", "_STATE", "_STATE_LOCK", "_backoff_until", "_now_iso", "_get_password",
+            "_load_config", "get_current_ssid", "get_local_ips", "guard_allows", "wait_network",
+            "is_online", "login", "discover_network", "_set_state", "_set_backoff",
+            "_reset_backoff", "_auto_profile")
+_p2_orig = {_k: getattr(_proto2, _k, None) for _k in _p2_keys}
+_p2_seen = {}
+_proto2._RUN_LOCK = threading.Lock()
+_proto2._STATE = {}
+_proto2._STATE_LOCK = threading.Lock()
+_proto2._load_config = lambda: {"host": "10.0.0.1", "port": 80, "account": "2023001234",
+                                "suffix": "", "auto_check_interval_min": 30,
+                                "network_wait_timeout_sec": 1, "network_guard_enabled": False,
+                                "guard_allowed_ssids": "", "guard_allowed_subnets": ""}
+_proto2._auto_profile = None
+_proto2.get_current_ssid = lambda: "Campus-WiFi"
+_proto2.get_local_ips = lambda: ["10.0.0.2"]
+_proto2.guard_allows = lambda cfg, ssid, ips: (True, "")
+_proto2.wait_network = lambda h, p, t: True
+_proto2.is_online = lambda h: None
+_proto2.login = lambda *a, **k: _p2_seen.setdefault("login", True) or (True, "x")
+_proto2.discover_network = lambda h: ("10.0.0.2", "aabbccddeeff")
+_proto2._get_password = lambda: "pwd"
+_proto2._now_iso = lambda: "2026-11-16T00:00:00"
+_proto2._backoff_until = lambda: None
+_proto2._set_state = lambda **kw: _p2_seen.update(kw)
+_proto2._set_backoff = lambda: _p2_seen.__setitem__("backoff", True)
+_proto2._reset_backoff = lambda: None
+try:
+    _proto2.run_once("manual")
+    _p2_result = dict(_p2_seen)
+finally:
+    for _k, _v in _p2_orig.items():
+        setattr(_proto2, _k, _v)
+check("维护 R2-C09：在线状态「未知」→ 不登录、不进退避、state.online 保持 None",
+      "login" not in _p2_result and "backoff" not in _p2_result
+      and _p2_result.get("online", "MISSING") is None,
+      repr({k: _p2_result.get(k) for k in ("online", "login", "backoff", "last_error")}))
+
+# —— R2-C20：JSONP 解析贪婪 + 锚定（msg 里带 } / ) 不再截断）——
+class _R2Resp(object):
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_orig_open2 = _proto2.urllib.request.urlopen
+_proto2.urllib.request.urlopen = lambda req, timeout=None: _R2Resp(
+    b'dr1({"result":0,"msg":"bad } ) still text"})')
+try:
+    _ok20, _msg20 = _proto2.login("10.0.0.1", "2023001234", "", "pwd", "10.0.0.2", "")
+finally:
+    _proto2.urllib.request.urlopen = _orig_open2
+check("维护 R2-C20：msg 里含 } / ) 也不会被 JSONP 正则截断",
+      _ok20 is False and "still text" in (_msg20 or ""), repr(_msg20))
+_proto2.urllib.request.urlopen = lambda req, timeout=None: _R2Resp(
+    b'cb({"result":1,"v46ip":"10.0.0.2"});\r\n')
+try:
+    _on20 = _proto2.is_online("10.0.0.1")
+finally:
+    _proto2.urllib.request.urlopen = _orig_open2
+check("维护 R2-C20：is_online 容忍尾部分号 / 空白", _on20 is True, repr(_on20))
+
+# —— R2-C14 / C15：托盘事件与 explorer 重启自愈 ——
+_src_tray2 = pathlib.Path("tray.py").read_text(encoding="utf-8")
+check("维护 R2-C14：网络变化不再在 WndProc 里同步发 HTTP（丢后台线程）",
+      'self._reconnect_async("网络地址变化")' in _src_tray2
+      and 'self._reconnect("网络地址变化")' not in _src_tray2,
+      "WndProc 必须只起线程")
+check("维护 R2-C15：注册 TaskbarCreated，explorer 重启后重新加图标",
+      'RegisterWindowMessageW("TaskbarCreated")' in _src_tray2
+      and "_on_taskbar_created" in _src_tray2)
+if os.name == "nt":
+    _tray_app2 = _tr.TrayApp()
+    check("维护 R2-C15（行为级）：TaskbarCreated 消息 id 已注册（>= 0xC000）",
+          isinstance(_tray_app2.wm_taskbar_created, int)
+          and _tray_app2.wm_taskbar_created >= 0xC000,
+          repr(_tray_app2.wm_taskbar_created))
+
+# —— R2-CI：发布只允许 main + 串行化；静默安装无 MsgBox；卸载清托盘注册表 ——
+_wf2 = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+check("维护 R2-CI：非 main 的构建不再发布 release（dispatch 不能从任意分支发正式版）",
+      _wf2.count("refs/heads/main") >= 2 and "非 main 的构建只产出安装包 artifact" in _wf2)
+check("维护 R2-CI：发布串行化（同 ref 并发构建不会互相踩 tag）",
+      "concurrency:" in _wf2 and "build-installer-" in _wf2
+      and "cancel-in-progress: false" in _wf2)
+_iss2 = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
+check("维护 R2-P2-8：静默安装路径的 MsgBox 都有 WizardSilent 守卫",
+      _iss2.count("if not WizardSilent then") >= 2,
+      "守卫数=%d" % _iss2.count("if not WizardSilent then"))
+_src_uninst2 = pathlib.Path("uninstall.bat").read_text(encoding="utf-8", errors="replace")
+check("维护 R2-J1：卸载显式清理托盘 Run 值与偏好键（不只靠 Inno 卸载记录）",
+      "DelTrayRunValue" in _iss2 and "DelTrayPref" in _iss2
+      and "DrcomAutoLoginTray" in _src_uninst2)
 
 
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
@@ -2444,7 +3219,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.1", version.VERSION == "2.1.3.1", version.VERSION)
+check("版本 = 2.1.3.2", version.VERSION == "2.1.3.2", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

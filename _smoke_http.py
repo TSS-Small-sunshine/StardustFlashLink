@@ -306,6 +306,45 @@ try:
     _check("v2.1.3.0 本来就没有专属密码 → 删除请求 400",
            _post_json("/api/credentials", {"scope": "profile", "name": "教学楼",
                                            "clear_password": True})[0], 400)
+
+    # ============================================================
+    # 维护第二轮（审计 H1）：/api/update/* 的契约以前零覆盖 —— 状态码 / 字段漂移
+    # 只有用户在界面上手点才发现。这里用替身把 HTTP 层的契约钉住。
+    # ============================================================
+    class _FakeUpdater(object):
+        busy = "下载中 42%"
+
+        def _schedule_success_clear(self):
+            pass
+
+        def update_busy_message(self):
+            return self.busy
+
+        def _log_upgrade(self, level, msg):
+            pass
+
+        def api_get_rollback(self):
+            return 200, {"ok": True, "backups": []}
+
+        def api_post_rollback(self, payload):
+            return 400, {"ok": False, "error": "版本号不合法"}
+
+    web_api._auto_update_mod = _FakeUpdater()
+    web_api._snapshot_state = lambda: {
+        "update_state": "idle", "update_progress": 0, "update_progress_message": "",
+        "update_available": False, "update_latest_version": None, "update_last_error": None,
+    }
+    _u = _get_json("/api/update/status")
+    _check("维护 R2-H1：GET /api/update/status 契约字段齐全（local_version / state / progress_pct）",
+           isinstance(_u, dict) and "local_version" in _u and "state" in _u
+           and "progress_pct" in _u and _u.get("local_version") == web_api.VERSION,
+           True, str(sorted((_u or {}).keys()))[:120])
+    _st_busy, _b_busy = _post_json("/api/update/install", {})
+    _check("维护 R2-H1：忙时 POST /api/update/install → 409 + 可读原因（不再假成功）",
+           (_st_busy, "任务进行中" in (_b_busy or {}).get("error", "")), (409, True))
+    _st_rb, _b_rb = _post_json("/api/rollback", {"version": "../evil"})
+    _check("维护 R2-H1：POST /api/rollback 坏版本号 → 400（不把路径拼进备份目录）",
+           (_st_rb, (_b_rb or {}).get("ok")), (400, False))
 finally:
     server.shutdown()
 

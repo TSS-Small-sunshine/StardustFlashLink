@@ -234,7 +234,9 @@ def is_online(host):
     except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException) as exc:
         _log("在线检查网络异常: %s", exc, level=logging.DEBUG)
         return None
-    m = re.search(r"\((\{.*?\})\s*\)", txt, re.S)
+    # 审计 C-20：锚定到末尾 + 贪婪匹配 —— 非贪婪的 \{.*?\} 遇到响应里带 } / ) 的字段会被截断，
+    # 不锚定则可能把页面里任意括号串当 JSONP。lenient 只放宽尾部分号/空白。
+    m = re.search(r"\((\{.*\})\s*\)\s*;?\s*$", txt, re.S)
     if not m:
         _log("在线检查响应非 JSONP: %r", txt[:120], level=logging.DEBUG)
         return None
@@ -331,7 +333,8 @@ def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
         _log("登录请求异常: %s", safe, level=logging.ERROR)
         return False, "请求失败: {}".format(safe)
     # 解析 JSONP：dr1234({...});
-    m = re.search(r"\((\{.*?\})\s*\)\s*;?\s*$", txt, re.S)
+    # 审计 C-20：贪婪匹配（msg 里含 } / ) 时不会被截断）；仍锚定末尾，避免把中间片段当 JSONP。
+    m = re.search(r"\((\{.*\})\s*\)\s*;?\s*$", txt, re.S)
     if not m:
         # 审计 C-10：响应体也可能是门户回显的参数（含 user_password）—— 同样过擦除
         return False, "login 接口返回非 JSONP: {}".format(_scrub_url(txt[:80]))
@@ -551,10 +554,23 @@ def run_once(reason):
             _set_state(network_reachable=True)
 
             # 2. 查在线
-            if is_online(host):
+            # 审计 C-09：is_online 有三种语义（True / False / None=网络异常或解析失败）。
+            # 旧实现 `if is_online(host):` 把 None 与 False 混同 → ① UI 显示「未登录」而实际可能在线；
+            # ② 拿一次抖动结果多打一次登录请求（Dr.COM 对已在线会话再登录可能踢掉原会话）；
+            # ③ 失败后进 5 分钟退避，把一次网络抖动放大成"停摆"。现在 None 单独处理：
+            #    只记「未知」、不登录、也不计退避 ✓。
+            _online = is_online(host)
+            if _online is True:
                 _set_state(online=True, last_error=None)
                 _reset_backoff()
                 _log("已在线，无需登录")
+                return
+            if _online is None:
+                _log("在线状态未知（网关响应异常），本次不登录、不计退避",
+                     level=logging.WARNING)
+                # 不清 last_login_at / online=False：不要把"查不到"说成"掉线" ✗
+                _set_state(network_reachable=True, online=None,
+                           last_error="在线状态未知（网关响应异常）")
                 return
 
             _set_state(online=False)

@@ -338,8 +338,17 @@ class TrayApp(object):
         self.last_reconnect_at = None    # v2.0.7.0：上次因事件触发重连的时刻（去抖用）
         self.code_sig = None             # v2.0.7.1：自己脚本的指纹，变了就换新代码重启
         self.mutex_handle = None         # v2.0.7.1：单实例互斥体句柄（重启自己前必须放手）
+        self._reconnect_lock = threading.Lock()   # 审计 C-14：后台重连串行化（事件去抖）
+        self.wm_taskbar_created = None   # 审计 C-15：explorer 重启广播的消息 id
         self.kernel32, self.user32, self.shell32, self.iphlpapi = _libs()
         self._declare_win32()
+        # 审计 C-15：explorer 崩溃/重启后通知区会被清空，系统会向所有顶层窗口广播
+        # "TaskbarCreated"。注册这条消息，收到就重新 Shell_NotifyIcon(NIM_ADD)；
+        # 不注册的话图标**永久消失**（进程还在、tooltip 还在，但用户看不到也点不到）。
+        try:
+            self.wm_taskbar_created = int(self.user32.RegisterWindowMessageW("TaskbarCreated") or 0)
+        except (AttributeError, OSError, ValueError):   # noqa: BLE001 — 注册失败只丢这项自愈
+            self.wm_taskbar_created = None
 
     def _declare_win32(self):
         """把用到的 Win32 调用签名声明清楚。
@@ -372,6 +381,8 @@ class TrayApp(object):
         u32.SetForegroundWindow.argtypes = [wintypes.HWND]
         u32.DestroyWindow.argtypes = [wintypes.HWND]
         u32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        u32.RegisterWindowMessageW.restype = wintypes.UINT      # 审计 C-15：TaskbarCreated
+        u32.RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
         u32.PostQuitMessage.argtypes = [ctypes.c_int]
         u32.SetTimer.restype = ctypes.c_size_t
         u32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p]
@@ -552,6 +563,25 @@ class TrayApp(object):
         if ok:
             self._poll()        # 顺手立刻刷新一次状态，不等下一个 10 秒
 
+    def _reconnect_async(self, reason):
+        """把重连丢到后台线程（审计 C-14）。
+
+        旧实现直接在 WndProc 里同步发 HTTP（最长 HTTP_TIMEOUT=5s）：这段时间消息循环被
+        冻住 —— 托盘右键菜单点不动、气泡与轮询都停摆，事件连发时还会串行叠加。
+        现在 WndProc 只负责起线程；同一时刻只允许一个重连在跑（去抖逻辑照旧）。
+        """
+        def _run():
+            with self._reconnect_lock:
+                self._reconnect(reason)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_taskbar_created(self):
+        """explorer 重启后重新加入通知区图标（审计 C-15）。"""
+        _log("检测到任务栏重启（TaskbarCreated），重新加入通知区图标")
+        ok = self._add_icon()
+        if not ok:
+            _log("任务栏重启后重新加图标失败（下一次轮询仍会更新 tooltip）")
+
     def _addr_change_loop(self):
         """后台线程：等一次网络地址变化 → PostMessage 叫醒主循环 → 再等下一次。
 
@@ -617,6 +647,10 @@ class TrayApp(object):
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         try:
+            # 审计 C-15：explorer 重启广播（id 由 RegisterWindowMessageW 动态分配）
+            if self.wm_taskbar_created and msg == self.wm_taskbar_created:
+                self._on_taskbar_created()
+                return 0
             if msg == WM_TRAY:
                 if lparam == WM_LBUTTONDBLCLK:
                     self._open(api_base())
@@ -632,7 +666,8 @@ class TrayApp(object):
                     self.user32.SetTimer(self.hwnd, TIMER_WAKE, WAKE_SETTLE_SEC * 1000, None)
                 return 1        # TRUE：电源广播要求「已处理」才回 1
             if msg == WM_NETCHANGE:
-                self._reconnect("网络地址变化")
+                # 审计 C-14：WndProc 里只起线程，不在这里等 HTTP（否则消息循环最长冻 5 秒）
+                self._reconnect_async("网络地址变化")
                 return 0
             if msg == WM_TIMER:
                 if wparam == TIMER_WAKE:
