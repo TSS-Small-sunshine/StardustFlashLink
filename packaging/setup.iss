@@ -1,14 +1,14 @@
 ; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.1.3.1
+;   版本: v2.1.3.2
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.1.3.1.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.1.3.2.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.3.1"
+  #define MyAppVersion "2.1.3.2"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -129,6 +129,11 @@ Type: filesandordirs; Name: "{app}\backup"
 [UninstallRun]
 Filename: "{cmd}"; Parameters: "/c ""{app}\tools\nssm.exe"" stop DrcomAutoLogin"; Flags: runhidden; RunOnceId: "StopDrcomAutoLogin"
 Filename: "{cmd}"; Parameters: "/c ""{app}\tools\nssm.exe"" remove DrcomAutoLogin confirm"; Flags: runhidden; RunOnceId: "RemoveDrcomAutoLogin"
+; 审计 J1：托盘自启值也可能是**服务启动时对齐**写入的（静默升级路径 Inno 没有这条值的
+; 卸载记录），[Registry] 的 uninsdeletevalue 只在向导勾了 trayicon 时才命中。
+; 这里显式清掉，避免卸载后每次登录都报错（Run 值指向已删除的 pythonw.exe）。
+Filename: "{cmd}"; Parameters: "/c reg delete ""HKLM\Software\Microsoft\Windows\CurrentVersion\Run"" /v DrcomAutoLoginTray /f"; Flags: runhidden; RunOnceId: "DelTrayRunValue"
+Filename: "{cmd}"; Parameters: "/c reg delete ""HKLM\SOFTWARE\DrcomAutoLogin"" /f"; Flags: runhidden; RunOnceId: "DelTrayPref"
 
 [Code]
 
@@ -249,6 +254,8 @@ begin
   // 兜底报错：内嵌 Python 缺失（正常安装包不会走到这里）
   if PythonPath = '' then
   begin
+    // 审计 P2-8：自动升级跑在服务会话（无人在场），静默安装里弹 MsgBox 会让安装**永久挂起** ✗
+    if not WizardSilent then
     MsgBox('未找到可用的 Python 解释器。' + #13#10 + #13#10 +
            '安装包应自带内嵌 Python：' + AppDir + '\python\python.exe' + #13#10 +
            '若该文件缺失，说明安装包不完整，请重新下载安装包。' + #13#10 + #13#10 +
@@ -272,6 +279,8 @@ begin
                              'AppParameters',
                              '"' + ScriptPath + '"') then
   begin
+    // 审计 P2-8：同上 —— 静默安装不能弹窗（会挂起升级）✗
+    if not WizardSilent then
     MsgBox('注册服务失败：无法写入服务参数 AppParameters。' + #13#10 + #13#10 +
            '注册表项：HKLM\SYSTEM\CurrentControlSet\Services\DrcomAutoLogin\Parameters' + #13#10 + #13#10 +
            '请确认以管理员身份运行安装程序后重试。', mbError, MB_OK);

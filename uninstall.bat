@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   uninstall.bat - 移除 星尘闪连 (Stardust Flash Link) 服务 (v2.1.3.1)
+REM   uninstall.bat - 移除 星尘闪连 (Stardust Flash Link) 服务 (v2.1.3.2)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
 REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
 REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
@@ -30,7 +30,7 @@ set "LOG_DIR=!SCRIPT_DIR!\logs"
 
 echo.
 echo ============================================================
-echo   星尘闪连 (Stardust Flash Link) 服务 - 卸载 (v2.1.3.1)
+echo   星尘闪连 (Stardust Flash Link) 服务 - 卸载 (v2.1.3.2)
 echo ============================================================
 echo   脚本目录: !SCRIPT_DIR!
 echo ============================================================
@@ -49,6 +49,24 @@ if exist "!NSSM!" (
 )
 sc stop DrcomAutoLogin >nul 2>&1
 sc delete DrcomAutoLogin >nul 2>&1
+
+REM ============================================================
+REM   清理「服务启动时对齐」写入的托盘自启项与偏好键（审计 J1）
+REM   这两项可能不是安装器写的（静默升级路径），Inno 的卸载记录里没有 → 必须显式删，
+REM   否则卸载后每次登录都会尝试启动已删除的 pythonw.exe 并报错。
+REM ============================================================
+reg delete "HKLM\Software\Microsoft\Windows\CurrentVersion\Run" /v DrcomAutoLoginTray /f >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] 托盘自启项不存在，跳过
+) else (
+    echo [INFO] 已删除托盘自启项
+)
+reg delete "HKLM\SOFTWARE\DrcomAutoLogin" /f >nul 2>&1
+if errorlevel 1 (
+    echo [INFO] 托盘偏好键不存在，跳过
+) else (
+    echo [INFO] 已删除托盘偏好键
+)
 
 REM ============================================================
 REM   删除桌面快捷方式（cmd 原生命令，BOM+chcp 65001 下中文路径 OK）
