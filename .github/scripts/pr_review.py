@@ -490,7 +490,8 @@ def review(pr, facts, repo_dir):
         match = re.search(r'^VERSION\s*=\s*["\']([^"\']+)["\']', head_version, re.M)
         version = match.group(1) if match else ""
         files = {path: git_show(path, repo_dir) for path in (
-            *VERSION_SYNC_FILES, VERSION_SYNC_CHANGELOG, VERSION_SYNC_RELEASE_NOTES)}
+            *VERSION_SYNC_FILES, *VERSION_AUTOREAD_FILES,
+            VERSION_SYNC_CHANGELOG, VERSION_SYNC_RELEASE_NOTES)}
         findings += check_version_sync(version, files)
 
     if VERSION_SYNC_RELEASE_NOTES in facts["paths"]:
