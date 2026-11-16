@@ -3624,6 +3624,51 @@ check("维护 R3-CI：卸载脚本不再硬编码桌面 / 开始菜单路径（O
       and "%APPDATA%\\Microsoft" not in _uninst3)
 
 
+
+# ============================================================
+# 维护第四轮（2026-11：供应链锁 / 删方案清密码）
+# P2-4 / J7 / C-26
+# ============================================================
+
+# —— R4-C26：删除方案会一并删掉专属密码文件（避免同名重建继承旧密码）——
+_src_web4 = pathlib.Path("web_api.py").read_text(encoding="utf-8")
+check("维护 R4-C26：删方案接口清理专属密码，并只增返回字段 password_removed",
+      "password_removed" in _src_web4
+      and "_remove_profile_password" in _src_web4
+      and "def api_post_profiles_delete" in _src_web4)
+
+# —— R4-供应链：上游二进制固定 SHA256（tools.lock.json 为唯一事实来源）——
+_lock_doc = json.loads(pathlib.Path("tools.lock.json").read_text(encoding="utf-8"))
+_lock_tools = _lock_doc.get("tools") or []
+_lock_urls = {str(t.get("url", "")).strip(): t for t in _lock_tools}
+_nssm_url = "https://nssm.cc/release/nssm-2.24.zip"
+check("维护 R4-供应链：tools.lock.json 锁定 NSSM 与内嵌 Python，哈希格式合法",
+      _nssm_url in _lock_urls
+      and _lock_urls[_nssm_url].get("required") is True
+      and all(isinstance(t.get("sha256"), str) and len(t["sha256"]) == 64
+              for t in _lock_tools)
+      and any("python-embed" in str(t.get("name", "")) for t in _lock_tools),
+      "entries=%d" % len(_lock_tools))
+_wf4 = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+_bp4 = pathlib.Path("packaging/build.ps1").read_text(encoding="utf-8")
+_ib4 = pathlib.Path("install.bat").read_text(encoding="utf-8", errors="replace")
+_nssm_sha = _lock_urls[_nssm_url]["sha256"]
+check("维护 R4-供应链：CI / 本地构建 / 源码安装都从 lock 读哈希校验（不硬编码哈希）",
+      "tools.lock.json" in _wf4 and "Get-FileHash" in _wf4
+      and "tools.lock.json" in _bp4 and "Get-FileHash" in _bp4
+      and "tools.lock.json" in _ib4,
+      "wf=%s build=%s inst=%s" % ("tools.lock.json" in _wf4,
+                                  "tools.lock.json" in _bp4,
+                                  "tools.lock.json" in _ib4))
+check("维护 R4-供应链：哈希值只出现在 tools.lock.json（代码 / 脚本里不重复写死）",
+      _nssm_sha not in _wf4 and _nssm_sha not in _bp4 and _nssm_sha not in _ib4)
+check("维护 R4-供应链：浮动下载物（ISCC / 中文语言文件）在 not_locked 里写明未锁定原因",
+      isinstance(_lock_doc.get("not_locked"), list)
+      and any("innosetup" in str(n.get("name", "")).lower()
+              for n in _lock_doc["not_locked"]),
+      repr([n.get("name") for n in (_lock_doc.get("not_locked") or [])]))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -3712,7 +3757,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.3", version.VERSION == "2.1.3.3", version.VERSION)
+check("版本 = 2.1.3.4", version.VERSION == "2.1.3.4", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

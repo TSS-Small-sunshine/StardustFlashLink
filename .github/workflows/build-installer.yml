@@ -56,6 +56,111 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ============================================================
+      #   审计 P2-4 / J7：上游二进制零校验 —— 供应链收口
+      #   nssm.exe 会以 LocalSystem 常驻、内嵌 Python 是运行库、ISCC 是编译器；
+      #   三样以前都只凭「文件够大」判真伪 = 信任三条第三方 HTTP 链路。
+      #   现在唯一事实来源是仓库根的 tools.lock.json（本 YAML 里不写任何哈希字面量）。
+      #   本步骤：定位 / 解析 lock，并把「比对 SHA256」的公共函数写进 RUNNER_TEMP
+      #   （临时文件，不入库、不进 git status），后面的下载步骤 dot-source 它。
+      # ============================================================
+      - name: Load tools.lock.json (supply-chain guard)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $lockPath = @(
+            (Join-Path $env:GITHUB_WORKSPACE "tools.lock.json"),
+            (Join-Path $env:GITHUB_WORKSPACE "packaging/tools.lock.json")
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+
+          $helper = Join-Path $env:RUNNER_TEMP "tools-lock-guard.ps1"
+          # 生成校验器。注意：哈希只从 lock 读，这里不出现任何 sha256 字面量。
+          # 每行用单引号包住 -> PowerShell 不会提前展开 $ 变量，写进文件的就是函数原文。
+          $lines = @(
+            '# tools.lock.json 校验器（build-installer.yml 生成到 RUNNER_TEMP，不入库）',
+            'function Get-ToolLockDocument {',
+            '    param([string]$LockPath)',
+            '    if (-not $LockPath -or -not (Test-Path -LiteralPath $LockPath -PathType Leaf)) { return $null }',
+            '    try { return (Get-Content -LiteralPath $LockPath -Raw -Encoding utf8 | ConvertFrom-Json) }',
+            '    catch { Write-Host ("::warning::tools.lock.json 解析失败：" + $_.Exception.Message); return $null }',
+            '}',
+            '',
+            'function Get-ToolLockEntry {',
+            '    param($Lock, [string]$Url)',
+            '    if (-not $Lock) { return $null }',
+            '    foreach ($t in @($Lock.tools)) {',
+            '        if ($t -and $t.url -and ([string]$t.url).Trim() -eq $Url) { return $t }',
+            '    }',
+            '    return $null',
+            '}',
+            '',
+            '# 校验一个已下载的文件：返回 $true = 已按 lock 校验通过；$false = lock 缺失/无条目（按策略降级）',
+            'function Assert-LockedDownload {',
+            '    param(',
+            '        [Parameter(Mandatory=$true)][string]$Path,',
+            '        [Parameter(Mandatory=$true)][string]$Url,',
+            '        [string]$Label = "下载物",',
+            '        [switch]$Required',
+            '    )',
+            '    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw ("$Label 不存在，无法校验：" + $Path) }',
+            '    $lock = Get-ToolLockDocument -LockPath $env:TOOL_LOCK_PATH',
+            '    if (-not $lock) {',
+            '        if ($Required) {',
+            '            Write-Host "::error::$Label 是强制校验项，但 tools.lock.json 缺失或无法解析（TOOL_LOCK_PATH=$env:TOOL_LOCK_PATH）"',
+            '            throw "$Label 供应链校验失败：没有可用的 tools.lock.json"',
+            '        }',
+            '        Write-Host "::warning::$Label 没有可用的 tools.lock.json，跳过哈希校验（仅做大小检查）"',
+            '        return $false',
+            '    }',
+            '    $entry = Get-ToolLockEntry -Lock $lock -Url $Url',
+            '    if (-not $entry) {',
+            '        if ($Required) {',
+            '            Write-Host "::error::$Label 是强制校验项，但 tools.lock.json 里没有它的条目：$Url"',
+            '            throw "$Label 供应链校验失败：lock 缺少条目"',
+            '        }',
+            '        Write-Host "::warning::$Label 在 tools.lock.json 里没有条目（$Url），回退为仅检查大小、不阻断构建；请尽快补锁"',
+            '        return $false',
+            '    }',
+            '    $expected = ([string]$entry.sha256).Trim().ToLower()',
+            '    if ($expected -notmatch "^[0-9a-f]{64}$") {',
+            '        Write-Host "::error::tools.lock.json 里 $Label 的 sha256 不是 64 位十六进制：$expected"',
+            '        throw "$Label 供应链校验失败：lock 条目格式非法"',
+            '    }',
+            '    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLower()',
+            '    $size = (Get-Item -LiteralPath $Path).Length',
+            '    if ($entry.size_bytes -and ([int64]$entry.size_bytes -ne $size)) {',
+            '        Write-Host "::warning::$Label 大小与 lock 记录不一致（期望 $($entry.size_bytes) 字节，实际 $size 字节），以 SHA256 判定为准"',
+            '    }',
+            '    if ($actual -ne $expected) {',
+            '        Write-Host "::error::$Label SHA256 不匹配：期望 $expected（tools.lock.json），实际 $actual（来源 $Url）"',
+            '        throw "$Label 供应链校验失败：哈希不匹配，拒绝使用该下载物"',
+            '    }',
+            '    Write-Host "[校验通过] $Label 版本 $($entry.version)，SHA256 $actual，$size 字节（来源 $Url）"',
+            '    return $true',
+            '}'
+          )
+          Set-Content -LiteralPath $helper -Value $lines -Encoding utf8
+
+          "TOOL_LOCK_PATH=$lockPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TOOL_LOCK_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          if (-not $lockPath) {
+            Write-Host "::warning::仓库里没有 tools.lock.json —— 所有下载物退化为「仅检查大小」，NSSM 那一步会因此直接失败"
+          } else {
+            $doc = Get-Content -LiteralPath $lockPath -Raw -Encoding utf8 | ConvertFrom-Json
+            Write-Host ("tools.lock.json = $lockPath（已锁定 " + (@($doc.tools).Count) + " 个固定版本上游文件）")
+            foreach ($t in @($doc.tools)) {
+              $h = ([string]$t.sha256).ToLower()
+              if ($h.Length -ge 12) { $h = $h.Substring(0, 12) + "…" }
+              Write-Host ("  - " + $t.name + " " + $t.version + "  sha256=" + $h + "  " + $t.url)
+            }
+            # 浮动资源（ISCC 安装器 / issrc main 分支的中文语言文件）不写固定哈希，
+            # 但必须诚实地把「未锁定」暴露在 CI 日志里，而不是假装已经校验过。
+            foreach ($n in @($doc.not_locked)) {
+              Write-Host ("::warning::未锁定（浮动版本，不写死哈希）：" + $n.name + " — " + $n.url + "；原因见 tools.lock.json 的 not_locked")
+            }
+          }
+
       - name: Install Inno Setup 6 (Chocolatey)
         shell: pwsh
         continue-on-error: true
@@ -70,6 +175,10 @@ jobs:
           )
           if ($candidates | Where-Object { Test-Path $_ }) { Write-Host "ISCC 已就绪（Chocolatey 安装成功）"; exit 0 }
           Write-Host "Chocolatey 未装上，改用官方静默安装…"
+          # 审计 P2-4：这个 URL 不带版本号（上游 302 到当前最新 6.x），内容会变，
+          # 因此没有写进 tools.lock.json 的 tools[]（见 not_locked）。它是 choco 失败时的兜底，
+          # 且 ISCC 只参与编译、不进安装包、不以服务身份常驻 —— 风险等级低于 nssm / 内嵌 Python。
+          Write-Host "::warning::Inno Setup 官方安装器未做哈希校验（URL 浮动、不含版本号），见 tools.lock.json 的 not_locked"
           $exe = Join-Path $env:RUNNER_TEMP "innosetup.exe"
           Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $exe -UseBasicParsing
           Start-Process -FilePath $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
@@ -89,6 +198,10 @@ jobs:
           $langDir  = Join-Path (Split-Path $iscc -Parent) "Languages"
           $langFile = Join-Path $langDir "ChineseSimplified.isl"
           if (-not (Test-Path $langFile)) {
+            # 审计 P2-4：语言文件取自 issrc 的 **main 分支**（浮动引用），内容随上游提交变化，
+            # 写死哈希会把上游正常更新变成构建红；因此只保留「>1000 字节」的形状校验，
+            # 并在 tools.lock.json 的 not_locked 里记录未锁定原因（收口办法：固定到某个 commit SHA）。
+            Write-Host "::warning::ChineseSimplified.isl 未做哈希校验（来自 issrc main 分支，内容浮动），见 tools.lock.json 的 not_locked"
             New-Item -ItemType Directory -Force -Path $langDir | Out-Null
             Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile $langFile -UseBasicParsing
             Write-Host "已下载中文语言文件"
@@ -100,9 +213,17 @@ jobs:
       - name: Prepare NSSM
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:TOOL_LOCK_HELPER) { throw "缺少 tools.lock.json 校验器（TOOL_LOCK_HELPER 未设置）" }
+          . $env:TOOL_LOCK_HELPER
           New-Item -ItemType Directory -Force -Path "tools" | Out-Null
+          $nssmUrl = "https://nssm.cc/release/nssm-2.24.zip"
           $zip = Join-Path $env:RUNNER_TEMP "nssm.zip"
-          Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile $zip -UseBasicParsing
+          Invoke-WebRequest -Uri $nssmUrl -OutFile $zip -UseBasicParsing
+          # 审计 P2-4：nssm.exe 会被复制为 tools\nssm.exe → 打进安装包 → 以 LocalSystem 注册并常驻服务，
+          # 是整条供应链里影响面最大的一个。所以它是唯一「强制校验」项：
+          # lock 缺失 / lock 里没有条目 / 哈希不匹配 → ::error:: + throw，构建必须红（不降级）。
+          Assert-LockedDownload -Path $zip -Url $nssmUrl -Label "NSSM 2.24 压缩包" -Required | Out-Null
           $dst = Join-Path $env:RUNNER_TEMP "nssm-extract"
           if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
           Expand-Archive -Path $zip -DestinationPath $dst -Force
@@ -114,8 +235,12 @@ jobs:
       - name: Prepare embedded Python
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          if (-not $env:TOOL_LOCK_HELPER) { throw "缺少 tools.lock.json 校验器（TOOL_LOCK_HELPER 未设置）" }
+          . $env:TOOL_LOCK_HELPER
           # 官方 embeddable 包（纯标准库脚本专用运行时的最小发行版）
-          # 按顺序尝试，第一个成功下载的即采用（避免某个小版本被撤下导致构建失败）
+          # 按顺序尝试，第一个「下载成功 + 通过 tools.lock.json 校验」的即采用
+          # （避免某个小版本被上游撤下导致构建失败）。
           $candidates = @(
             "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
             "https://www.python.org/ftp/python/3.12.9/python-3.12.9-embed-amd64.zip",
@@ -123,14 +248,31 @@ jobs:
           )
           $zip = Join-Path $env:RUNNER_TEMP "python-embed.zip"
           $ok = $false
+          $usedUrl = ""
           foreach ($u in $candidates) {
+            if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue }
+            $downloaded = $false
             try {
               Write-Host "尝试下载: $u"
               Invoke-WebRequest -Uri $u -OutFile $zip -UseBasicParsing -TimeoutSec 180
-              if ((Get-Item $zip).Length -gt 5000000) { Write-Host "下载成功: $((Get-Item $zip).Length) 字节"; $ok = $true; break }
-            } catch { Write-Host "失败: $($_.Exception.Message)" }
+              $downloaded = $true
+            } catch { Write-Host "下载失败: $($_.Exception.Message)" }
+
+            if (-not $downloaded) { continue }
+            # 审计 P2-4：哈希校验放在 try/catch **之外** —— 内容对不上必须让构建红，
+            # 不能被「换下一个候选」的容错逻辑吞掉（lock 里缺条目才是可降级的可用性问题：
+            # Python 小版本退役时只 ::warning:: 放行，避免整条构建线停产）。
+            Assert-LockedDownload -Path $zip -Url $u -Label ("内嵌 Python 压缩包（" + ($u -split "/")[-1] + "）") | Out-Null
+            if ((Get-Item -LiteralPath $zip).Length -gt 5000000) {
+              Write-Host "下载成功: $((Get-Item -LiteralPath $zip).Length) 字节"
+              $ok = $true
+              $usedUrl = $u
+              break
+            }
+            Write-Host "压缩包大小异常（<= 5 MB，疑似错误页），换下一个候选"
           }
-          if (-not $ok) { throw "内嵌 Python 下载失败（所有候选地址均不可用）" }
+          if (-not $ok) { throw "内嵌 Python 下载失败（所有候选地址均不可用或大小异常）" }
+          Write-Host "内嵌 Python 来源: $usedUrl"
 
           $dst = "python"
           if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }

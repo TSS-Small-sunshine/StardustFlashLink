@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.3)
+REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.4)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
 REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
 REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
@@ -36,7 +36,7 @@ set "LOG_DIR=!SCRIPT_DIR!\logs"
 
 echo.
 echo ============================================================
-echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.3)
+echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.4)
 echo ============================================================
 echo   脚本目录: !SCRIPT_DIR!
 echo ============================================================
@@ -109,12 +109,27 @@ if exist "!NSSM!" (
     if not exist "!SCRIPT_DIR!\tools" mkdir "!SCRIPT_DIR!\tools"
 
     REM 把目标 zip 路径 + .ps1 名称放到环境变量（Unicode 安全）
+    REM 审计 P2-4：下载完立刻按仓库根的 tools.lock.json 比对 SHA256（哈希值只在 lock 里，本文件不写死）
+    set "NSSM_LOCK_PATH=!SCRIPT_DIR!\tools.lock.json"
     set "NSSM_ZIP_PATH=!TMP!\nssm.zip"
     set "NSSM_DL_PS1_NAME=drcom_nssm_dl_!RANDOM!.ps1"
-    powershell -NoProfile -Command "try { $ErrorActionPreference='Stop'; $p = Join-Path ([IO.Path]::GetTempPath()) $env:NSSM_DL_PS1_NAME; $body='try { Invoke-WebRequest -Uri ''https://nssm.cc/release/nssm-2.24.zip'' -OutFile $env:NSSM_ZIP_PATH -UseBasicParsing; Write-Host ''NSSM_OK'' } catch { Write-Host (''NSSM_FAIL: '' + $_.Exception.Message); exit 1 }'; [IO.File]::WriteAllText($p, $body, (New-Object Text.UTF8Encoding $true)); & powershell -NoProfile -ExecutionPolicy Bypass -File $p; $rc=$LASTEXITCODE; Remove-Item $p -Force -ErrorAction SilentlyContinue; exit $rc } catch { Write-Host ('FAIL: ' + $_.Exception.Message); exit 1 }"
+    powershell -NoProfile -Command "try { $ErrorActionPreference='Stop'; $p = Join-Path ([IO.Path]::GetTempPath()) $env:NSSM_DL_PS1_NAME; $body='$ErrorActionPreference = ''Stop''; try { Invoke-WebRequest -Uri ''https://nssm.cc/release/nssm-2.24.zip'' -OutFile $env:NSSM_ZIP_PATH -UseBasicParsing } catch { Write-Host (''NSSM_FAIL: '' + $_.Exception.Message); exit 1 }; Write-Host ''NSSM_DL_OK''; $zip = $env:NSSM_ZIP_PATH; $lockPath = $env:NSSM_LOCK_PATH; $url = ''https://nssm.cc/release/nssm-2.24.zip''; $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower(); if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { Write-Host (''[WARN] 未找到 tools.lock.json（'' + $lockPath + ''），跳过 NSSM 哈希校验''); exit 0 }; try { $doc = Get-Content -LiteralPath $lockPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { Write-Host (''[WARN] tools.lock.json 解析失败（'' + $_.Exception.Message + ''），跳过 NSSM 哈希校验''); exit 0 }; $expected = ''''; foreach ($t in @($doc.tools)) { if ($t -and $t.url -eq $url -and $t.sha256) { $expected = ([string]$t.sha256).Trim().ToLower(); break } }; if (-not $expected) { Write-Host ''[WARN] tools.lock.json 里没有 NSSM 条目，跳过哈希校验''; exit 0 }; if ($actual -eq $expected) { Write-Host (''[INFO] 校验通过：NSSM SHA256 '' + $actual); exit 0 }; Write-Host (''[ERROR] 校验不匹配：期望 '' + $expected + ''，实际 '' + $actual); exit 2'; [IO.File]::WriteAllText($p, $body, (New-Object Text.UTF8Encoding $true)); & powershell -NoProfile -ExecutionPolicy Bypass -File $p; $rc=$LASTEXITCODE; Remove-Item $p -Force -ErrorAction SilentlyContinue; exit $rc } catch { Write-Host ('FAIL: ' + $_.Exception.Message); exit 1 }"
     REM 审计 P2-16：块内取退出码必须用延迟展开写法 —— 百分号写法在解析整个 if 块时就已展开，
     REM 拿到的是块执行前的陈旧值：下载失败却判成功 / 反之，后面 tar 才炸、错误信息误导 ✗
     set "NSSM_DL_RC=!ERRORLEVEL!"
+    REM 审计 P2-4：退出码 2 = SHA256 与 tools.lock.json 不匹配（供应链风险）→ 必须中止安装；
+    REM            退出码 1 = 下载 / 写文件失败；lock 缺失或解析失败时脚本内部已降级为退出码 0（只 warning）。
+    if !NSSM_DL_RC! equ 2 (
+        echo [ERROR] NSSM 压缩包 SHA256 校验不匹配，已中止安装，避免把未经校验的 nssm.exe 注册成系统服务。
+        echo         期望值与实际值见上一行「校验不匹配」。可能原因：
+        echo           1. 上游文件被替换，或网络 / 代理被投毒
+        echo           2. 本机代理缓存了旧版本压缩包
+        echo           3. tools.lock.json 过期，即本仓库升级了 nssm 版本却没更新哈希锁
+        echo [INFO] 处置：确认网络可信后重试；或手动从 https://nssm.cc/download 下载 2.24，
+        echo [INFO] 解压后把 win64\nssm.exe 复制到 !NSSM! 再重跑本脚本。
+        pause
+        exit /b 1
+    )
     if !NSSM_DL_RC! neq 0 (
         echo [ERROR] 下载 NSSM 失败，请检查网络后重试
         pause
@@ -169,7 +184,7 @@ if errorlevel 1 (
 
 "!NSSM!" set DrcomAutoLogin AppDirectory "!SCRIPT_DIR!"
 "!NSSM!" set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"
-"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.3）"
+"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.4）"
 "!NSSM!" set DrcomAutoLogin Start SERVICE_AUTO_START
 "!NSSM!" set DrcomAutoLogin AppStdout "!LOG_DIR!\service_stdout.log"
 "!NSSM!" set DrcomAutoLogin AppStderr "!LOG_DIR!\service_stderr.log"
