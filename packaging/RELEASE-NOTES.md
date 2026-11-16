@@ -19,6 +19,8 @@ Windows 安装程序 **v{{VERSION}} "{{CODENAME}}"（{{CODENAME_CN}}）** · {{D
 ### ② 构建与文档
 - `packaging/build.ps1` 的版本号改为**构建时从 `version.py` 读取**（读取失败会中文报错并停止构建），
   版本发布少一处手改同步点；`AGENTS.md` / `docs/VERSIONING.md` 的同步清单已同步口径。
+- 发版 CI 与本地构建下载 NSSM / 内嵌 Python 时增加**有界重试**（3–4 次、递增等待），
+  上游偶发 503 不再让整个构建直接失败。
 
 ## ⚠️ 升级前须知
 

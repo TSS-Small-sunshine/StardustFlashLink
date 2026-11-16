@@ -244,6 +244,36 @@ function Test-ToolsLockedFile {
     return $true
 }
 
+# 审计 P2-4 后续：nssm.cc 等上游会偶发 503，下载必须有界重试，
+# 否则一次临时故障就让本地构建失败（发版 CI 已用同一套逻辑）。
+function Invoke-DownloadWithRetry {
+    param(
+        [Parameter(Mandatory=$true)][string]$Url,
+        [Parameter(Mandatory=$true)][string]$OutFile,
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 5,
+        [int64]$MinBytes = 0
+    )
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 300
+            if ($MinBytes -gt 0) {
+                $size = (Get-Item -LiteralPath $OutFile).Length
+                if ($size -lt $MinBytes) { throw ('下载内容过小（' + $size + ' 字节 <= ' + $MinBytes + '）') }
+            }
+            if ($attempt -gt 1) { Write-Info ('下载重试成功（第 ' + $attempt + ' 次）: ' + $Url) }
+            return $true
+        } catch {
+            if ($attempt -eq $MaxAttempts) {
+                throw ('下载失败（已重试 ' + $MaxAttempts + ' 次）: ' + $Url + ' —— ' + $_.Exception.Message)
+            }
+            Write-Warn ('下载失败（第 ' + $attempt + '/' + $MaxAttempts + ' 次），' + $DelaySeconds + ' 秒后重试: ' + $Url + ' —— ' + $_.Exception.Message)
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $false
+}
+
 $script:ExitCode = 1
 
 try {
@@ -504,7 +534,7 @@ try {
         $nssmTmp = Join-Path $env:TEMP ('nssm-extract-' + $PID)
         Write-Info ('正在下载 NSSM 2.24: ' + $NssmUrl)
         try {
-            Invoke-WebRequest -Uri $NssmUrl -OutFile $nssmZip -UseBasicParsing -TimeoutSec 300
+            Invoke-DownloadWithRetry -Url $NssmUrl -OutFile $nssmZip -MaxAttempts 4 -DelaySeconds 8 -MinBytes 100000 | Out-Null
         } catch {
             Stop-Build -Message ('下载 NSSM 失败: ' + $_.Exception.Message) -Hint @(
                 '        请手动下载 nssm（2.24）并把 win64\nssm.exe 放到:',
@@ -592,7 +622,7 @@ try {
             }
 
             try {
-                Invoke-WebRequest -Uri $pyUrl -OutFile $pyZip -UseBasicParsing -TimeoutSec 300
+                Invoke-DownloadWithRetry -Url $pyUrl -OutFile $pyZip -MaxAttempts 2 -DelaySeconds 3 | Out-Null
             } catch {
                 $pyErr = $_.Exception.Message
             }
