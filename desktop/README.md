@@ -8,7 +8,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 单元测试 | **43 项全绿**（核心 28 + 可执行 9 + 界面 6） |
+| 单元测试 | **264 项全绿**（核心 226 + 可执行 21 + 界面 17；另有 1 项文档测试） |
 | headless 可执行 | **0.32 MB**（单文件，无运行时依赖 ✓） |
 | Slint GUI | **7.83 MB**（Windows x86_64；零 WebView，真机可启动 ✓） |
 | 依赖 | 核心只 2 个（`serde`/`serde_json`）；GUI 另加 Slint（软件渲染器 ✓） |
@@ -26,6 +26,8 @@ cargo run -p drcom-cli -- serve        # 起本地控制 API（http://127.0.0.1:
 cargo run -p drcom-cli -- login --dry-run   # 只打印「脱敏后的」登录 URL ✓
 cargo run -p drcom-cli -- run --once        # 跑一次守护循环（含位置自适应 + 写日志）
 cargo run -p drcom-cli -- diagnostics        # 生成「脱敏诊断包」（ZIP；密码永不进包 ✓）
+cargo run -p drcom-cli -- update check       # 检查更新（默认通道取配置 update_channel ✓）
+cargo run -p drcom-cli -- update download out.zip   # 检查 + 下载 + SHA256 校验（**不安装** ✓）
 ```
 
 ### 桌面界面（GUI）
@@ -86,6 +88,32 @@ stardust-flash-link service uninstall                   # 注销（幂等 ✓）
 - Linux / macOS 走 `systemd --user` / LaunchAgent，**全程免 root / 免管理员** ✓，
   并且与 `autostart` 写的是**同一份文件** ✓（不会有两套配置打架 ✗）。
 - 状态查询**不需要管理员** ✓（Windows 用 `sc query` ✓）。
+
+### 自动更新（M4 第一块：**只检查 / 下载 / 校验，不自我替换**）
+
+```bash
+stardust-flash-link update check                     # 通道取配置 update_channel（默认正式版 ✓）
+stardust-flash-link update check --channel preview   # 临时看预览通道
+stardust-flash-link update download out.zip          # 检查 + 下载 + SHA256 校验（失败会清理 .part ✓）
+```
+
+- **现在做到哪**：解析 GitHub `/releases`（draft 忽略、正式通道只收非 prerelease ✓）、
+  按产物名挑本机资产（只认 `stardust-flash-link-<版本>-<目标>.(zip|deb|dmg)`，
+  **宁可不更新也不装错平台** ✓）、有界下载（`size × 1.5`）、SHA256 校验
+  （**摘要缺失即拒绝**，与 2.x I10 / P0-2 同口径 ✓）；成功后原子 rename，失败清理 `.part` ✓。
+- **还没做**：自我替换 / 安装器 / 回滚 —— Windows 上正在运行的 exe 会被锁，留给 M4 下一块；
+  所以 `update download` 只下载并校验，**不会动你现在的程序** ✓。
+- **通道语义**：`release` 只收正式版；`preview` 收 preview/rc/release；`snapshot` 全收（`rc` 收 rc/release）。
+  实际通道 = 配置 `update_channel`（`--channel` 可临时覆盖）；`auto_update_enabled` 只影响「自动」，
+  手动检查照跑 ✓。
+- **HTTPS 怎么来的**：核心的 `net` 是手写明文 HTTP（零依赖），GitHub 必须 HTTPS →
+  走**系统自带的 curl**（`drcom_core::net::CurlHttp`；std 没有 TLS，R1 又不许加 crate）。
+  Windows 10 1803+ / macOS / 主流 Linux 都自带；找不到时给可读中文错误 ✓。
+  （Windows 上若吊销检查服务器被校园网挡住，会自动重试一次 `--ssl-no-revoke`，
+  证书链与域名仍然校验 ✓。）
+- **已知限制**：GitHub API 匿名限流 **60 次/小时**（403 会提示「过一会儿再试」）；
+  预览版目前只挂 CI artifact、**还没有 Release 资产**，所以预览通道多数时候是「已是最新」；
+  2.x 的 `*.exe` 资产不会被 3.0 认（前缀 / 平台标签都对不上 ✓）。
 
 ### 排障：一键脱敏诊断包
 
@@ -151,8 +179,10 @@ crates/drcom-core/     平台无关核心（无 UI、无平台框架）
   protocol.rs          Dr.COM 协议：拼 URL / 解析 JSONP（纯函数）
   secret.rs            凭据脱敏（2.1.0.0 P7-2 的 Rust 版）
   platform.rs          数据/配置/日志目录、服务方式、便携模式判定
+  net.rs               自写 HTTP（明文，零依赖）+ 系统 curl 的 HTTPS（更新用，见 CurlHttp）
+  update.rs            自动更新第一块：解析 /releases、挑平台资产、有界下载 + SHA256 校验
 crates/drcom-cli/      无界面可执行（headless 优先：Linux 服务器/树莓派要它 ✓）
-  http.rs              标准库 HTTP 客户端（明文 http，够用且小）
+  main.rs              CLI 子命令（version/status/login/update/…）
   server.rs            本地控制 API（只绑回环 + 安全头 + 1 MB 上限 + 有界排空）
 ```
 

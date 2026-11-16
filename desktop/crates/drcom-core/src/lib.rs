@@ -35,6 +35,7 @@ pub mod service;
 pub mod session;
 pub mod settings;
 pub mod timefmt;
+pub mod update;
 pub mod zipwriter;
 
 pub use backoff::{Backoff, BACKOFF_LEVELS_MIN};
