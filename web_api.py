@@ -364,13 +364,42 @@ def api_post_profiles_activate(payload):
 
 
 def api_post_profiles_delete(payload):
-    """POST /api/profiles/delete — {name}：删方案（删当前方案只清标记，配置值不动）。"""
+    """POST /api/profiles/delete — {name}：删方案（删当前方案只清标记，配置值不动）。
+
+    维护第四轮（审计 C-26）：删方案时一并删掉它的专属密码文件 `password.<方案名>.txt` ——
+    否则「删掉 → 再建同名方案」会静默继承旧密码（用户看不到这条凭据还留着）。
+    返回体只**新增**字段 `password_removed`（既有字段一个没动）。
+    """
     mod = globals().get("_profiles_mod")
     if mod is None:
         return 503, {"ok": False, "error": "方案模块未就绪"}
     payload = payload if isinstance(payload, dict) else {}
-    result = mod.remove(payload.get("name"))
-    return (200 if result.get("ok") else 400), result
+    name = payload.get("name")
+    result = mod.remove(name)
+    if not result.get("ok"):
+        return 400, result
+    result = dict(result)
+    pwd_removed = False
+    has_own = globals().get("_profile_has_own_password")
+    remover = globals().get("_remove_profile_password")
+    if has_own is not None and remover is not None and name:
+        try:
+            if has_own(name):
+                pwd_removed = bool(remover(name))
+                if pwd_removed:
+                    # 方案已删 → active_profile 清空，当前生效密码应回落到公共 password.txt。
+                    # 重读失败不算删除失败（配置已经删好了），记一条日志即可。
+                    reloader = globals().get("_load_password_from_disk")
+                    if reloader is not None:
+                        try:
+                            reloader()
+                        except Exception as exc:      # noqa: BLE001
+                            _log("删除方案后重载密码失败：%s", exc, level=logging.WARNING)
+                    _log("已删除方案「%s」的专属密码文件", name)
+        except Exception as exc:                  # noqa: BLE001 —— 清密码失败别把删除搞失败
+            _log("删除方案后清理专属密码失败：%s", exc, level=logging.WARNING)
+    result["password_removed"] = pwd_removed
+    return 200, result
 
 
 def api_post_profiles_auto(payload):
