@@ -3994,6 +3994,14 @@ else:
     os.environ["TEMP"] = _r5_saved_temp
 shutil.rmtree(_r5_root, ignore_errors=True)
 
+
+# —— R5-RETRY：上游下载有界重试（nssm.cc 偶发 503 实测）——
+_wf5r = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+_bp5r = pathlib.Path("packaging/build.ps1").read_text(encoding="utf-8")
+check("维护 R5-RETRY：发版 CI 与本地构建的上游下载都有重试（一次 503 不再打红构建）",
+      "Invoke-DownloadWithRetry" in _wf5r and "Invoke-DownloadWithRetry" in _bp5r
+      and "MaxAttempts" in _wf5r and "MaxAttempts" in _bp5r)
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
