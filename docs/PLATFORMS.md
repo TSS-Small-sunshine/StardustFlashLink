@@ -79,7 +79,7 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | **M1** | 完整核心：登录/在线探测/**位置守卫**/方案/退避/日志轮转/指标/诊断包 | 与 2.x 行为对齐（`_smoke_*` 通过） |
 | **M2** | 桌面壳：托盘/窗口/单实例/自启/深色主题；UI 迁移 | 三平台可运行 App |
 | **M3** | 平台守护：Windows 服务(NSSM) / **systemd --user** / **launchd LaunchAgent**；打包矩阵 | 各平台安装包 + AppImage/dmg |
-| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 进行中（2026-11-17）：**检查 / 下载 / SHA256 校验**已完成（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**已支持（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**自我替换 / 安装器**与便携版单文件待做 |
+| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 进行中（2026-11-17）：**检查 / 下载 / SHA256 校验**已完成（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**已支持（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI 主窗口「检查更新」入口**已完成（后台线程、启动不联网）；**自我替换 / 安装器**与便携版单文件待做 |
 
 ### M0 实测（2026-09-28）
 

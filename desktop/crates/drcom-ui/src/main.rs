@@ -41,6 +41,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let ui = AppWindow::new()?;
     apply(&ui, &model::collect());
+    // 「更新」行的初始文案：只读版本与配置拼出来（**不发任何网络请求** ✓）——
+    // 3.0 M4 的 GUI 入口是纯手动的：启动时绝不自动检查更新 ✗（与 auto_update_enabled 无关 ✓）
+    set_update(&ui, "info", &model::update_idle_line());
 
     // 刷新状态
     let weak = ui.as_weak();
@@ -73,6 +76,27 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(ui) = weak_back.upgrade() {
                     set_result(&ui, &kind, &text);
                     ui.set_busy(false);
+                }
+            });
+        });
+    });
+
+    // 检查更新（M4）：**用户点了才联网** ✓ —— 会起 curl / 等网络，
+    // 所以和「立即检查」同一个形状：工作线程跑，结果用 invoke_from_event_loop 回主线程 ✓
+    // （检查期间只禁用「检查更新」自己，界面其余部分照常能用 ✓）
+    let weak = ui.as_weak();
+    ui.on_check_update(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        ui.set_update_busy(true);
+        set_update(&ui, "info", "检查中…（网络最多等 8 秒，界面照常能用 ✓）");
+        let weak_back = ui.as_weak();
+        worker::spawn_update_check(move |check| {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak_back.upgrade() {
+                    let (kind, text) =
+                        model::format_update_check(&check, &drcom_core::app_version());
+                    set_update(&ui, &kind, &text);
+                    ui.set_update_busy(false);
                 }
             });
         });
@@ -446,6 +470,12 @@ fn set_result(ui: &AppWindow, kind: &str, text: &str) {
     ui.set_result_kind(SharedString::from(kind));
     ui.set_result_text(SharedString::from(text));
     ui.set_result_badge(SharedString::from(badge_for(kind)));
+}
+
+/// 「更新」行（颜色 + 文本）—— 与结果窗同一套 kind 约定（ok / warn / danger / accent / info）✓
+fn set_update(ui: &AppWindow, kind: &str, text: &str) {
+    ui.set_update_kind(SharedString::from(kind));
+    ui.set_update_line(SharedString::from(text));
 }
 
 /// 结果类型 → 终端窗右上角那枚徽标 ✓

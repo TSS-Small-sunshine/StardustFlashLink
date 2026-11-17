@@ -40,6 +40,10 @@ export component AppWindow inherits Window {
     in property <string> result-text: "点「立即检查」或「运行自检」看这里。";
     in property <string> result-kind: "info";
     in property <bool>   busy: false;
+    // —— M4：更新检查（**启动不联网** ✓：不点「检查更新」绝不去查 ✓）——
+    in property <string> update-line: "…";
+    in property <string> update-kind: "info";   // ok / warn / danger / accent / info（决定颜色 ✓）
+    in property <bool>   update-busy: false;
 
     // —— 统计条与终端窗的内容（Rust 按上面那些字段拼好；界面只负责画 ✓）——
     in property <[StatCell]> daily-cells: [];
@@ -52,6 +56,7 @@ export component AppWindow inherits Window {
     callback open-settings();
     callback refresh();
     callback toggle-theme();
+    callback check-update();
 
     // —— 整窗极光底（2.x baka 的「大图」：浅紫底 + 四团很淡的色晕）——
     // Slint 没有 CSS 那套 blur 滤镜：这里用「大面积 + 透明渐变」近似，观感一致 ✓
@@ -172,6 +177,39 @@ export component AppWindow inherits Window {
                                 enabled: !root.busy;
                                 clicked => { root.refresh(); }
                             }
+                        }
+                    }
+
+                    // —— M4：「更新」一行 + 「检查更新」按钮 ——
+                    // 界面只负责显示（文案 / 颜色全是 Rust 拼好的 ✓）：
+                    // 有更新 = accent、已最新 = ok、跳过 = warn、出错 = danger ✓
+                    // 检查中按钮禁用并显示「检查中…」（防连点 ✓，其余按钮不受影响 ✓）
+                    Rectangle { height: 1px; background: Theme.hairline; }
+                    HorizontalLayout {
+                        spacing: Theme.gap-sm;
+                        Text {
+                            text: "更新";
+                            font-size: 12px;
+                            color: Theme.text-3;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: root.update-line;
+                            font-size: 12px;
+                            color: root.update-kind == "ok" ? Theme.ok
+                                : root.update-kind == "danger" ? Theme.danger
+                                : root.update-kind == "warn" ? Theme.warn
+                                : root.update-kind == "accent" ? Theme.accent
+                                : Theme.text-2;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            vertical-alignment: center;
+                        }
+                        PillButton {
+                            text: root.update-busy ? "检查中…" : "检查更新";
+                            enabled: !root.update-busy;
+                            clicked => { root.check-update(); }
                         }
                     }
                 }
