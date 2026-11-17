@@ -2,8 +2,12 @@
 //! 好处：Slint 之外的逻辑全部能在单测里验证（`cargo test` 不弹窗口也能跑 ✓）。
 
 use drcom_core::{
-    config::Config, net::PlainHttp, password, platform, secret, session, settings::SettingsForm,
-    Status,
+    config::Config,
+    net::{CurlHttp, HttpGet, PlainHttp},
+    password, platform, secret, session,
+    settings::SettingsForm,
+    update::{self, UpdateCheck},
+    Channel, Status, Version,
 };
 use std::time::Duration;
 
@@ -227,6 +231,120 @@ pub fn run_check() -> (String, String) {
             report.callback
         ),
     )
+}
+
+// ── M4：GUI 的「检查更新」入口 ─────────────────────────────────────────────────
+//
+// 界面只负责**显示与调用**（R7 ✓）：
+//   · 判断 / 挑资产 / 拼错误全在 drcom_core::update（纯函数 + 假 HTTP 可单测 ✓）；
+//   · 这里只做三件事：拼「更新」行的初始文案、把结果翻成（kind, 文案）、选传输实现；
+//   · **启动时绝不联网** ✗：初始文案只读版本与配置 ✓，联网只发生在用户点「检查更新」后 ✓。
+
+/// 「更新」行的初始文案（**纯函数，不联网** ✓）：当前版本 + 配置里的更新通道。
+///
+/// 通道取**配置里的 `update_channel`**（不是版本自带的通道 ✓）—— 与 CLI 的
+/// `update check` 同一份语义；`auto_update_enabled` 只影响「自动」，
+/// 手动检查始终可用（这个入口也**不看**它 ✓）。
+pub fn update_idle_line_of(current: &Version, channel: Channel) -> String {
+    format!(
+        "当前版本 {}（{}）· 更新通道：{}（{}）· 启动不联网，点「检查更新」才查",
+        current.to_string_full(),
+        current.channel.label_cn(),
+        channel.label_cn(),
+        channel.as_str()
+    )
+}
+
+/// 运行时入口：读版本与配置拼初始文案（**只读，不联网** ✓ —— 单测走上面那个纯函数）。
+pub fn update_idle_line() -> String {
+    let channel = update::channel_from_config(&drcom_core::legacy::load_config_or_default().config);
+    update_idle_line_of(&drcom_core::app_version(), channel)
+}
+
+/// 检查结果 → （kind, 文案）—— **纯函数**：界面拿到的就是最终要显示的两样东西 ✓。
+///
+/// kind 沿用界面现有约定：`ok`（已最新）/ `accent`（有新版本）/ `warn`（跳过）/
+/// `danger`（出错）；「检查中…」这种过渡态由界面自己标 `info` ✓。
+///
+/// 三种主结果（与 CLI 的口径一致）：
+///   · 有更新 → 新版本号 + 本机资产名 + 大小 + **下载命令**；GUI 还不会自我替换，
+///     所以**绝不放**点了没用的「下载」按钮 ✗；
+///   · 已是最新 → 当前版本 + 版本所属通道 + 「已是最新」；
+///     （`UpdateCheck::UpToDate` 不带通道字段 → 显示当前版本自己的通道；
+///      配置里的更新通道在初始文案里已经展示过 ✓）
+///   · 出错 → **原样**带出 update.rs 的可读中文错误（已脱敏 ✓），最多两行。
+pub fn format_update_check(result: &UpdateCheck, current: &Version) -> (String, String) {
+    match result {
+        UpdateCheck::UpToDate => (
+            "ok".to_string(),
+            format!(
+                "当前版本 {}（{}）· 已是最新（这条更新通道上没有比你更新的版本）",
+                current.to_string_full(),
+                current.channel.label_cn()
+            ),
+        ),
+        UpdateCheck::Available { release, asset } => (
+            "accent".to_string(),
+            format!(
+                "发现新版本 {}（本机资产：{}，大小 {}）\n下载：运行 stardust-flash-link update download <目录>（GUI 暂不做自我替换）",
+                release.version.to_string_full(),
+                asset.name,
+                size_text(asset.size)
+            ),
+        ),
+        UpdateCheck::Skipped(reason) => ("warn".to_string(), format!("跳过更新：{}", reason)),
+        UpdateCheck::Error(error) => ("danger".to_string(), clamp_lines(error, 2)),
+    }
+}
+
+/// 字节数 → 人话（只用于展示；下载体积的判断在 core ✓）。
+fn size_text(bytes: u64) -> String {
+    if bytes == 0 {
+        return "大小未知".to_string();
+    }
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let value = bytes as f64;
+    if value < KB {
+        format!("{} B", bytes)
+    } else if value < MB {
+        format!("{:.1} KB", value / KB)
+    } else if value < GB {
+        format!("{:.1} MB", value / MB)
+    } else {
+        format!("{:.1} GB", value / GB)
+    }
+}
+
+/// 最多保留 `max` 行（界面行高有限：错误文案超了就截断，并以「…」收尾 ✓）。
+fn clamp_lines(text: &str, max: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max {
+        return text.to_string();
+    }
+    let mut out = lines[..max].join("\n");
+    out.push('…');
+    out
+}
+
+/// 「检查更新」的**可注入**入口：单测传假 HTTP 客户端 → **完全离线** ✓。
+///
+/// 当前版本取 `drcom_core::app_version()`，通道取配置 `update_channel`
+/// （与 CLI `update check` 同一条链路：`update::check_for_update` ✓）。
+/// 坏配置不阻塞检查（`load_config_or_default` 会退回默认值 ✓）。
+pub fn update_check_with(http: &dyn HttpGet) -> UpdateCheck {
+    let current = drcom_core::app_version();
+    let channel = update::channel_from_config(&drcom_core::legacy::load_config_or_default().config);
+    update::check_for_update(current, channel, http)
+}
+
+/// 真正联网的入口：**只被 worker 的后台线程调用** ✓（界面线程绝不直接调它 ✗）。
+///
+/// 走 `CurlHttp`（系统 curl，HTTPS）：它在后台线程里起自己的子进程，
+/// 不共享可变状态 —— 跨线程使用是安全的 ✓（可读错误由 update.rs 统一给 ✓）。
+pub fn update_check() -> UpdateCheck {
+    update_check_with(&CurlHttp)
 }
 
 /// 「无人登录也自动登录」这一项要显示的数据 ✓
@@ -860,6 +978,211 @@ mod tests {
         let (kind, text) = profile_save(&input, "  ", "");
         assert_eq!(kind, "danger");
         assert!(text.contains("方案名"), "{}", text);
+    }
+
+    // ── M4：「检查更新」入口的纯函数单测 —— **全部离线**（假 HTTP 客户端，不联网 ✓）──
+
+    use drcom_core::net::HttpReply;
+    use drcom_core::update::{AssetInfo, ReleaseInfo};
+    use std::cell::RefCell;
+
+    /// 假 HTTP 客户端：把 GitHub 的各种响应喂进 `update_check_with`，**不联网** ✓。
+    struct FakeUpdateHttp {
+        status: u16,
+        body: String,
+        error: Option<String>,
+        seen_urls: RefCell<Vec<String>>,
+        seen_headers: RefCell<Vec<(String, String)>>,
+    }
+
+    impl FakeUpdateHttp {
+        fn ok(body: &str) -> FakeUpdateHttp {
+            FakeUpdateHttp {
+                status: 200,
+                body: body.to_string(),
+                error: None,
+                seen_urls: RefCell::new(Vec::new()),
+                seen_headers: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn status(status: u16, body: &str) -> FakeUpdateHttp {
+            FakeUpdateHttp { status, ..FakeUpdateHttp::ok(body) }
+        }
+
+        fn failing(message: &str) -> FakeUpdateHttp {
+            FakeUpdateHttp { error: Some(message.to_string()), ..FakeUpdateHttp::ok("") }
+        }
+    }
+
+    impl HttpGet for FakeUpdateHttp {
+        fn get(&self, url: &str, _timeout: Duration) -> Result<HttpReply, String> {
+            self.seen_urls.borrow_mut().push(url.to_string());
+            match &self.error {
+                Some(error) => Err(error.clone()),
+                None => Ok(HttpReply { status: self.status, location: None, body: self.body.clone() }),
+            }
+        }
+
+        fn get_with_headers(
+            &self,
+            url: &str,
+            headers: &[(&str, &str)],
+            timeout: Duration,
+        ) -> Result<HttpReply, String> {
+            for (name, value) in headers {
+                self.seen_headers.borrow_mut().push((name.to_string(), value.to_string()));
+            }
+            self.get(url, timeout)
+        }
+    }
+
+    /// 造一条「比当前新」的 release：资产名按 CI 约定拼，本机平台一定能挑中 ✓。
+    fn fresh_release_json() -> (String, String) {
+        let asset_name =
+            format!("stardust-flash-link-9.9.9.9-{}.zip", drcom_core::platform::target_label());
+        let body = format!(
+            "[{{\"tag_name\":\"v9.9.9.9\",\"prerelease\":false,\"draft\":false,\"published_at\":\"2026-11-17T00:00:00Z\",\"assets\":[{{\"name\":\"{asset_name}\",\"browser_download_url\":\"https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/download/v9.9.9.9/{asset_name}\",\"digest\":\"{digest}\",\"size\":12345678}}]}}]",
+            digest = "0".repeat(64)
+        );
+        (body, asset_name)
+    }
+
+    #[test]
+    fn update_result_text_shows_up_to_date_with_version_and_channel() {
+        let current = Version::parse("3.0.0.0-preview.3").unwrap();
+        let (kind, text) = format_update_check(&UpdateCheck::UpToDate, &current);
+        assert_eq!(kind, "ok", "{}", text);
+        assert!(text.contains("3.0.0.0-preview.3"), "要显示当前版本: {}", text);
+        assert!(text.contains("预览版"), "要显示通道: {}", text);
+        assert!(text.contains("已是最新"), "{}", text);
+    }
+
+    #[test]
+    fn update_result_text_shows_new_version_asset_and_size() {
+        let current = Version::parse("3.0.0.0-preview.3").unwrap();
+        let asset = AssetInfo {
+            name: "stardust-flash-link-3.0.0.4-windows-x86_64.zip".to_string(),
+            url: "https://github.com/TSS-Small-sunshine/StardustFlashLink/releases/download/v3/asset.zip".to_string(),
+            size: 12_345_678,
+            sha256: Some("0".repeat(64)),
+        };
+        let release = ReleaseInfo {
+            version: Version::parse("3.0.0.4").unwrap(),
+            tag: "v3.0.0.4".to_string(),
+            prerelease: false,
+            published_at: "2026-11-17T00:00:00Z".to_string(),
+            assets: vec![asset.clone()],
+        };
+        let (kind, text) = format_update_check(&UpdateCheck::Available { release, asset }, &current);
+        assert_eq!(kind, "accent", "{}", text);
+        assert!(text.contains("3.0.0.4"), "新版本号: {}", text);
+        assert!(text.contains("stardust-flash-link-3.0.0.4-windows-x86_64.zip"), "资产名: {}", text);
+        assert!(text.contains("11.8 MB"), "大小: {}", text);
+        assert!(text.contains("update download"), "要告诉用户怎么下载: {}", text);
+        assert!(text.contains("GUI 暂不做自我替换"), "{}", text);
+        assert_eq!(text.lines().count(), 2, "有更新就两行: {}", text);
+        // 绝不给一个点了没用的下载按钮（文案自己就把下载方式说清 ✓）
+        assert!(!text.contains("点击下载"), "{}", text);
+    }
+
+    #[test]
+    fn update_result_text_keeps_skip_reason_and_error_verbatim() {
+        let current = Version::parse("3.0.0.0-preview.3").unwrap();
+        let skipped = UpdateCheck::Skipped("当前通道（正式版）上没有可用的发布版本".to_string());
+        let (kind, text) = format_update_check(&skipped, &current);
+        assert_eq!(kind, "warn");
+        assert!(text.contains("跳过更新"), "{}", text);
+        assert!(text.contains("当前通道（正式版）上没有可用的发布版本"), "原因要带出来: {}", text);
+
+        // 错误文案由 update.rs 给（已脱敏、可读）→ **原样**带出，不吞不改写 ✓
+        let error = "检查更新失败：HTTPS 请求失败：启动 curl 失败（请确认 curl 在 PATH 里）";
+        let (kind, text) = format_update_check(&UpdateCheck::Error(error.to_string()), &current);
+        assert_eq!(kind, "danger");
+        assert_eq!(text, error, "错误要原样带出 ✓");
+    }
+
+    #[test]
+    fn update_result_text_clamps_long_errors_to_two_lines() {
+        let current = Version::parse("3.0.0.0-preview.3").unwrap();
+        let error = UpdateCheck::Error("第一行：连不上\n第二行：检查代理\n第三行：重试".to_string());
+        let (kind, text) = format_update_check(&error, &current);
+        assert_eq!(kind, "danger");
+        assert_eq!(text.lines().count(), 2, "错误最多两行: {}", text);
+        assert!(text.starts_with("第一行：连不上\n第二行：检查代理"), "{}", text);
+        assert!(text.ends_with('…'), "{}", text);
+    }
+
+    #[test]
+    fn update_check_with_runs_offline_and_never_fakes_an_update() {
+        // ① 空列表 ≠ 有更新：应报「这条通道没有可用发布版本」（跳过 ✓），而不是假装有更新 ✗
+        let empty = FakeUpdateHttp::ok("[]");
+        let check = update_check_with(&empty);
+        assert!(matches!(check, UpdateCheck::Skipped(_)), "{:?}", check);
+        assert!(
+            empty.seen_urls.borrow().iter().any(|url| url == drcom_core::update::RELEASES_URL),
+            "必须只请求 GitHub releases 接口"
+        );
+        assert!(
+            empty
+                .seen_headers
+                .borrow()
+                .iter()
+                .any(|(name, value)| name == "User-Agent" && value == drcom_core::update::USER_AGENT),
+            "GitHub 对无 UA 的请求会 403，UA 必须带上"
+        );
+
+        // ② 限流 403 → 可读中文错误（提示「过一会儿再试」），不是 panic、不是空字符串
+        let limited = FakeUpdateHttp::status(403, "{\"message\":\"API rate limit exceeded\"}");
+        match update_check_with(&limited) {
+            UpdateCheck::Error(text) => {
+                assert!(text.contains("限流"), "{}", text);
+                assert!(text.contains("过一会儿再试"), "{}", text);
+            }
+            other => panic!("限流应报可读错误: {:?}", other),
+        }
+
+        // ③ 传输层失败（curl 不在 / 连不上）→ 原样可读错误
+        let broken =
+            FakeUpdateHttp::failing("HTTPS 请求失败：启动 curl 失败（请确认 curl 在 PATH 里）");
+        match update_check_with(&broken) {
+            UpdateCheck::Error(text) => assert!(text.contains("启动 curl 失败"), "{}", text),
+            other => panic!("传输失败应报可读错误: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn update_check_with_picks_the_local_asset_for_a_real_release_payload() {
+        let (body, asset_name) = fresh_release_json();
+        let fake = FakeUpdateHttp::ok(&body);
+        let check = update_check_with(&fake);
+        match &check {
+            UpdateCheck::Available { release, asset } => {
+                assert_eq!(release.version.to_string_full(), "9.9.9.9");
+                assert_eq!(asset.name, asset_name, "必须挑本机平台的那个资产");
+                assert_eq!(asset.size, 12_345_678);
+            }
+            other => panic!("应发现新版本并挑到本机资产: {:?}", other),
+        }
+        // 直接交给界面格式化 → 新版本号 / 资产名 / 大小都在 ✓
+        let (kind, text) = format_update_check(&check, &drcom_core::app_version());
+        assert_eq!(kind, "accent");
+        assert!(text.contains("9.9.9.9"), "{}", text);
+        assert!(text.contains(&asset_name), "{}", text);
+        assert!(text.contains("11.8 MB"), "{}", text);
+    }
+
+    #[test]
+    fn update_idle_line_is_offline_and_names_version_and_channel() {
+        let current = Version::parse("3.0.0.0-preview.3").unwrap();
+        let line = update_idle_line_of(&current, Channel::Release);
+        assert!(line.contains("3.0.0.0-preview.3"), "{}", line);
+        assert!(line.contains("预览版"), "当前版本的通道: {}", line);
+        assert!(line.contains("正式版") && line.contains("release"), "配置里的更新通道: {}", line);
+        assert!(line.contains("不联网"), "要说清启动不联网: {}", line);
+        // 运行时入口也只读版本与配置（不联网）→ 至少要把「更新通道」说出来 ✓
+        let runtime = update_idle_line();
+        assert!(runtime.contains("更新通道"), "{}", runtime);
     }
 }
 

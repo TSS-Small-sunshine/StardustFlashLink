@@ -148,6 +148,28 @@ fn check_once() -> String {
     report.outcome.summary_cn()
 }
 
+/// 「一次性后台任务 + 回调」骨架：**起线程 → 跑会阻塞的事 → 结果交给回调** ✓。
+///
+/// 更新检查就是这个形状（点一次跑一次，不需要常驻 —— 与 [`Worker`] 的轮询分开 ✓）。
+/// 回调跑在**后台线程**里；要改界面的话，调用方在回调里用
+/// `slint::invoke_from_event_loop` 把闭包丢回主线程（界面属性只能在事件循环线程改 ✓）。
+///
+/// 线程是 detached 的：不 join、不持句柄 —— 窗口关掉后线程照常跑完，
+/// 回调里的 `Weak::upgrade()` 失败就安静丢弃结果 ✓（不 panic、不碰已释放的窗口 ✗）。
+pub fn spawn_once<T, F>(work: impl FnOnce() -> T + Send + 'static, on_done: F)
+where
+    T: Send + 'static,
+    F: FnOnce(T) + Send + 'static,
+{
+    thread::spawn(move || on_done(work()));
+}
+
+/// 后台跑一次「检查更新」（[`crate::model::update_check`]：会起 curl / 等网络 ✓），
+/// 跑完把结果交给回调 ✓。**只有用户点「检查更新」才触发** —— 启动时绝不自动调 ✗。
+pub fn spawn_update_check(on_done: impl FnOnce(drcom_core::update::UpdateCheck) + Send + 'static) {
+    spawn_once(crate::model::update_check, on_done);
+}
+
 /// 线程主体 ✓。
 fn run_loop(state: Arc<Mutex<WorkerState>>, stop: Arc<AtomicBool>) {
     let mut watcher = netwatch::Watcher::new();
@@ -241,5 +263,21 @@ mod tests {
         assert!(state.line.contains("启动"), "{}", state.line);
         assert_eq!(state.last_at, None);
         assert!(!state.active);
+    }
+
+    #[test]
+    fn one_shot_tasks_run_off_the_ui_thread_and_call_back() {
+        // 「检查更新」走的就是这条骨架：任务在后台线程跑、结果由回调带回 ✓
+        let (tx, rx) = std::sync::mpsc::channel();
+        let main_thread = thread::current().id();
+        spawn_once(
+            move || thread::current().id(),
+            move |worker_thread| {
+                let _ = tx.send(worker_thread);
+            },
+        );
+        let worker_thread =
+            rx.recv_timeout(Duration::from_secs(5)).expect("后台任务必须把结果交回回调");
+        assert_ne!(worker_thread, main_thread, "更新检查必须在后台线程跑，绝不能卡界面 ✗");
     }
 }

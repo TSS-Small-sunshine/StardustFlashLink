@@ -8,7 +8,7 @@
 
 | 项 | 值 |
 | --- | --- |
-| 单元测试 | **264 项全绿**（核心 226 + 可执行 21 + 界面 17；另有 1 项文档测试） |
+| 单元测试 | **272 项全绿**（核心 226 + 可执行 21 + 界面 25；另有 1 项文档测试） |
 | headless 可执行 | **0.32 MB**（单文件，无运行时依赖 ✓） |
 | Slint GUI | **7.83 MB**（Windows x86_64；零 WebView，真机可启动 ✓） |
 | 依赖 | 核心只 2 个（`serde`/`serde_json`）；GUI 另加 Slint（软件渲染器 ✓） |
@@ -97,6 +97,11 @@ stardust-flash-link update check --channel preview   # 临时看预览通道
 stardust-flash-link update download out.zip          # 检查 + 下载 + SHA256 校验（失败会清理 .part ✓）
 ```
 
+- **GUI 入口（M4）**：主窗口状态卡里有「更新」一行 + 「检查更新」按钮 —— **只有用户点了才联网**
+  （启动时绝不自动检查 ✗，与 `auto_update_enabled` 无关 ✓）；检查在后台线程跑、不卡界面 ✓，
+  检查中按钮禁用并显示「检查中…」✓。结果分四种：有更新（新版本号 + 本机资产名 + 大小，
+  并提示用 `stardust-flash-link update download <目录>` 下载）/ 已是最新 / 跳过 / 可读中文错误；
+  **仍然不做自我替换** ✗（所以界面上不放「下载 / 安装」按钮 ✓）。
 - **现在做到哪**：解析 GitHub `/releases`（draft 忽略、正式通道只收非 prerelease ✓）、
   按产物名挑本机资产（只认 `stardust-flash-link-<版本>-<目标>.(zip|deb|dmg)`，
   **宁可不更新也不装错平台** ✓）、有界下载（`size × 1.5`）、SHA256 校验
