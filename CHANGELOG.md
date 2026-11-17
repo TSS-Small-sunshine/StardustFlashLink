@@ -5,6 +5,27 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.6 (fix) — 2026-11-17 · 代号 `Vega`（织女星）
+
+> 主题：**供应链可复现性收尾 + 发版手册补全** —— 第六轮审计/维护的剩余项。
+> 接口、配置结构、服务名、安装路径、密码文件格式**都没动** ✓；仍零第三方依赖 ✓。
+
+### 🛡 ① 供应链收尾（审计 P2-4 / P3-4 / P3-15）
+- **安装器中文语言文件固定到 commit**：`ChineseSimplified.isl` 从 issrc `main` 浮动改为 pinned commit
+  （`e0d5aa7731d2…`），URL + SHA256 + 字节数写进 `tools.lock.json`；CI 与本地 `build.ps1` 都从 lock 读
+  条目下载并校验（哈希不符构建红；上游删除 commit 时 warning 回退英文 `Default.isl`，不阻断构建）。
+- `not_locked` 只剩两条真正浮动项（Inno 官方安装器 / choco 包），并写明未锁定原因与风险边界；
+  工作流里不再出现 issrc 的浮动 URL 或哈希字面量。
+
+### 📖 ② 发版手册补全（`docs/RELEASING.md`）
+- **CI-only 修复怎么发版**：`build-installer.yml` 的 `paths-ignore` 含 `.github/**`，只改工作流的合并
+  不会自动构建 → 需手动 `workflow_dispatch`（写明命令与「非 main 只出 artifact」的边界）。
+- **上游下载失败处置**：nssm.cc 偶发 503、有界重试、Re-run、手动放 nssm.exe 时的校验提醒。
+- **工具锁维护**：上游发新版 / 重传文件时「实际下载 → Get-FileHash → 更新 lock」的完整命令，禁止绕过校验。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **524 项** ✓（新增 6 项：isl 锁定/CI 与 build 读 lock/BOM+CRLF/not_locked/手册关键词）；
+- HTTP `_smoke_http.py` **51 项** ✓；PowerShell 5.1 解析 `build.ps1` 0 错误。
 ## v2.1.3.5 (fix) — 2026-11-17 · 代号 `Vega`（织女星）
 
 > 主题：**升级链防御细化 + 构建版本单一来源** —— 第五轮审计/维护的收尾项。
