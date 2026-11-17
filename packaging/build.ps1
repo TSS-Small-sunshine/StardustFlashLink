@@ -26,6 +26,8 @@ $ErrorActionPreference = 'Stop'
 $LogPath         = $null   # 在路径解析后赋值
 $LangUrl         = 'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl'
 $LangManualUrl   = 'https://github.com/jrsoftware/issrc/tree/main/Files/Languages'
+# tools.lock.json 里中文语言文件的条目名（固定 issrc commit + SHA256；只有缺条目时才回退 $LangMirrors）
+$IslLockName     = 'chinese-simplified-isl'
 $NssmUrl         = 'https://nssm.cc/release/nssm-2.24.zip'
 $InnoSetupUrl    = 'https://jrsoftware.org/isdl.php'
 $NssmManualUrl   = 'https://nssm.cc/download'
@@ -200,6 +202,14 @@ function Get-ToolsLockEntry {
     }
     return $null
 }
+function Get-ToolsLockEntryByName {
+    param($Lock, [string]$Name)
+    if ($null -eq $Lock) { return $null }
+    foreach ($t in @($Lock.tools)) {
+        if ($null -ne $t -and $t.name -and (([string]$t.name).Trim() -eq $Name)) { return $t }
+    }
+    return $null
+}
 function Test-ToolsLockedFile {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
@@ -364,13 +374,18 @@ try {
 
     # ============================================================
     #   步骤 5 - 确保中文语言文件存在
+    #   审计 P2-4 / P3-15 收口：URL + SHA256 从 tools.lock.json 的
+    #   chinese-simplified-isl 条目读（固定 issrc commit，内容可复现）；
+    #   只有 lock 缺条目时才回退到下面这组硬编码镜像（浮动 main 分支，仅形状校验）。
     # ============================================================
-    $IsccDir  = Split-Path -Path $iscc -Parent
-    $LangDir  = Join-Path $IsccDir 'Languages'
-    $LangFile = Join-Path $LangDir 'ChineseSimplified.isl'
+    $IsccDir    = Split-Path -Path $iscc -Parent
+    $LangDir    = Join-Path $IsccDir 'Languages'
+    $LangFile   = Join-Path $LangDir 'ChineseSimplified.isl'
+    $DefaultIsl = Join-Path $IsccDir 'Default.isl'
     $langNeedDownload = $true
 
-    # 中文语言文件下载镜像（按顺序依次尝试；全部失败则降级为英文界面，不中断构建）
+    # 中文语言文件回退镜像（仅当 tools.lock.json 缺 chinese-simplified-isl 条目时使用；
+    # 浮动 main 分支，只做形状校验、不做哈希校验 —— 正常路径走 lock 里的固定 commit URL）
     $LangMirrors = @(
         'https://gh-proxy.com/https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl',
         'https://ghproxy.net/https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl',
@@ -378,13 +393,36 @@ try {
         'https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl'
     )
 
+    # 供应链锁里的固定条目（正常路径）：有它就用它的 url，不再访问浮动 main 分支
+    $islEntry = Get-ToolsLockEntryByName -Lock $script:ToolsLockDoc -Name $IslLockName
+    $langDownloadUrls = @()
+    $langPinned = $false
+    if ($null -ne $islEntry -and $islEntry.url) {
+        $langDownloadUrls = @(([string]$islEntry.url).Trim())
+        $langPinned = $true
+        Write-Info ('中文语言文件来源（tools.lock.json）: ' + $islEntry.url + '（版本 ' + $islEntry.version + '）')
+    } else {
+        $langDownloadUrls = @($LangMirrors)
+        Write-Warn ('tools.lock.json 缺少 ' + $IslLockName + ' 条目 —— 回退硬编码的 issrc main 分支地址（内容浮动、不做哈希校验，请尽快补锁）')
+    }
+
     if (Test-Path -LiteralPath $LangFile -PathType Leaf) {
         $langSize = (Get-Item -LiteralPath $LangFile).Length
-        if ($langSize -ge 1000) {
-            Write-Info ('中文语言文件已存在: ' + $LangFile + ' (' + $langSize + ' 字节)')
-            $langNeedDownload = $false
-        } else {
+        if ($langSize -lt 1000) {
             Write-Warn ('中文语言文件损坏（' + $langSize + ' 字节 < 1000），将重新下载: ' + $LangFile)
+        } elseif ($langPinned) {
+            # 已存在也要核对是否就是 lock 固定的那个文件（避免旧版 main 分支残留被当成合格文件）
+            $islExpected = ([string]$islEntry.sha256).Trim().ToLower()
+            $islActual   = (Get-FileHash -LiteralPath $LangFile -Algorithm SHA256).Hash.ToLower()
+            if ($islActual -eq $islExpected) {
+                Write-Info ('中文语言文件已存在且与 tools.lock.json 一致: ' + $LangFile + ' (' + $langSize + ' 字节)')
+                $langNeedDownload = $false
+            } else {
+                Write-Warn ('中文语言文件与 lock 记录的 SHA256 不一致（既有文件过期），将按 lock 重新下载: ' + $LangFile)
+            }
+        } else {
+            Write-Info ('中文语言文件已存在: ' + $LangFile + ' (' + $langSize + ' 字节，未按 lock 校验)')
+            $langNeedDownload = $false
         }
     } else {
         Write-Warn ('缺少中文语言文件: ' + $LangFile)
@@ -398,17 +436,19 @@ try {
                 Stop-Build -Message ('无法创建 Languages 目录: ' + $LangDir) -Hint @('        原因: ' + $_.Exception.Message)
             }
         }
-        # 陆续尝试各镜像，成功即跳出；全部失败则走下面的英文降级分支
+        # 依次尝试各下载地址（固定条目时只有 lock 里那一个；缺条目时是回退镜像列表），
+        # 成功即跳出；全部失败则走下面的英文降级分支
         $langSize        = 0
         $langFromMirror  = 0
         $langTmp         = $LangFile + '.tmp'
-        $mirrorCount     = @($LangMirrors).Count
+        $mirrorCount     = @($langDownloadUrls).Count
+        $langLastErr     = ''
 
         for ($mi = 0; $mi -lt $mirrorCount; $mi++) {
             $mirrorNumber = $mi + 1
-            $mirrorUrl    = $LangMirrors[$mi]
+            $mirrorUrl    = $langDownloadUrls[$mi]
             $mirrorErr    = $null
-            Write-Info ('尝试镜像 ' + $mirrorNumber + '/' + $mirrorCount + ': ' + $mirrorUrl)
+            Write-Info ('尝试下载地址 ' + $mirrorNumber + '/' + $mirrorCount + ': ' + $mirrorUrl)
 
             # 每次尝试前清掉上一轮的残留，避免把旧文件当成本次下载结果
             if (Test-Path -LiteralPath $langTmp -PathType Leaf) {
@@ -416,7 +456,8 @@ try {
             }
 
             try {
-                Invoke-WebRequest -Uri $mirrorUrl -OutFile $langTmp -UseBasicParsing -TimeoutSec 120
+                # 有界重试（与 NSSM / CI 同一套）：raw.githubusercontent.com 偶发超时，不该直接降级
+                Invoke-DownloadWithRetry -Url $mirrorUrl -OutFile $langTmp -MaxAttempts 2 -DelaySeconds 3 -MinBytes 1000 | Out-Null
             } catch {
                 $mirrorErr = $_.Exception.Message
             }
@@ -455,6 +496,15 @@ try {
                 }
             }
 
+            # 校验 4（审计 P2-4）：固定条目路径必须按 tools.lock.json 比对 SHA256。
+            # lock 缺条目时这里不会执行（$langPinned=$false，回退浮动镜像只做形状校验）；
+            # 哈希不匹配 -> Stop-Build：投毒 / 上游重传信号，绝不静默换下一个地址。
+            if (-not $mirrorErr) {
+                if ($langPinned) {
+                    Test-ToolsLockedFile -Path $langTmp -Url $mirrorUrl -Label 'Inno 中文语言文件' | Out-Null
+                }
+            }
+
             if (-not $mirrorErr) {
                 Move-Item -LiteralPath $langTmp -Destination $LangFile -Force
                 $langSize       = (Get-Item -LiteralPath $LangFile).Length
@@ -462,20 +512,24 @@ try {
                 break
             }
 
-            Write-Warn ('镜像 ' + $mirrorNumber + ' 失败: ' + $mirrorErr)
+            $langLastErr = [string]$mirrorErr
+            Write-Warn ('下载地址 ' + $mirrorNumber + ' 失败: ' + $mirrorErr)
             if (Test-Path -LiteralPath $langTmp -PathType Leaf) {
                 Remove-Item -LiteralPath $langTmp -Force -ErrorAction SilentlyContinue
             }
         }
 
         if ($langFromMirror -gt 0) {
-            Write-Info ('中文语言文件已就绪（来自镜像 ' + $langFromMirror + '）: ' + $LangFile + ' (' + $langSize + ' 字节)')
+            if ($langPinned) {
+                Write-Info ('中文语言文件已就绪（来自 tools.lock.json 固定条目 ' + $islEntry.version + '）: ' + $LangFile + ' (' + $langSize + ' 字节)')
+            } else {
+                Write-Info ('中文语言文件已就绪（来自回退镜像 ' + $langFromMirror + '）: ' + $LangFile + ' (' + $langSize + ' 字节)')
+            }
         } else {
             # ------------------------------------------------------------
             # 降级：所有镜像都不可达 -> 用 Inno Setup 自带的英文语言文件兜底，
             #       保证安装包照常产出（只是向导界面为英文），不中断构建
             # ------------------------------------------------------------
-            $DefaultIsl = Join-Path $IsccDir 'Default.isl'
             $degradedOk = $false
             if (Test-Path -LiteralPath $DefaultIsl -PathType Leaf) {
                 try {
@@ -491,22 +545,22 @@ try {
 
             if ($degradedOk) {
                 Write-Warn '============================================================'
-                Write-Warn (' 中文语言文件下载失败（' + $mirrorCount + ' 个镜像全部不可达）')
+                Write-Warn (' 中文语言文件下载失败（' + $mirrorCount + ' 个地址全部不可用）')
+                if ($langLastErr) { Write-Warn (' 最后一次错误: ' + $langLastErr) }
                 Write-Warn ' 已降级使用英文界面（复制 Default.isl）'
                 Write-Warn ' 安装向导将显示英文，功能完全正常'
                 Write-Warn ' 如需中文：手动下载后覆盖'
                 Write-Warn ('   ' + $LangFile)
                 Write-Warn ('   下载页: ' + $LangManualUrl)
-                Write-Warn ('   国内可用: ' + $LangMirrors[0])
+                Write-Warn ('   固定版本来源: tools.lock.json 的 ' + $IslLockName + ' 条目（url 字段）')
                 Write-Warn '============================================================'
                 Write-Warn '继续构建（不中断）...'
             } else {
-                Stop-Build -Message ('中文语言文件下载失败（' + $mirrorCount + ' 个镜像全部不可达），且找不到 Inno Setup 自带的 Default.isl，无法降级') -Hint @(
+                Stop-Build -Message ('中文语言文件下载失败（' + $mirrorCount + ' 个地址全部不可用），且找不到 Inno Setup 自带的 Default.isl，无法降级') -Hint @(
                     '        请手动下载后放到下面这个位置（文件名必须是 ChineseSimplified.isl）:',
                     '          目标路径: ' + $LangFile,
                     '          下载页:   ' + $LangManualUrl,
-                    '          国内可用: ' + $LangMirrors[0],
-                    '          直链:     ' + $LangMirrors[$mirrorCount - 1],
+                    ('          固定版本: tools.lock.json 的 ' + $IslLockName + ' 条目（url 字段）'),
                     '        确认网络可访问 github / raw.githubusercontent.com 后重跑本脚本。'
                 )
             }

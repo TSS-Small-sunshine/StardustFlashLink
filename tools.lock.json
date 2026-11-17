@@ -1,8 +1,8 @@
 {
   "lock_version": 1,
-  "updated_at": "2026-11-16",
+  "updated_at": "2026-11-17",
   "generator": "supply-fixer（审计 P2-4 / J7 供应链收口）",
-  "scope": "CI（.github/workflows/build-installer.yml）、本地构建（packaging/build.ps1）、源码部署安装脚本（install.bat）真正下载的**固定版本**上游文件。哈希值由本机实际下载后用 Get-FileHash -Algorithm SHA256 计算（2026-11-16），不是抄自网页。",
+  "scope": "CI（.github/workflows/build-installer.yml）、本地构建（packaging/build.ps1）、源码部署安装脚本（install.bat）真正下载的**固定版本**上游文件。哈希值由本机实际下载后用 Get-FileHash -Algorithm SHA256 计算（nssm / 内嵌 Python：2026-11-16；中文语言文件：2026-11-17），不是抄自网页。",
   "usage": "所有消费方只在这里读 URL / SHA256 / size_bytes；shell / YAML / bat 里不允许再出现哈希字面量。缺条目时按各自策略降级（见 not_locked 与各脚本注释）。",
   "tools": [
     {
@@ -63,6 +63,19 @@
         "packaging/build.ps1"
       ],
       "purpose": "内嵌 Python 候选 3（同上用途）。3.12 线全部不可用时的回退项。"
+    },
+    {
+      "name": "chinese-simplified-isl",
+      "version": "e0d5aa7731d2",
+      "url": "https://raw.githubusercontent.com/jrsoftware/issrc/e0d5aa7731d2cb0378cd541e7fef15657545415f/Files/Languages/ChineseSimplified.isl",
+      "sha256": "e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d",
+      "size_bytes": 21516,
+      "required": false,
+      "used_by": [
+        ".github/workflows/build-installer.yml",
+        "packaging/build.ps1"
+      ],
+      "purpose": "安装器中文语言文件；固定到 issrc 的 commit（version = commit 前 12 位）后内容可复现；上游删除该 commit 时降级为 warning 并回退 Default.isl（安装向导变英文，构建不中断）"
     }
   ],
   "not_locked": [
@@ -73,17 +86,6 @@
       "reason": "URL 不带版本号（服务端 302 到当前最新 6.x 安装器），内容随上游发版而变；写死哈希等于每次 Inno Setup 升级都让构建红。CI 主路径是 `choco install innosetup`（同样不锁版本），这个只是 choco 失败时的兜底。风险评估：ISCC 只参与编译，不进安装包、也不以服务身份常驻目标机，供应链风险低于 nssm / 内嵌 Python。若要收口 P2-4 剩余项：改成 choco install innosetup --version=<6.x.y> 并锁 nupkg，或从这里下载后按本文件格式补一条 tools 条目。"
     },
     {
-      "name": "chinese-simplified-isl",
-      "url": "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl",
-      "enforced": false,
-      "mirror_urls": [
-        "https://gh-proxy.com/https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl",
-        "https://ghproxy.net/https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl",
-        "https://cdn.jsdelivr.net/gh/jrsoftware/issrc@main/Files/Languages/ChineseSimplified.isl"
-      ],
-      "reason": "取自 issrc 仓库 **main 分支**（浮动引用，非 tag/commit），内容随上游提交变化，今天算出的哈希明天可能就不同；镜像还会改变字节（代理/网关）。正确处理是先把引用固定到某个 commit SHA 再锁哈希，但 issrc 的语言文件仍在活跃更新，本仓库选择「只做内容形状校验」（现有逻辑：>1000 字节 + 前 200 字节含 ; 注释 / [LangOptions] / LanguageName）并记录本风险。"
-    },
-    {
       "name": "choco-innosetup-package",
       "url": "choco:innosetup",
       "enforced": false,
@@ -91,8 +93,8 @@
     }
   ],
   "notes": [
-    "为什么跳过浮动资源：汉字语言文件与官方 is.exe 的 URL 都不含版本号，且上游会持续更新；对它们写死哈希会把「上游正常升级」变成「构建必红」，与 P2-4 想要的「可复现 + 防投毒」并不等价。它们已记录在 not_locked 里，构建时打 ::warning:: 暴露风险，而不是假装已校验。",
-    "维护方式：升级 nssm / 内嵌 Python 时必须实际下载新文件 → Get-FileHash -Algorithm SHA256 → 更新本文件的 sha256 / size_bytes / version / updated_at，并在 CHANGELOG 说明。绝不允许从网页或他人报告里抄哈希。",
+    "为什么跳过浮动资源：官方 is.exe 的 URL 不含版本号、choco 的 innosetup 包也没有稳定的内容哈希，且上游会持续更新；对它们写死哈希会把「上游正常升级」变成「构建必红」，与 P2-4 想要的「可复现 + 防投毒」并不等价。它们已记录在 not_locked 里，构建时打 ::warning:: 暴露风险，而不是假装已校验。中文语言文件已改为固定 issrc commit + 锁 SHA256（见 tools[] 的 chinese-simplified-isl），不再是浮动项。",
+    "维护方式：升级 nssm / 内嵌 Python / 中文语言文件时必须实际下载新文件 → Get-FileHash -Algorithm SHA256 → 更新本文件的 sha256 / size_bytes / version / updated_at，并在 CHANGELOG 说明。绝不允许从网页或他人报告里抄哈希。中文语言文件（chinese-simplified-isl）升级 = 把 issrc main 的当前 commit（git ls-remote https://github.com/jrsoftware/issrc refs/heads/main）填进 version / url，再实测哈希；升级方法见 docs/RELEASING.md「工具锁维护」。",
     "校验口径：消费方比对小写 64 位十六进制；size_bytes 只作辅助提示（以 SHA256 为准）。required=true 的条目（nssm）在 CI 里缺失 = 构建红；required=false 的条目缺失 = ::warning:: 回退，保证 Python 小版本退役时不至于完全构建不了。",
     "本文件是纯数据（无注释、UTF-8 无 BOM、LF 行尾），由 Python / PowerShell 的 JSON 解析器直接读取。"
   ]

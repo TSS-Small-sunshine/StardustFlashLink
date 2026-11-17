@@ -3662,7 +3662,7 @@ check("维护 R4-供应链：CI / 本地构建 / 源码安装都从 lock 读哈�
                                   "tools.lock.json" in _ib4))
 check("维护 R4-供应链：哈希值只出现在 tools.lock.json（代码 / 脚本里不重复写死）",
       _nssm_sha not in _wf4 and _nssm_sha not in _bp4 and _nssm_sha not in _ib4)
-check("维护 R4-供应链：浮动下载物（ISCC / 中文语言文件）在 not_locked 里写明未锁定原因",
+check("维护 R4-供应链：浮动下载物（Inno 官方安装器 / choco 包）在 not_locked 里写明未锁定原因",
       isinstance(_lock_doc.get("not_locked"), list)
       and any("innosetup" in str(n.get("name", "")).lower()
               for n in _lock_doc["not_locked"]),
@@ -4002,6 +4002,88 @@ check("维护 R5-RETRY：发版 CI 与本地构建的上游下载都有重试（
       "Invoke-DownloadWithRetry" in _wf5r and "Invoke-DownloadWithRetry" in _bp5r
       and "MaxAttempts" in _wf5r and "MaxAttempts" in _bp5r)
 
+# —— R6-供应链收口：issrc 中文语言文件固定到 commit（P2-4 / P3-15 收尾）——
+# 上一轮 isl 还记在 not_locked（issrc main 分支浮动引用）。本轮固定到 issrc 某个 commit
+# 并锁 SHA256；CI / 本地构建都从 lock 读 URL 与哈希，workflow 里不再出现 main 分支硬编码。
+_wf6 = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+_bp6 = pathlib.Path("packaging/build.ps1").read_text(encoding="utf-8")
+_doc6 = pathlib.Path("docs/RELEASING.md").read_text(encoding="utf-8")
+_isl6 = next((t for t in _lock_tools
+              if str(t.get("name", "")).strip() == "chinese-simplified-isl"), None)
+_isl6_version = str((_isl6 or {}).get("version", "")).strip()
+_isl6_url = str((_isl6 or {}).get("url", "")).strip()
+_isl6_sha = str((_isl6 or {}).get("sha256", "")).strip().lower()
+_isl6_commit_ok = (len(_isl6_version) == 12
+                   and all(c in "0123456789abcdef" for c in _isl6_version)
+                   and _isl6_version in _isl6_url)
+check("维护 R6-ISL：tools.lock.json 固定 chinese-simplified-isl（commit 前缀 + 64 位 SHA256 + required=false）",
+      _isl6 is not None
+      and _isl6_commit_ok
+      and len(_isl6_sha) == 64 and all(c in "0123456789abcdef" for c in _isl6_sha)
+      and isinstance(_isl6.get("size_bytes"), int) and _isl6["size_bytes"] > 1000
+      and _isl6.get("required") is False
+      and "/jrsoftware/issrc/" in _isl6_url and "/main/" not in _isl6_url
+      and _isl6_sha not in _wf6 and _isl6_sha not in _bp6,
+      repr(_isl6))
+
+# 从 workflow 里抽 isl 步骤正文（避免把 Load 步骤里生成的 helper 文本一起算进来）
+_wf6_isl_step = ""
+if "- name: Locate ISCC and ensure Chinese language file" in _wf6:
+    _wf6_isl_step = _wf6.split("- name: Locate ISCC and ensure Chinese language file", 1)[1] \
+                       .split("- name:", 1)[0]
+# 只看真正发起校验的调用行：注释里可以提「不传 -Required」，调用处必须真的没传
+_isl6_assert_no_required = bool(_wf6_isl_step) and all(
+    "-Required" not in _line
+    for _line in _wf6_isl_step.splitlines() if "Assert-LockedDownload" in _line)
+check("维护 R6-ISL：CI 的 isl 步骤从 lock 取 URL/哈希（dot-source + 重试 + Assert），不再硬编码 main 分支",
+      "TOOL_LOCK_HELPER" in _wf6_isl_step
+      and "TOOL_LOCK_PATH" in _wf6_isl_step
+      and "Invoke-DownloadWithRetry" in _wf6_isl_step
+      and "Assert-LockedDownload" in _wf6_isl_step
+      and _isl6_assert_no_required
+      and "Default.isl" in _wf6_isl_step
+      and "raw.githubusercontent.com/jrsoftware/issrc/main" not in _wf6
+      and "issrc/main" not in _wf6,
+      "step_len=%d hardcoded=%s no_required=%s" % (len(_wf6_isl_step), "issrc/main" in _wf6,
+                                                    _isl6_assert_no_required))
+
+check("维护 R6-ISL：本地 build.ps1 也按 lock 取 isl 条目（缺条目才回退硬编码镜像）",
+      "chinese-simplified-isl" in _bp6
+      and "Get-ToolsLockEntryByName" in _bp6
+      and "Test-ToolsLockedFile" in _bp6
+      and "Get-ToolsLockEntryByName -Lock $script:ToolsLockDoc -Name $IslLockName" in _bp6,
+      "name=%s lookup=%s" % ("chinese-simplified-isl" in _bp6,
+                             "Get-ToolsLockEntryByName" in _bp6))
+
+# build.ps1 编码要求：UTF-8 BOM + CRLF（PS 5.1 读中文需要 BOM；丢了会乱码 —— 上一轮踩过）
+_bp6_raw = pathlib.Path("packaging/build.ps1").read_bytes()
+check("维护 R6-ISL：packaging/build.ps1 保持 UTF-8 BOM + CRLF（PS 5.1 中文不乱码）",
+      _bp6_raw.startswith(b"\xef\xbb\xbf")
+      and b"\r\n" in _bp6_raw
+      and b"\n" not in _bp6_raw.replace(b"\r\n", b""),
+      "bom=%s" % _bp6_raw.startswith(b"\xef\xbb\xbf"))
+
+check("维护 R6-ISL：not_locked 不再包含 isl（只保留 Inno 官方安装器 / choco 两条浮动项）",
+      isinstance(_lock_doc.get("not_locked"), list)
+      and not any("isl" in str(n.get("name", "")).lower()
+                  or "issrc" in str(n.get("url", "")).lower()
+                  for n in _lock_doc["not_locked"])
+      and any("innosetup" in str(n.get("name", "")).lower()
+              for n in _lock_doc["not_locked"])
+      and any("choco" in str(n.get("name", "")).lower()
+              for n in _lock_doc["not_locked"]),
+      repr([n.get("name") for n in (_lock_doc.get("not_locked") or [])]))
+
+check("维护 R6-ISL：docs/RELEASING.md 写明 workflow_dispatch 手动发版 / 上游有界重试 / 工具锁维护",
+      "workflow_dispatch" in _doc6
+      and "手动触发" in _doc6
+      and "有界重试" in _doc6
+      and "nssm.cc" in _doc6
+      and "工具锁维护" in _doc6
+      and "chinese-simplified-isl" in _doc6,
+      "doc_len=%d" % len(_doc6))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -4090,7 +4172,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.5", version.VERSION == "2.1.3.5", version.VERSION)
+check("版本 = 2.1.3.6", version.VERSION == "2.1.3.6", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
