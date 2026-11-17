@@ -184,8 +184,9 @@ jobs:
               if ($h.Length -ge 12) { $h = $h.Substring(0, 12) + "…" }
               Write-Host ("  - " + $t.name + " " + $t.version + "  sha256=" + $h + "  " + $t.url)
             }
-            # 浮动资源（ISCC 安装器 / issrc main 分支的中文语言文件）不写固定哈希，
+            # 浮动资源（Inno Setup 官方安装器 / choco 的 innosetup 包）不写固定哈希，
             # 但必须诚实地把「未锁定」暴露在 CI 日志里，而不是假装已经校验过。
+            # （中文语言文件已改为固定 issrc commit，见 tools[] 的 chinese-simplified-isl。）
             foreach ($n in @($doc.not_locked)) {
               Write-Host ("::warning::未锁定（浮动版本，不写死哈希）：" + $n.name + " — " + $n.url + "；原因见 tools.lock.json 的 not_locked")
             }
@@ -217,6 +218,7 @@ jobs:
       - name: Locate ISCC and ensure Chinese language file
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $iscc = @(
             "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
             "C:\Program Files\Inno Setup 6\ISCC.exe"
@@ -225,18 +227,75 @@ jobs:
           "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "ISCC = $iscc"
 
-          $langDir  = Join-Path (Split-Path $iscc -Parent) "Languages"
-          $langFile = Join-Path $langDir "ChineseSimplified.isl"
-          if (-not (Test-Path $langFile)) {
-            # 审计 P2-4：语言文件取自 issrc 的 **main 分支**（浮动引用），内容随上游提交变化，
-            # 写死哈希会把上游正常更新变成构建红；因此只保留「>1000 字节」的形状校验，
-            # 并在 tools.lock.json 的 not_locked 里记录未锁定原因（收口办法：固定到某个 commit SHA）。
-            Write-Host "::warning::ChineseSimplified.isl 未做哈希校验（来自 issrc main 分支，内容浮动），见 tools.lock.json 的 not_locked"
-            New-Item -ItemType Directory -Force -Path $langDir | Out-Null
-            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/ChineseSimplified.isl" -OutFile $langFile -UseBasicParsing
-            Write-Host "已下载中文语言文件"
+          if (-not $env:TOOL_LOCK_HELPER) { throw "缺少 tools.lock.json 校验器（TOOL_LOCK_HELPER 未设置）" }
+          . $env:TOOL_LOCK_HELPER
+
+          $isccDir    = Split-Path $iscc -Parent
+          $langDir    = Join-Path $isccDir "Languages"
+          $langFile   = Join-Path $langDir "ChineseSimplified.isl"
+          $defaultIsl = Join-Path $isccDir "Default.isl"
+          $langTmp    = Join-Path $env:RUNNER_TEMP "ChineseSimplified.isl"
+
+          # 审计 P2-4 / P3-15 收口：中文语言文件不再取自 issrc 的浮动 main 分支。
+          # URL / SHA256 的唯一来源 = tools.lock.json 的 chinese-simplified-isl 条目
+          # （固定到 issrc 某个 commit，内容可复现）；本 YAML 不写任何 URL / 哈希字面量。
+          $lock = Get-ToolLockDocument -LockPath $env:TOOL_LOCK_PATH
+          $islEntry = $null
+          if ($lock) {
+            foreach ($t in @($lock.tools)) {
+              if ($t -and ([string]$t.name).Trim() -eq "chinese-simplified-isl") { $islEntry = $t; break }
+            }
           }
-          $size = (Get-Item $langFile).Length
+
+          $langOk = $false
+          if ($islEntry -and $islEntry.url) {
+            $islUrl = ([string]$islEntry.url).Trim()
+            Write-Host ("中文语言文件来源（tools.lock.json）：" + $islUrl + "（版本 " + $islEntry.version + "）")
+            if (Test-Path -LiteralPath $langTmp -PathType Leaf) { Remove-Item -LiteralPath $langTmp -Force }
+            $downloaded = $false
+            try {
+              # 有界重试：raw.githubusercontent.com 偶发超时 / 5xx，一次抖动不该打红发版构建。
+              Invoke-DownloadWithRetry -Url $islUrl -OutFile $langTmp -MaxAttempts 3 -DelaySeconds 5 -MinBytes 1000 | Out-Null
+              $downloaded = $true
+            } catch {
+              Write-Host ("::warning::Inno 中文语言文件下载失败（已重试）：" + $_.Exception.Message)
+            }
+            if ($downloaded) {
+              # 不传 -Required：lock 缺条目 -> 仅 warning 返回 $false（走下面的降级）；
+              # 哈希不匹配 / sha256 格式非法 -> ::error:: + throw，构建必须红，绝不降级。
+              $verified = Assert-LockedDownload -Path $langTmp -Url $islUrl -Label "Inno 中文语言文件"
+              if ($verified) {
+                New-Item -ItemType Directory -Force -Path $langDir | Out-Null
+                Copy-Item -LiteralPath $langTmp -Destination $langFile -Force
+                Write-Host ("中文语言文件已就绪（已按 tools.lock.json 校验）：" + $langFile)
+                $langOk = $true
+              } else {
+                Write-Host "::warning::Inno 中文语言文件在 tools.lock.json 里没有条目，不使用该下载物"
+              }
+            }
+            if (Test-Path -LiteralPath $langTmp -PathType Leaf) { Remove-Item -LiteralPath $langTmp -Force -ErrorAction SilentlyContinue }
+          } else {
+            Write-Host "::warning::tools.lock.json 缺少 chinese-simplified-isl 条目 —— 无法固定版本，走降级路径（请尽快补锁）"
+          }
+
+          # 降级路径（仅限「lock 缺条目 / 下载失败」；哈希不符在上面已经 throw 了，不会到这里）：
+          # 已有 >=1000 字节的 isl 就保留；否则复制 Inno Setup 自带的 Default.isl
+          # （安装向导变英文，功能完全正常），保证构建不中断。
+          if (-not $langOk) {
+            if ((Test-Path -LiteralPath $langFile -PathType Leaf) -and ((Get-Item -LiteralPath $langFile).Length -ge 1000)) {
+              $existingSize = (Get-Item -LiteralPath $langFile).Length
+              Write-Host ("::warning::保留已有 ChineseSimplified.isl（" + $existingSize + " 字节，未按 lock 校验）")
+              $langOk = $true
+            } elseif (Test-Path -LiteralPath $defaultIsl -PathType Leaf) {
+              New-Item -ItemType Directory -Force -Path $langDir | Out-Null
+              Copy-Item -LiteralPath $defaultIsl -Destination $langFile -Force
+              Write-Host "::warning::中文语言文件不可用，已降级使用 Default.isl（安装向导为英文，功能正常）"
+              $langOk = $true
+            }
+          }
+          if (-not $langOk) { throw "中文语言文件不可用，且找不到 Inno Setup 自带的 Default.isl，无法降级" }
+
+          $size = (Get-Item -LiteralPath $langFile).Length
           Write-Host "ChineseSimplified.isl = $size 字节"
           if ($size -lt 1000) { throw "中文语言文件异常（$size 字节）" }
 
