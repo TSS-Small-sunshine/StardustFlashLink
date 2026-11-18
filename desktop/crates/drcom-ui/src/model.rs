@@ -3,11 +3,11 @@
 
 use drcom_core::{
     config::Config,
-    net::{CurlHttp, HttpGet, PlainHttp},
+    net::{CurlHttp, HttpDownload, HttpGet, PlainHttp},
     password, platform, secret, session,
     settings::SettingsForm,
     update::{self, UpdateCheck},
-    Channel, Status, Version,
+    update_apply, Channel, Status, Version,
 };
 use std::time::Duration;
 
@@ -286,7 +286,7 @@ pub fn format_update_check(result: &UpdateCheck, current: &Version) -> (String, 
         UpdateCheck::Available { release, asset } => (
             "accent".to_string(),
             format!(
-                "发现新版本 {}（本机资产：{}，大小 {}）\n下载：运行 stardust-flash-link update download <目录>（GUI 暂不做自我替换）",
+                "发现新版本 {}（本机资产：{}，大小 {}）\n点「下载并安装」即可：先备份旧程序，失败自动回滚",
                 release.version.to_string_full(),
                 asset.name,
                 size_text(asset.size)
@@ -346,6 +346,116 @@ pub fn update_check_with(http: &dyn HttpGet) -> UpdateCheck {
 pub fn update_check() -> UpdateCheck {
     update_check_with(&CurlHttp)
 }
+
+/// 「下载并安装」成功后界面要用的两样东西 ✓（**不含任何写盘逻辑**：都在 core ✓）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledUpdate {
+    /// 装上的版本（显示用 ✓）。
+    pub version: String,
+    /// 新程序的正式路径（重启 = 拉起它 ✓）。
+    pub new_exe: std::path::PathBuf,
+    /// 旧文件清理告警（删不掉不是错误 ✓）。
+    pub warnings: Vec<String>,
+}
+
+/// 成功文案（纯函数 ✓）：**正在自动重启**，不是让用户自己找 ✓。
+pub fn install_success_line(report: &InstalledUpdate) -> String {
+    let mut line = format!("已安装 {}，需要重启生效 —— 正在重启新程序…", report.version);
+    if !report.warnings.is_empty() {
+        line.push_str(&format!(
+            "（{} 条旧文件清理提示，下次启动会再清）",
+            report.warnings.len()
+        ));
+    }
+    line
+}
+
+/// 安装结果 → （kind, 文案）—— 纯函数，界面拿到的就是最终两样东西 ✓。
+pub fn format_install_result(result: &Result<InstalledUpdate, String>) -> (String, String) {
+    match result {
+        Ok(report) => ("ok".to_string(), install_success_line(report)),
+        Err(error) => ("danger".to_string(), clamp_lines(error, 2)),
+    }
+}
+
+/// 「下载并安装」的**可注入**入口：单测传假 HTTP（同时实现 GET 与下载）→ **完全离线** ✓。
+///
+/// 流程全部复用 core（R7：界面不做判断 ✓）：
+///   ① update::check_for_update（挑本机资产）；
+///   ② update::download_and_verify（SHA256 fail-closed ✅）→ 落到**系统临时目录**
+///      （**绝不写用户数据目录** ✓）；
+///   ③ update_apply::install_zip（zipread → 备份 → rename 舞步 → 清理旧文件）。
+pub fn install_update_with<H: HttpGet + HttpDownload>(
+    http: &H,
+    installed_exe: &std::path::Path,
+) -> Result<InstalledUpdate, String> {
+    let current = drcom_core::app_version();
+    let channel = update::channel_from_config(&drcom_core::legacy::load_config_or_default().config);
+    let check = update::check_for_update(current.clone(), channel, http);
+    let (release, asset) = match check {
+        UpdateCheck::Available { release, asset } => (release, asset),
+        UpdateCheck::UpToDate => return Err("已经是最新版本，不需要安装".to_string()),
+        other => return Err(other.summary_cn()),
+    };
+    if !release.version.is_newer_than(&current) {
+        return Err(format!(
+            "安装包里是 {}，不比当前版本 {} 新 —— 不安装",
+            release.version,
+            current
+        ));
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let staging_dir = std::env::temp_dir().join(format!(
+        "sfl-gui-update-{}-{}",
+        std::process::id(),
+        nonce
+    ));
+    let dest = staging_dir.join(&asset.name);
+    let result = (|| {
+        update::download_and_verify(http, &asset, &dest)?;
+        let metadata = std::fs::metadata(&dest)
+            .map_err(|error| format!("读下载文件失败：{}", error))?;
+        if metadata.len() > update_apply::MAX_PACKAGE_BYTES {
+            return Err(format!(
+                "下载的安装包太大（{} 字节，上限 {}）—— 不像是本项目的安装包",
+                metadata.len(),
+                update_apply::MAX_PACKAGE_BYTES
+            ));
+        }
+        let zip_bytes =
+            std::fs::read(&dest).map_err(|error| format!("读下载文件失败：{}", error))?;
+        let backup_root = update_apply::default_backup_root(installed_exe);
+        let outcome = update_apply::install_zip(
+            installed_exe,
+            &zip_bytes,
+            &backup_root,
+            &current.to_string_full(),
+            Some(&release.version.to_string_full()),
+            false,
+        )?;
+        Ok(InstalledUpdate {
+            version: release.version.to_string_full(),
+            new_exe: outcome.plan.installed_exe.clone(),
+            warnings: outcome.warnings.clone(),
+        })
+    })();
+    let _ = std::fs::remove_file(&dest);
+    let _ = std::fs::remove_dir_all(&staging_dir);
+    result
+}
+
+/// 真正联网的「下载并安装」：**只被 worker 的后台线程调用** ✓。
+///
+/// 更新的是**当前正在运行的这个程序**（GUI 自己）✓ —— 换完之后主线程负责重启 ✓。
+pub fn install_update() -> Result<InstalledUpdate, String> {
+    let installed = std::env::current_exe()
+        .map_err(|error| format!("拿不到本程序路径：{}", error))?;
+    install_update_with(&CurlHttp, &installed)
+}
+
 
 /// 「无人登录也自动登录」这一项要显示的数据 ✓
 /// （语义 = **注册成系统服务** ✓：用户级自启要等有人登录才跑 ✗，只有服务是开机即起 ✓）
@@ -990,6 +1100,8 @@ mod tests {
     struct FakeUpdateHttp {
         status: u16,
         body: String,
+        /// 「下载」时写进目标文件的字节（= 假的安装包 ZIP ✓）。
+        data: Vec<u8>,
         error: Option<String>,
         seen_urls: RefCell<Vec<String>>,
         seen_headers: RefCell<Vec<(String, String)>>,
@@ -1000,10 +1112,17 @@ mod tests {
             FakeUpdateHttp {
                 status: 200,
                 body: body.to_string(),
+                data: Vec::new(),
                 error: None,
                 seen_urls: RefCell::new(Vec::new()),
                 seen_headers: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_download(body: &str, data: &[u8]) -> FakeUpdateHttp {
+            let mut fake = FakeUpdateHttp::ok(body);
+            fake.data = data.to_vec();
+            fake
         }
 
         fn status(status: u16, body: &str) -> FakeUpdateHttp {
@@ -1034,6 +1153,26 @@ mod tests {
                 self.seen_headers.borrow_mut().push((name.to_string(), value.to_string()));
             }
             self.get(url, timeout)
+        }
+    }
+
+    impl HttpDownload for FakeUpdateHttp {
+        fn download(
+            &self,
+            _url: &str,
+            dest: &std::path::Path,
+            max_bytes: u64,
+            _timeout: Duration,
+        ) -> Result<u64, String> {
+            if self.data.len() as u64 > max_bytes {
+                return Err(format!("下载体积超过上限（{} 字节）", max_bytes));
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|error| format!("建下载目录失败：{}", error))?;
+            }
+            std::fs::write(dest, &self.data).map_err(|error| error.to_string())?;
+            Ok(self.data.len() as u64)
         }
     }
 
@@ -1079,11 +1218,10 @@ mod tests {
         assert!(text.contains("3.0.0.4"), "新版本号: {}", text);
         assert!(text.contains("stardust-flash-link-3.0.0.4-windows-x86_64.zip"), "资产名: {}", text);
         assert!(text.contains("11.8 MB"), "大小: {}", text);
-        assert!(text.contains("update download"), "要告诉用户怎么下载: {}", text);
-        assert!(text.contains("GUI 暂不做自我替换"), "{}", text);
+        // M4 第二块起 GUI **有**「下载并安装」按钮（不再是「去命令行下载」的提示 ✓）
+        assert!(text.contains("下载并安装"), "要告诉用户点哪: {}", text);
+        assert!(text.contains("回滚"), "要告诉用户失败了能回来: {}", text);
         assert_eq!(text.lines().count(), 2, "有更新就两行: {}", text);
-        // 绝不给一个点了没用的下载按钮（文案自己就把下载方式说清 ✓）
-        assert!(!text.contains("点击下载"), "{}", text);
     }
 
     #[test]
@@ -1183,6 +1321,122 @@ mod tests {
         // 运行时入口也只读版本与配置（不联网）→ 至少要把「更新通道」说出来 ✓
         let runtime = update_idle_line();
         assert!(runtime.contains("更新通道"), "{}", runtime);
+    }
+
+    // ── M4 第二块：「下载并安装」的离线端到端单测（假 HTTP + 临时安装目录 ✓）──
+
+    /// 一眼假的「可执行文件」：只保证平台魔数对（**绝不执行** ✓）。
+    fn ui_fake_exe(tag: &[u8]) -> Vec<u8> {
+        let mut bytes = match drcom_core::platform::Os::current() {
+            drcom_core::platform::Os::Windows => b"MZ".to_vec(),
+            drcom_core::platform::Os::Linux => vec![0x7f, b'E', b'L', b'F'],
+            drcom_core::platform::Os::MacOs => vec![0xCF, 0xFA, 0xED, 0xFE],
+        };
+        bytes.extend_from_slice(b" ui-demo ");
+        bytes.extend_from_slice(tag);
+        bytes
+    }
+
+    /// 造一个「本项目 archive 打的包」：staging/README.txt + staging/<exe> ✓。
+    fn ui_package_zip(exe_name: &str, exe_bytes: &[u8], version: &str) -> Vec<u8> {
+        use drcom_core::zipwriter;
+        let readme = format!("星尘闪连 {} · 预览版（test-target）\n", version);
+        let exe_path = format!("staging/{}", exe_name);
+        zipwriter::build(
+            &[
+                zipwriter::ZipEntry { name: "staging/README.txt", data: readme.as_bytes() },
+                zipwriter::ZipEntry { name: &exe_path, data: exe_bytes },
+            ],
+            std::time::UNIX_EPOCH,
+        )
+        .unwrap()
+    }
+
+    /// 一条「比当前新」的 release JSON（资产名按 CI 约定拼，本机平台一定能挑中 ✓）。
+    fn release_body_with(asset_name: &str, size: u64, digest: &str) -> String {
+        format!(
+            "[{{\"tag_name\":\"v9.9.9.9\",\"prerelease\":false,\"draft\":false,\"published_at\":\"2026-11-18T00:00:00Z\",\"assets\":[{{\"name\":\"{asset_name}\",\"browser_download_url\":\"https://github.com/x/{asset_name}\",\"digest\":\"sha256:{digest}\",\"size\":{size}}}]}}]"
+        )
+    }
+
+    fn ui_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sfl-ui-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn install_update_downloads_verifies_and_replaces_offline() {
+        let dir = ui_temp_dir("install-ok");
+        let exe_name = update_apply::expected_exe_name();
+        let installed = dir.join(exe_name);
+        std::fs::write(&installed, ui_fake_exe(b"OLD")).unwrap();
+        let new_bytes = ui_fake_exe(b"NEW");
+        let zip = ui_package_zip(exe_name, &new_bytes, "9.9.9.9");
+        let digest = drcom_core::checksum::sha256_hex(&zip);
+        let asset_name =
+            format!("stardust-flash-link-9.9.9.9-{}.zip", drcom_core::platform::target_label());
+        let body = release_body_with(&asset_name, zip.len() as u64, &digest);
+        let http = FakeUpdateHttp::with_download(&body, &zip);
+
+        let report = install_update_with(&http, &installed).expect("离线安装必须成功");
+        assert_eq!(report.version, "9.9.9.9");
+        assert_eq!(report.new_exe, installed);
+        assert_eq!(std::fs::read(&installed).unwrap(), new_bytes, "正式名必须换成新程序 ✓");
+        let backup = dir
+            .join(update_apply::BACKUP_DIR_NAME)
+            .join(drcom_core::app_version_string())
+            .join(exe_name);
+        assert_eq!(std::fs::read(&backup).unwrap(), ui_fake_exe(b"OLD"), "必须留一份旧程序备份 ✓");
+        // 成功文案：告诉用户「需要重启」且**正在自动重启** ✓
+        let (kind, text) = format_install_result(&Ok(report));
+        assert_eq!(kind, "ok");
+        assert!(text.contains("已安装 9.9.9.9"), "{}", text);
+        assert!(text.contains("重启"), "{}", text);
+        // 请求确实走了 GitHub 检查接口 + 下载了那个资产 ✓
+        assert!(http
+            .seen_urls
+            .borrow()
+            .iter()
+            .any(|url| url == drcom_core::update::RELEASES_URL));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_update_refuses_bad_checksum_without_touching_the_program() {
+        let dir = ui_temp_dir("install-bad-sha");
+        let exe_name = update_apply::expected_exe_name();
+        let installed = dir.join(exe_name);
+        std::fs::write(&installed, ui_fake_exe(b"OLD")).unwrap();
+        let zip = ui_package_zip(exe_name, &ui_fake_exe(b"NEW"), "9.9.9.9");
+        let asset_name =
+            format!("stardust-flash-link-9.9.9.9-{}.zip", drcom_core::platform::target_label());
+        // 摘要故意写错 → download_and_verify 必须 fail-closed ✓
+        let body = release_body_with(&asset_name, zip.len() as u64, &"0".repeat(64));
+        let http = FakeUpdateHttp::with_download(&body, &zip);
+
+        let err = install_update_with(&http, &installed).unwrap_err();
+        assert!(err.contains("SHA256"), "{}", err);
+        assert_eq!(std::fs::read(&installed).unwrap(), ui_fake_exe(b"OLD"), "失败不许动程序 ✗");
+        assert!(
+            !dir.join(update_apply::BACKUP_DIR_NAME).exists(),
+            "失败不许留下备份目录 ✗"
+        );
+        let (kind, text) = format_install_result(&Err(err));
+        assert_eq!(kind, "danger");
+        assert!(!text.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_update_says_up_to_date_instead_of_faking_an_install() {
+        // 空 releases 列表 → 跳过（不是假装有更新）→ 安装入口必须给可读错误 ✓
+        let http = FakeUpdateHttp::ok("[]");
+        let installed = std::env::temp_dir().join("sfl-ui-never-written");
+        let err = install_update_with(&http, &installed).unwrap_err();
+        assert!(err.contains("没有可用的发布版本") || err.contains("跳过"), "{}", err);
+        assert!(!installed.exists());
     }
 }
 

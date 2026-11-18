@@ -44,6 +44,9 @@ export component AppWindow inherits Window {
     in property <string> update-line: "…";
     in property <string> update-kind: "info";   // ok / warn / danger / accent / info（决定颜色 ✓）
     in property <bool>   update-busy: false;
+    // M4 第二块：有更新才出现「下载并安装」（没更新时按钮不存在 = 不留死按钮 ✓）
+    in property <bool>   update-available: false;
+    in property <bool>   update-installing: false;  // 下载 + 校验 + 替换中（防连点 ✓）
 
     // —— 统计条与终端窗的内容（Rust 按上面那些字段拼好；界面只负责画 ✓）——
     in property <[StatCell]> daily-cells: [];
@@ -57,6 +60,7 @@ export component AppWindow inherits Window {
     callback refresh();
     callback toggle-theme();
     callback check-update();
+    callback install-update();
 
     // —— 整窗极光底（2.x baka 的「大图」：浅紫底 + 四团很淡的色晕）——
     // Slint 没有 CSS 那套 blur 滤镜：这里用「大面积 + 透明渐变」近似，观感一致 ✓
@@ -208,8 +212,15 @@ export component AppWindow inherits Window {
                         }
                         PillButton {
                             text: root.update-busy ? "检查中…" : "检查更新";
-                            enabled: !root.update-busy;
+                            enabled: !root.update-busy && !root.update-installing;
                             clicked => { root.check-update(); }
+                        }
+                        // 有更新才出现；下载 / 替换期间禁用并显示「安装中…」（防连点 ✓）
+                        PillButton {
+                            text: root.update-installing ? "安装中…" : "下载并安装";
+                            visible: root.update-available;
+                            enabled: !root.update-busy && !root.update-installing;
+                            clicked => { root.install-update(); }
                         }
                     }
                 }

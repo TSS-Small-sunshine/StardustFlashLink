@@ -170,6 +170,16 @@ pub fn spawn_update_check(on_done: impl FnOnce(drcom_core::update::UpdateCheck) 
     spawn_once(crate::model::update_check, on_done);
 }
 
+/// 后台跑一次「下载并安装」（M4 第二块：下载 → SHA256 → 解包 → 备份 → 替换 ✓）。
+///
+/// 会联网、会写**安装目录**（备份 + 换 exe），所以必须在后台线程跑，结果回主线程再改界面 ✓。
+/// 注意：**绝不碰用户数据目录**（下载走系统临时目录、装完即删 ✓）。
+pub fn spawn_update_install(
+    on_done: impl FnOnce(Result<crate::model::InstalledUpdate, String>) + Send + 'static,
+) {
+    spawn_once(crate::model::install_update, on_done);
+}
+
 /// 线程主体 ✓。
 fn run_loop(state: Arc<Mutex<WorkerState>>, stop: Arc<AtomicBool>) {
     let mut watcher = netwatch::Watcher::new();
