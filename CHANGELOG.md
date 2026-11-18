@@ -5,6 +5,60 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.7 (fix) — 2026-11-18 · 代号 `Vega`（织女星）
+
+> 主题：**静默升级后托盘跨会话自愈 + 托盘健壮性三连 + ISCC 钉版** —— 第七轮审计/维护的剩余项
+> （审计 C-16 / C-28 / C-29 / C-30 与改进项 I-8、构建链 P2-4 剩余项）。
+> 接口、配置结构、服务名、安装路径、密码文件格式**都没动** ✓；仍零第三方依赖 ✓。
+
+### 🖥 ① 静默升级后托盘跨会话自愈（审计 C-16 / 改进项 I-8，用户可感知）
+- **问题**：升级前安装器 `PrepareToInstall` 一定 `KillTray()`，而 `setup.iss` 的 `[Run]` 起托盘那条带
+  `skipifsilent` —— 自动升级（`schtasks /ru SYSTEM` 静默安装）结束后**没有任何人把托盘拉回来**。
+  真机证据：本机 `%LOCALAPPDATA%\DrcomAutoLogin\tray.log` 在 **2026-11-17 15:54:29** 之后停止写入，
+  直到 **2026-11-18 13:25:47** 下一次登录才重新启动 —— 中间约 **21.5 小时**没有托盘：断线气泡、状态图标、
+  睡眠唤醒 / 换网即时重连全部静默失效（界面还说「已在线」，掉线却收不到任何提示）。
+- **修复**：启动钩子 `_post_upgrade_startup()` 新增 **F2 段** —— **只在本次启动确认「刚完成过一次自动升级」时**
+  （C 段版本比对成功分支带出的 `just_upgraded` 标志），由服务（LocalSystem）跨会话把托盘拉回当前登录会话：
+  `WTSGetActiveConsoleSessionId` → `WTSQueryUserToken` → `DuplicateTokenEx` → `CreateProcessAsUserW`
+  （`lpDesktop = winsta0\default`、工作目录 = 安装目录、无控制台窗口、携带**用户自己的**环境块）；
+  调用前用 `AdjustTokenPrivileges` 启用 `SeTcbPrivilege`，拿不到特权 / 没有活动会话 / 任一步失败都
+  **只记一行中文原因，绝不抛异常**。所有句柄（用户令牌 / 主令牌 / 进程 / 线程 / 环境块）都在 `finally` 里关掉。
+- **产品行为红线**：只有 `just_upgraded` 为真才拉，**绝不放进每次服务启动的路径**（也不在 `_auto_update_loop` 里）——
+  用户从托盘菜单主动退出是正常操作，服务不能把托盘「复活」，否则用户关不掉。
+- 成功 / 失败都写 `logs\upgrade.log`：成功「托盘已在当前登录会话重新拉起（pid=…）」；
+  失败「托盘未能在当前会话自动拉起（原因），下次登录会由自启项启动」。
+- 附带两个纯函数（可单测）：`tray_relaunch_command()` 逐字生成与 `[Run]` 同形的命令行；
+  `tray_relaunch_decision()` 按「平台 / 用户开关 / pythonw / tray.py」四前提给结论；`dry_run=True` 只算不拉。
+
+### 🧰 ② 托盘健壮性三连（审计 C-28 / C-29 / C-30）
+- **C-28 自检不再「假通过」**：托盘已在运行时执行 `tray.py --self-test`，以前打印「托盘已经在运行了」却
+  **return 0** —— 脚本 / 用户以为自检通过，实际一次 `NIM_ADD` 都没跑。现在返回独立退出码 **7（SKIP）**
+  并输出「托盘已在运行，自检跳过（避免与运行中的托盘抢图标）」，`--help` / `--check` / `--test-event` 分支不变。
+- **C-29 单实例互斥体细节**：`CreateMutexW` 失败（句柄为 0）时记中文警告并返回 `(None, True)` ——
+  宁可这次不启动，也**不能双实例**（两个托盘抢同一个通知区图标）；`already` 分支与正常退出都 `CloseHandle`
+  （原有单实例语义不变）。
+- **C-30 托盘日志与指纹**：`tray.log` 轮转失败（被占用 / 杀软锁定）时以前静默 `pass` → 无界增长；
+  现在兜底「截断重写」并记一行「日志轮转失败，已截断重写」，连续失败 ≥3 次后本次进程放弃轮转（仍截断）；
+  `code_signature()` 从 `(mtime, size)` 升级为 `(mtime, size, sha256[:16])`（只读前 4096 字节）——
+  **同长度、同一秒内**完成的脚本替换不再漏判（以前升级后托盘可能一直跑内存里的旧代码）。
+
+### 🧷 ③ 构建：ISCC 版本钉死（build-P2-4 剩余项）
+- CI 主路径 `choco install innosetup` 改为 `--version=6.7.1`；装完新增一步读注册表
+  `Inno Setup 6_is1`（含 `WOW6432Node`）的 `DisplayVersion` 并与 6.7.1 比对，不一致直接 `throw`
+  （主路径版本必须可控，否则构建不可复现）。
+- 官方静默安装器兜底路径（choco 失败）**行为不变**，但打 `::warning::` 明确「兜底路径 ISCC 版本未钉死」。
+- `tools.lock.json` 的 `not_locked` 两条 reason 更新：版本已钉死 6.7.1，内容哈希仍不校验
+  （choco / nupkg 不提供稳定内容哈希）；`docs/RELEASING.md`「工具锁维护」补 §8.3「升级 ISCC」步骤
+  （改 version + 核对注册表 DisplayVersion + 本地实测一次构建）。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **558 项** ✓（新增 34 项：relaunch 决策五分支 / 命令行逐字 / dry-run 行为级 /
+  「没升级过绝不拉、刚升级才拉一次」的触发门**行为级** + 失败文案 / 触发点结构与「不在每次启动路径」/
+  ctypes 关键调用齐全 / 指纹同长度同秒回归 / 日志轮转失败兜底与放弃重试 /
+  `--self-test` 互斥体退出码 7（**真子进程**）/ 互斥体失败不双开 / ISCC 钉版与文档）；
+- HTTP `_smoke_http.py` **51 项** ✓；`pr_review.py --self-test`、`render_release_notes.py --self-test` 全绿；
+  workflow YAML 解析通过。
+
 ## v2.1.3.6 (fix) — 2026-11-17 · 代号 `Vega`（织女星）
 
 > 主题：**供应链可复现性收尾 + 发版手册补全** —— 第六轮审计/维护的剩余项。

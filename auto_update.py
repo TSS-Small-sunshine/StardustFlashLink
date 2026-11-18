@@ -1212,6 +1212,337 @@ def _ensure_tray_autostart_sane(dry_run=False):
 
 
 # ============================================================
+# 静默升级后跨会话拉起托盘（v2.1.3.7 / 审计 C-16、改进项 I-8）
+#
+# 背景（真机证据）：升级前安装器 PrepareToInstall 一定 KillTray()，而 setup.iss 的
+# [Run] 起托盘那条带 skipifsilent —— 自动升级（schtasks /ru SYSTEM 静默安装）结束后
+# 没有任何人把托盘拉回来。本机 %LOCALAPPDATA%\DrcomAutoLogin\tray.log 显示
+# 2026-11-17 15:54:29 之后托盘就没再写日志，直到 2026-11-18 13:25:47 下一次登录才启动
+# —— 中间约 21.5 小时没有断线气泡 / 状态图标 / 唤醒重连。
+#
+# 修法：服务以 LocalSystem 跑在 session 0，拿**当前活动控制台会话**的用户令牌，
+# 用 CreateProcessAsUserW 把托盘拉进用户桌面（winsta0\default）。只在「本次启动确认刚
+# 完成一次自动升级」时做（见 _post_upgrade_startup 的 just_upgraded），绝不放进每次
+# 服务启动的路径 —— 用户从托盘菜单主动退出是产品行为，服务不能把它复活（否则关不掉）。
+# ============================================================
+CREATE_NO_WINDOW = 0x08000000
+CREATE_UNICODE_ENVIRONMENT = 0x00000400
+TOKEN_ADJUST_PRIVILEGES = 0x0020
+TOKEN_QUERY = 0x0008
+SE_PRIVILEGE_ENABLED = 0x00000002
+ERROR_NOT_ALL_ASSIGNED = 1300
+MAXIMUM_ALLOWED = 0x02000000
+SECURITY_IMPERSONATION = 2
+TOKEN_PRIMARY = 1
+
+
+def tray_relaunch_command(pythonw_path, script_path):
+    """纯函数：托盘命令行 = 双引号包裹的 pythonw + tray.py。
+
+    与 setup.iss [Run] 那条（Filename=pythonw / Parameters=tray.py）同形；改一处必须
+    同时改另一处，否则托盘在交互安装与静默升级两条路径里行为不一致。
+    """
+    return '"{}" "{}"'.format(pythonw_path, script_path)
+
+
+def tray_relaunch_decision(os_name, tray_pref, pythonw_exists, script_exists):
+    """纯函数：这次该不该跨会话把托盘拉起来。返回 (bool, 中文原因)。
+
+    任一前提不满足都返回 (False, 可读原因)；原因直接写进 logs\\upgrade.log 给人看。
+    """
+    if os_name != "nt":
+        return False, "当前不是 Windows 会话，不适合跨会话拉起托盘"
+    if not tray_pref:
+        return False, "用户已关闭「托盘随登录启动」（HKLM TrayAutostart=0），不自动拉起"
+    if not pythonw_exists:
+        return False, "安装目录里没有 python\\pythonw.exe，无法拉起托盘"
+    if not script_exists:
+        return False, "安装目录里没有 tray.py，无法拉起托盘"
+    return True, ""
+
+
+def _win32_libs():
+    """加载跨会话拉起托盘要用的 Win32 库；非 Windows / 加载失败返回 None。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+        wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
+    except (ImportError, OSError, AttributeError):
+        return None
+    return ctypes, wintypes, kernel32, advapi32, wtsapi32
+
+
+def _enable_privilege(name):
+    """启用当前进程令牌里的某个特权。成功 True / 失败 False，**绝不抛异常**。
+
+    审计 C-16：跨会话 WTSQueryUserToken 需要 SeTcbPrivilege —— 服务以 LocalSystem 运行时
+    该特权在令牌里但是 disabled，不显式 AdjustTokenPrivileges 就拿不到用户令牌。
+    非 Windows / 非 SYSTEM（无权启用）都只是返回 False，由调用方给出可读原因。
+    """
+    libs = _win32_libs()
+    if libs is None:
+        return False
+    ctypes, wintypes, kernel32, advapi32, _wtsapi32 = libs
+
+    class _LUID(ctypes.Structure):
+        _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+    class _LUID_AND_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("Luid", _LUID), ("Attributes", wintypes.DWORD)]
+
+    class _TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = [("PrivilegeCount", wintypes.DWORD),
+                    ("Privileges", _LUID_AND_ATTRIBUTES * 1)]
+
+    try:
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                              ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.OpenProcessToken.restype = wintypes.BOOL
+        advapi32.LookupPrivilegeValueW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                                   ctypes.POINTER(_LUID)]
+        advapi32.LookupPrivilegeValueW.restype = wintypes.BOOL
+        advapi32.AdjustTokenPrivileges.argtypes = [
+            wintypes.HANDLE, wintypes.BOOL, ctypes.POINTER(_TOKEN_PRIVILEGES),
+            wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        advapi32.AdjustTokenPrivileges.restype = wintypes.BOOL
+
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(),
+                                         TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                                         ctypes.byref(token)):
+            return False
+        try:
+            luid = _LUID()
+            if not advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+                return False
+            state = _TOKEN_PRIVILEGES()
+            state.PrivilegeCount = 1
+            state.Privileges[0].Luid = luid
+            state.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
+            if not advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(state),
+                                                  0, None, None):
+                return False
+            # AdjustTokenPrivileges 返回真但特权没给全时，GetLastError = ERROR_NOT_ALL_ASSIGNED
+            return ctypes.get_last_error() != ERROR_NOT_ALL_ASSIGNED
+        finally:
+            kernel32.CloseHandle(token)
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def _wts_query_user_token():
+    """取当前活动控制台会话的用户主令牌。返回 dict {ok, token, session_id, reason}。
+
+    ok=True 时**调用方负责 CloseHandle(token)**。非 Windows / 没有活动控制台会话 /
+    服务不是 LocalSystem（拿不到 SeTcbPrivilege）都会落在 ok=False + 可读中文原因上，
+    绝不抛异常 —— 这段跑在服务启动钩子里，异常会让后面的自愈步骤静默失效。
+    """
+    info = {"ok": False, "token": None, "session_id": None, "reason": ""}
+    libs = _win32_libs()
+    if libs is None:
+        info["reason"] = "当前不是 Windows（或加载不到 wtsapi32），无法查询登录会话"
+        return info
+    ctypes, wintypes, kernel32, _advapi32, wtsapi32 = libs
+    try:
+        # WTSGetActiveConsoleSessionId 由 **kernel32** 导出（Vista 起）；wtsapi32 里
+        # 只有 WTSQueryUserToken 等会话函数。老系统 / 精简镜像上偶尔只在一处有，两边都试。
+        get_session = getattr(kernel32, "WTSGetActiveConsoleSessionId", None) \
+            or getattr(wtsapi32, "WTSGetActiveConsoleSessionId", None)
+        if get_session is None:
+            info["reason"] = "系统没有 WTSGetActiveConsoleSessionId（无法定位当前登录会话）"
+            return info
+        get_session.restype = wintypes.DWORD
+        wtsapi32.WTSQueryUserToken.argtypes = [wintypes.ULONG,
+                                               ctypes.POINTER(wintypes.HANDLE)]
+        wtsapi32.WTSQueryUserToken.restype = wintypes.BOOL
+        session_id = int(get_session())
+        info["session_id"] = session_id
+        if session_id in (0xFFFFFFFF, -1):
+            info["reason"] = "当前没有活动的控制台登录会话（用户还没登录桌面），无法拉起托盘"
+            return info
+        token = wintypes.HANDLE()
+        if not wtsapi32.WTSQueryUserToken(session_id, ctypes.byref(token)):
+            info["reason"] = ("WTSQueryUserToken 失败（Win32 错误 {}）："
+                              "服务多半不是以 LocalSystem 身份运行").format(ctypes.get_last_error())
+            return info
+        info.update({"ok": True, "token": token, "reason": ""})
+        return info
+    except (OSError, AttributeError, TypeError, ValueError) as exc:
+        info["reason"] = "查询登录会话令牌失败：{!r}".format(exc)
+        return info
+
+
+def _relaunch_tray_in_user_session(dry_run=False):
+    """把托盘重新拉进**当前登录会话**（审计 C-16 / 改进项 I-8）。返回 dict。
+
+    {"ok": bool, "pid": int | None, "reason": str, "command": str}
+
+    只在 _post_upgrade_startup() 确认「本次启动是刚完成的一次自动升级」时调用；
+    **不要**放进每次服务启动的路径（用户从托盘菜单主动退出是正常操作，不能被复活）。
+    dry_run=True 只算决策与命令行，不碰 Win32、不拉进程。
+
+    任何失败都只返回结构化中文原因，绝不向上抛异常。
+    """
+    base_dir = globals().get("BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
+    pythonw = os.path.join(base_dir, "python", "pythonw.exe")
+    script = os.path.join(base_dir, "tray.py")
+    command = tray_relaunch_command(pythonw, script)
+    info = {"ok": False, "pid": None, "reason": "", "command": command}
+
+    should, reason = tray_relaunch_decision(
+        os.name, _tray_autostart_pref(), os.path.isfile(pythonw), os.path.isfile(script))
+    if not should:
+        info["reason"] = reason
+        return info
+    if dry_run:
+        info["would_relaunch"] = True
+        info["reason"] = "dry_run：只计算决策与命令行，未真正拉起托盘"
+        return info
+
+    libs = _win32_libs()
+    if libs is None:
+        info["reason"] = "当前不是 Windows（或加载不到 Win32 库），无法跨会话拉起托盘"
+        return info
+    ctypes, wintypes, kernel32, advapi32, _wtsapi32 = libs
+    try:
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+    except (AttributeError, TypeError):
+        pass
+
+    user_token = None
+    primary_token = wintypes.HANDLE()
+    env_block = ctypes.c_void_p()
+    env_created = False
+    process_handle = wintypes.HANDLE()
+    thread_handle = wintypes.HANDLE()
+    userenv = None
+    try:
+        if not _enable_privilege("SeTcbPrivilege"):
+            info["reason"] = ("拿不到 SeTcbPrivilege（服务多半不是以 LocalSystem 身份运行），"
+                              "无法跨会话拉起托盘")
+            return info
+
+        queried = _wts_query_user_token()
+        if not queried.get("ok"):
+            info["reason"] = queried.get("reason") or "查询当前登录会话令牌失败"
+            return info
+        user_token = queried.get("token")
+
+        advapi32.DuplicateTokenEx.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p,
+            ctypes.c_int, ctypes.c_int, ctypes.POINTER(wintypes.HANDLE)]
+        advapi32.DuplicateTokenEx.restype = wintypes.BOOL
+        if not advapi32.DuplicateTokenEx(user_token, MAXIMUM_ALLOWED, None,
+                                         SECURITY_IMPERSONATION, TOKEN_PRIMARY,
+                                         ctypes.byref(primary_token)):
+            info["reason"] = "DuplicateTokenEx 失败（Win32 错误 {}）".format(ctypes.get_last_error())
+            return info
+
+        class _STARTUPINFOW(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR), ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD), ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.c_void_p),
+                ("hStdInput", wintypes.HANDLE), ("hStdOutput", wintypes.HANDLE),
+                ("hStdError", wintypes.HANDLE),
+            ]
+
+        class _PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD),
+            ]
+
+        # 把**用户自己的**环境块交给新进程：tray.py 按 LOCALAPPDATA 决定 tray.log 写哪儿，
+        # 继承 SYSTEM 的环境会写到 systemprofile 下（用户永远看不到那条日志）。拿不到就退回继承。
+        try:
+            userenv = ctypes.WinDLL("userenv", use_last_error=True)
+            userenv.CreateEnvironmentBlock.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                                       wintypes.HANDLE, wintypes.BOOL]
+            userenv.CreateEnvironmentBlock.restype = wintypes.BOOL
+            userenv.DestroyEnvironmentBlock.argtypes = [ctypes.c_void_p]
+            userenv.DestroyEnvironmentBlock.restype = wintypes.BOOL
+            env_created = bool(userenv.CreateEnvironmentBlock(
+                ctypes.byref(env_block), user_token, False))
+        except (OSError, AttributeError):
+            env_created = False
+        if not env_created:
+            env_block = ctypes.c_void_p()
+
+        si = _STARTUPINFOW()
+        si.cb = ctypes.sizeof(_STARTUPINFOW)
+        # 桌面名必须是用户会话的 winsta0\default：服务在 session 0，不指定桌面名
+        # 新进程会落在服务的窗口站里 —— 图标在用户桌面上看不见。
+        si.lpDesktop = "winsta0\\default"
+        pi = _PROCESS_INFORMATION()
+        # 规范导出在 **advapi32**（文档 Library 就是 Advapi32.dll）；个别系统 / 精简镜像上
+        # kernel32 只有兼容转发，反过来没有。两个都试、优先 advapi32，免得在别的机器上
+        # 撞 AttributeError 把整条自愈路径静默废掉（本轮真机自测发现的差异）。
+        create_as_user = getattr(advapi32, "CreateProcessAsUserW", None) \
+            or getattr(kernel32, "CreateProcessAsUserW", None)
+        if create_as_user is None:
+            info["reason"] = "系统里找不到 CreateProcessAsUserW（无法跨会话拉起托盘）"
+            return info
+        create_as_user.argtypes = [
+            wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR,
+            ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.LPCWSTR,
+            ctypes.POINTER(_STARTUPINFOW), ctypes.POINTER(_PROCESS_INFORMATION)]
+        create_as_user.restype = wintypes.BOOL
+        command_line = ctypes.create_unicode_buffer(command)
+        created = create_as_user(
+            primary_token,
+            pythonw,                       # lpApplicationName
+            command_line,                  # lpCommandLine（引号写法与 setup.iss [Run] 同形）
+            None, None, False,             # 不继承句柄
+            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,   # 无控制台窗口
+            env_block if env_created else None,
+            base_dir,                      # 工作目录 = 安装目录
+            ctypes.byref(si), ctypes.byref(pi))
+        if not created:
+            info["reason"] = "CreateProcessAsUserW 失败（Win32 错误 {}）".format(
+                ctypes.get_last_error())
+            return info
+        process_handle = pi.hProcess
+        thread_handle = pi.hThread
+        info.update({"ok": True, "pid": int(pi.dwProcessId), "reason": ""})
+        return info
+    except (OSError, AttributeError, TypeError, ValueError) as exc:
+        info["ok"] = False
+        info["pid"] = None
+        info["reason"] = "跨会话拉起托盘时出现未预期异常：{!r}".format(exc)
+        return info
+    finally:
+        # 所有句柄都必须关：这段每个升级周期只跑一次，但泄漏令牌是权限问题，不是性能问题。
+        try:
+            if process_handle:
+                kernel32.CloseHandle(process_handle)
+            if thread_handle:
+                kernel32.CloseHandle(thread_handle)
+            if env_created and userenv is not None:
+                userenv.DestroyEnvironmentBlock(env_block)
+            if primary_token:
+                kernel32.CloseHandle(primary_token)
+            if user_token:
+                kernel32.CloseHandle(user_token)
+        except (OSError, AttributeError, TypeError):
+            pass
+
+
+# ============================================================
 # 升级尝试记录 + 熔断（v2.0.4.0）
 #
 # 背景：静默升级是"启动 installer → Python 立即退出"。若 installer 因任何
@@ -2515,12 +2846,19 @@ def _post_upgrade_startup():
     # —— C) v2.0.4.0：用尝试记录确认"上次自动升级到底装上没有" ——
     # 之前只比对备份 hash，无法区分"同版本重装"与"根本没装上"，
     # 于是装不上时既没有告警、也没有熔断。
+    #
+    # v2.1.3.7（审计 C-16）：本段同时是「托盘要不要跨会话拉回来」的唯一开关 ——
+    # just_upgraded 只在**本次启动确实刚完成一次自动升级**（目标版本 == 当前版本）时为真，
+    # F2 段据此决定拉不拉托盘。每次服务启动都拉是不行的：用户从托盘菜单主动退出是
+    # 产品行为，服务不能把它复活。
+    just_upgraded = False
     try:
         attempt = _read_update_attempt()
         target = attempt.get("target")
         if target and attempt.get("state") != "success":
             count = int(attempt.get("count") or 1)
             if _compare_versions(VERSION, target) == 0:
+                just_upgraded = True
                 _log_upgrade("INFO", "升级成功确认：已运行 v{}（目标 {}，尝试 {} 次）".format(VERSION, target, count))
                 _clear_update_attempt()
                 # v2.0.4.2：成功 banner 改由「真装上了」点亮（此前由备份 hash 误判点亮）
@@ -2572,6 +2910,26 @@ def _post_upgrade_startup():
             tray.get("action"), tray.get("want"), tray.get("current") or "不存在"))
     except Exception as exc:  # noqa: BLE001
         _log_upgrade("WARN", "启动钩子：托盘自启对齐异常（{}）".format(exc))
+
+    # —— F2) v2.1.3.7 / 审计 C-16：静默升级后把托盘拉回**当前登录会话** ——
+    # 为什么需要：升级前 setup.iss 的 PrepareToInstall 一定 KillTray()，而 [Run] 起托盘
+    # 那条带 skipifsilent —— 静默升级结束后没有任何人把托盘拉回来。真机证据（tray.log）：
+    # 2026-11-17 15:54:29 之后停写，直到 2026-11-18 13:25:47 下一次登录才启动（约 21.5 小时）。
+    #
+    # 产品行为红线：**只在 just_upgraded 为真时拉**。绝不放进 _auto_update_loop / 每次服务
+    # 启动的路径 —— 用户从托盘菜单主动退出托盘是正常操作，服务不能把它「复活」。
+    # 成功 / 失败都记一行中文 upgrade.log：失败也不影响其他自愈，下次登录仍由自启项启动。
+    if just_upgraded:
+        try:
+            relaunch = _relaunch_tray_in_user_session()
+            if relaunch.get("ok"):
+                _log_upgrade("INFO", "托盘已在当前登录会话重新拉起（pid={}）；静默升级会杀掉托盘（C-16）".format(
+                    relaunch.get("pid")))
+            else:
+                _log_upgrade("WARN", "托盘未能在当前会话自动拉起（{}），下次登录会由自启项启动".format(
+                    relaunch.get("reason") or "未知原因"))
+        except Exception as exc:  # noqa: BLE001  拉托盘失败绝不能拖垮启动钩子
+            _log_upgrade("WARN", "托盘未能在当前会话自动拉起（{}），下次登录会由自启项启动".format(exc))
 
     # —— G) 延迟复核执行器结果（审计 G1）——
     # 同步只做「看一眼」（上面最多等 8 秒）；health= 与 rollback= 都更晚才落盘，

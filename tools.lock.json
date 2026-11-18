@@ -1,6 +1,6 @@
 {
   "lock_version": 1,
-  "updated_at": "2026-11-17",
+  "updated_at": "2026-11-18",
   "generator": "supply-fixer（审计 P2-4 / J7 供应链收口）",
   "scope": "CI（.github/workflows/build-installer.yml）、本地构建（packaging/build.ps1）、源码部署安装脚本（install.bat）真正下载的**固定版本**上游文件。哈希值由本机实际下载后用 Get-FileHash -Algorithm SHA256 计算（nssm / 内嵌 Python：2026-11-16；中文语言文件：2026-11-17），不是抄自网页。",
   "usage": "所有消费方只在这里读 URL / SHA256 / size_bytes；shell / YAML / bat 里不允许再出现哈希字面量。缺条目时按各自策略降级（见 not_locked 与各脚本注释）。",
@@ -83,17 +83,17 @@
       "name": "innosetup-official-silent-installer",
       "url": "https://jrsoftware.org/download.php/is.exe",
       "enforced": false,
-      "reason": "URL 不带版本号（服务端 302 到当前最新 6.x 安装器），内容随上游发版而变；写死哈希等于每次 Inno Setup 升级都让构建红。CI 主路径是 `choco install innosetup`（同样不锁版本），这个只是 choco 失败时的兜底。风险评估：ISCC 只参与编译，不进安装包、也不以服务身份常驻目标机，供应链风险低于 nssm / 内嵌 Python。若要收口 P2-4 剩余项：改成 choco install innosetup --version=<6.x.y> 并锁 nupkg，或从这里下载后按本文件格式补一条 tools 条目。"
+      "reason": "URL 不带版本号（服务端 302 到当前最新 6.x 安装器），内容随上游发版而变；写死哈希等于每次 Inno Setup 升级都让构建红。CI 主路径已改为 `choco install innosetup --version=6.7.1` 并增加「读注册表 DisplayVersion 核对 6.7.1、不一致即构建失败」的步骤（版本已钉死）；这条只是 choco 失败时的兜底，**兜底路径的 ISCC 版本无法钉死**，CI 会打 ::warning:: 明确暴露。风险评估：ISCC 只参与编译，不进安装包、也不以服务身份常驻目标机，供应链风险低于 nssm / 内嵌 Python。"
     },
     {
       "name": "choco-innosetup-package",
       "url": "choco:innosetup",
       "enforced": false,
-      "reason": "`choco install innosetup --no-progress -y` 没有 --version，取 Chocolatey 社区源当前最新版 → ISCC 版本漂移、构建不可复现。这是 P2-4 / P3-4 的剩余项，本文件不写死哈希（nupkg 内容与版本绑定，choco 不提供稳定内容哈希）。收口建议：CI 改为 `--version=6.x.y` 并在 Step Summary 记录版本。"
+      "reason": "`choco install innosetup --version=6.7.1 --no-progress -y` —— **版本已钉死 6.7.1**：CI 装完后读注册表 `Inno Setup 6_is1` 的 DisplayVersion 与 6.7.1 比对，不一致直接让构建失败（主路径版本必须可控）；不再取社区源当前最新版。**内容哈希仍不校验**：choco / nupkg 不提供稳定内容哈希（包体由上游重打包，哈希随源变化），写死哈希会把「上游正常重传」变成「构建必红」，与 P2-4 要的可复现并不等价。升级步骤见 docs/RELEASING.md「工具锁维护」。"
     }
   ],
   "notes": [
-    "为什么跳过浮动资源：官方 is.exe 的 URL 不含版本号、choco 的 innosetup 包也没有稳定的内容哈希，且上游会持续更新；对它们写死哈希会把「上游正常升级」变成「构建必红」，与 P2-4 想要的「可复现 + 防投毒」并不等价。它们已记录在 not_locked 里，构建时打 ::warning:: 暴露风险，而不是假装已校验。中文语言文件已改为固定 issrc commit + 锁 SHA256（见 tools[] 的 chinese-simplified-isl），不再是浮动项。",
+    "为什么跳过浮动资源：官方 is.exe 的 URL 不含版本号、choco 的 innosetup 包也没有稳定的内容哈希，且上游会持续更新；对它们写死哈希会把「上游正常升级」变成「构建必红」，与 P2-4 想要的「可复现 + 防投毒」并不等价。ISCC 的**版本**已收口（CI 主路径 choco 固定 6.7.1 + 注册表核对，见 not_locked 两条 reason）；仍不做内容哈希校验，因此它们继续留在 not_locked，构建时打 ::warning:: 暴露风险，而不是假装已校验。中文语言文件已改为固定 issrc commit + 锁 SHA256（见 tools[] 的 chinese-simplified-isl），不再是浮动项。",
     "维护方式：升级 nssm / 内嵌 Python / 中文语言文件时必须实际下载新文件 → Get-FileHash -Algorithm SHA256 → 更新本文件的 sha256 / size_bytes / version / updated_at，并在 CHANGELOG 说明。绝不允许从网页或他人报告里抄哈希。中文语言文件（chinese-simplified-isl）升级 = 把 issrc main 的当前 commit（git ls-remote https://github.com/jrsoftware/issrc refs/heads/main）填进 version / url，再实测哈希；升级方法见 docs/RELEASING.md「工具锁维护」。",
     "校验口径：消费方比对小写 64 位十六进制；size_bytes 只作辅助提示（以 SHA256 为准）。required=true 的条目（nssm）在 CI 里缺失 = 构建红；required=false 的条目缺失 = ::warning:: 回退，保证 Python 小版本退役时不至于完全构建不了。",
     "本文件是纯数据（无注释、UTF-8 无 BOM、LF 行尾），由 Python / PowerShell 的 JSON 解析器直接读取。"
