@@ -95,7 +95,7 @@ stardust-flash-link service uninstall                   # 注销（幂等 ✓）
 
 ### 自动更新（M4 第二块：检查 / 下载 / **自我替换 / 回滚**）
 
-`@bash
+```bash
 stardust-flash-link update check                      # 通道取配置 update_channel（默认正式版 ✓）
 stardust-flash-link update check --channel preview    # 临时看预览通道
 stardust-flash-link update download out.zip           # 检查 + 下载 + SHA256 校验（只下载，不安装 ✓）
@@ -105,7 +105,7 @@ stardust-flash-link update apply out.zip --no-restart # 只换文件，提示「
 stardust-flash-link update rollback                   # 回滚到**最新**备份
 stardust-flash-link update rollback --version 3.0.0.0-preview.2   # 回滚到指定版本
 stardust-flash-link update backups                    # 列出所有备份（backup/<版本>/<exe>）
-`@
+```
 
 - **GUI（M4 第二块）**：主窗口「更新」一行 →「检查更新」发现新版本后出现「**下载并安装**」按钮
   （没更新时按钮不存在 = 不留死按钮 ✓）。点击后后台线程完成 下载 → SHA256 → 解包 → 备份 → 换 exe，
