@@ -79,7 +79,24 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | **M1** | 完整核心：登录/在线探测/**位置守卫**/方案/退避/日志轮转/指标/诊断包 | 与 2.x 行为对齐（`_smoke_*` 通过） |
 | **M2** | 桌面壳：托盘/窗口/单实例/自启/深色主题；UI 迁移 | 三平台可运行 App |
 | **M3** | 平台守护：Windows 服务(NSSM) / **systemd --user** / **launchd LaunchAgent**；打包矩阵 | 各平台安装包 + AppImage/dmg |
-| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 进行中（2026-11-17）：**检查 / 下载 / SHA256 校验**已完成（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**已支持（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI 主窗口「检查更新」入口**已完成（后台线程、启动不联网）；**自我替换 / 安装器**与便携版单文件待做 |
+| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 进行中（2026-11-18）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；便携版单文件 / 安装器 / 正式通道仍待做 |
+
+### M4 第二块：自我替换 / 回滚（2026-11-18 完成）
+
+- **全部在核心、可离线单测** ✓：`core::zipread`（`zipwriter` 的只读对偶，只收 store ZIP，逐条 CRC + 路径白名单）
+  → `core::update_apply`（`plan_apply` / `apply_replace` / `install_zip` / `rollback_replace` / `list_backups` /
+  `cleanup_stale_files` / `restart_detached`），界面与 CLI 都只是薄薄一层调用 ✓。
+- **Windows rename 舞步**（关键前提：运行中的 exe **不能删除 / 覆盖**，但**可以改名** ✓）：
+  备份当前 exe → 复制新 exe 到同目录临时名 → 旧 exe 改名 `<exe>.old-<pid>-<序号>` → 新 exe 改名成正式名
+  → 拉起新进程 → 旧进程退出；**任一步失败都自动回滚**（把旧程序改回原名 + 清临时文件）✓。
+- **备份布局**：`<安装目录>/backup/<当前版本>/<exe 名>`（**不写用户数据目录** ✓）；回滚：
+  `update rollback [--version V]`（不给版本 = 最新备份），`update backups` 列出 ✓；GUI 启动时清一次
+  上次没删掉的 `.old-*` / `.incoming-*` ✓。
+- **已知限制**：
+  1. 只认**本项目 `archive` 命令打的 store ZIP**（method 8 压缩包 → 中文报错拒绝；GitHub 资产必须由本仓库 CI 产出 ✓）；
+  2. GUI 装完**必须重启**（旧进程退出后才能清掉旧 exe；重启由 GUI 自动做：先放单实例端口再拉起新程序 ✓）；
+  3. 备份放在安装目录 → 安装目录不可写（如装在 Program Files 且无权限）时 `apply` 会明确失败，不动程序 ✓；
+  4. Windows 已真机冒烟（临时目录模拟安装目录）；Linux / macOS 只有**交叉编译 + 单测**覆盖，**GUI 就地替换尚未真机验证** ✗。
 
 ### M0 实测（2026-09-28）
 

@@ -140,7 +140,19 @@ mod tests {
         };
         assert!(!guard.poll_focus_request(), "没人敲门时不该误报 ✓");
         assert!(request_focus(port), "敲门应得到回复 ✓");
-        assert!(guard.poll_focus_request(), "敲门必须被识别 ✓");
+        // 敲门是「连上 + 写完就返回」，**不等对方收**（生产里对方 400ms 轮询一次 ✓）——
+        // 所以这里不能假设数据已经躺在 accept 队列里被读走。macOS CI 实测偶发（v3.0.0.0-preview.3
+        // 的 PR 上红过一次）：立刻 poll 时连接可能还在队列里 → 误判「没敲到」。给一个有界等待窗口，
+        // 语义仍是「这次敲门必须被识别」，只是不要求「同一个瞬间」✓。
+        let mut knocked = false;
+        for _ in 0..100 {
+            if guard.poll_focus_request() {
+                knocked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(knocked, "敲门必须被识别（1 秒窗口内）✓");
         assert!(!guard.poll_focus_request(), "识别过一次就不再重复 ✓");
     }
 

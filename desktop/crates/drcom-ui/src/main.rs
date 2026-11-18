@@ -19,6 +19,14 @@ slint::include_modules!();
 /// 单实例占用的本地端口（回环地址，高位端口 ✓）。
 const INSTANCE_PORT: u16 = 47653;
 
+thread_local! {
+    /// 单实例 guard 放在**主线程本地**：更新成功后要「先放端口 → 再拉起新程序 → 退出」✓。
+    ///
+    /// 为什么不用 Rc 传进回调：invoke_from_event_loop 的闭包要求 Send，而 Rc 不是 Send ✗；
+    /// 这个回调本来就在主线程上跑，thread_local 正好（不需要跨线程 ✓）。
+    static INSTANCE_GUARD: RefCell<Option<instance::InstanceGuard>> = const { RefCell::new(None) };
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     // 单实例：已经有一个在跑时，把它的窗口叫到前面，自己安静退出 ✓
     let instance_guard = match instance::acquire(INSTANCE_PORT) {
@@ -38,6 +46,16 @@ fn main() -> Result<(), slint::PlatformError> {
             None
         }
     };
+
+    INSTANCE_GUARD.with(|slot| *slot.borrow_mut() = instance_guard);
+
+    // 上次更新留下的旧文件（.old-* / .incoming-* / .rollback-*）在启动时清一次 ✓
+    // （上次的旧 exe 当时还被进程占着删不掉；现在它已经不在了 → 这里能清掉 ✓）
+    if let Ok(exe) = std::env::current_exe() {
+        for warning in drcom_core::update_apply::cleanup_stale_for_exe(&exe) {
+            eprintln!("[更新] {}", warning);
+        }
+    }
 
     let ui = AppWindow::new()?;
     apply(&ui, &model::collect());
@@ -87,16 +105,75 @@ fn main() -> Result<(), slint::PlatformError> {
     let weak = ui.as_weak();
     ui.on_check_update(move || {
         let Some(ui) = weak.upgrade() else { return };
+        if ui.get_update_installing() {
+            return; // 安装中不许再查（防连点 ✓）
+        }
         ui.set_update_busy(true);
         set_update(&ui, "info", "检查中…（网络最多等 8 秒，界面照常能用 ✓）");
         let weak_back = ui.as_weak();
         worker::spawn_update_check(move |check| {
+            let available = check.is_available();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak_back.upgrade() {
                     let (kind, text) =
                         model::format_update_check(&check, &drcom_core::app_version());
                     set_update(&ui, &kind, &text);
+                    // 只有真的「有更新」才让「下载并安装」按钮出现（不留死按钮 ✗）
+                    ui.set_update_available(available);
                     ui.set_update_busy(false);
+                }
+            });
+        });
+    });
+
+    // 「下载并安装」（M4 第二块）：下载 → SHA256 → 解包 → 备份 → 换 exe → 重启 ✓
+    // 会联网 + 会写安装目录 → 照旧在后台线程跑；成功之后**先放单实例端口、再拉起新程序、
+    // 最后退出旧进程**（顺序反了新的自己会被踢回来 ✗）。
+    let weak = ui.as_weak();
+    ui.on_install_update(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        if ui.get_update_busy() || ui.get_update_installing() {
+            return; // 检查中 / 安装中都不许再点（防连点 ✓）
+        }
+        ui.set_update_installing(true);
+        set_update(
+            &ui,
+            "info",
+            "下载并安装中…（下载 → SHA256 校验 → 备份 → 换文件，可能需要几十秒）",
+        );
+        let weak_back = ui.as_weak();
+        worker::spawn_update_install(move |result| {
+            let (kind, text) = model::format_install_result(&result);
+            let restart_path = match &result {
+                Ok(report) => Some(report.new_exe.clone()),
+                Err(_) => None,
+            };
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak_back.upgrade() else { return };
+                ui.set_update_installing(false);
+                set_update(&ui, &kind, &text);
+                let Some(new_exe) = restart_path else {
+                    ui.set_update_available(true); // 失败可重试 ✓
+                    return;
+                };
+                // ① 先放掉单实例端口（否则新的自己会被当成第二个实例踢回来 ✗）
+                INSTANCE_GUARD.with(|slot| *slot.borrow_mut() = None);
+                // ② 拉起新程序（脱离当前控制台 ✓）
+                match drcom_core::update_apply::restart_detached(&new_exe) {
+                    Ok(()) => {
+                        // ③ 让「已安装 X，正在重启…」这行真的画出来，再退出旧进程 ✓
+                        slint::Timer::single_shot(std::time::Duration::from_millis(900), || {
+                            let _ = slint::quit_event_loop();
+                        });
+                    }
+                    Err(error) => {
+                        ui.set_update_available(false);
+                        set_update(
+                            &ui,
+                            "warn",
+                            &format!("已安装，但自动重启失败：{}（请手动打开新程序）", error),
+                        );
+                    }
                 }
             });
         });
@@ -134,14 +211,21 @@ fn main() -> Result<(), slint::PlatformError> {
 
     // 第二个实例敲门 → 把窗口抬到前面 ✓（非阻塞轮询，不占线程池 ✗）
     let mut instance_timer: Option<slint::Timer> = None;
-    if let Some(guard) = instance_guard {
+    if INSTANCE_GUARD.with(|slot| slot.borrow().is_some()) {
         let weak = ui.as_weak();
         let timer = slint::Timer::default();
         timer.start(
             slint::TimerMode::Repeated,
             std::time::Duration::from_millis(400),
             move || {
-                if !guard.poll_focus_request() {
+                // 更新成功时会把 guard 清空（端口已放）→ 这里自然就停了 ✓
+                let hit = INSTANCE_GUARD.with(|slot| {
+                    slot.borrow()
+                        .as_ref()
+                        .map(|guard| guard.poll_focus_request())
+                        .unwrap_or(false)
+                });
+                if !hit {
                     return;
                 }
                 if let Some(ui) = weak.upgrade() {
