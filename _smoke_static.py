@@ -345,9 +345,11 @@ check("v2.0.7.0 事件模拟入口在位（本机实测用）",
 _sig_tmp = os.path.join(tmp, "tray_sig_probe.py")
 pathlib.Path(_sig_tmp).write_text("# probe\n", encoding="utf-8")
 _sig1 = _tray.code_signature(_sig_tmp)
-check("v2.0.7.1 脚本指纹读得到（mtime + size）",
-      isinstance(_sig1, tuple) and len(_sig1) == 2
-      and _sig1[1] == os.path.getsize(_sig_tmp))
+# v2.1.3.7（审计 C-30）起指纹是 (mtime, size, sha256[:16]) 三元组，不再是二元组
+check("v2.0.7.1 脚本指纹读得到（mtime + size + 头部哈希）",
+      isinstance(_sig1, tuple) and len(_sig1) == 3
+      and _sig1[1] == os.path.getsize(_sig_tmp)
+      and isinstance(_sig1[2], str) and len(_sig1[2]) == 16)
 check("v2.0.7.1 文件不在时指纹为 None（不误判成「变了」）",
       _tray.code_signature(os.path.join(tmp, "no_such_file_xyz.py")) is None)
 os.utime(_sig_tmp, (1000000000, 1000000000))
@@ -4084,6 +4086,279 @@ check("维护 R6-ISL：docs/RELEASING.md 写明 workflow_dispatch 手动发版 /
       "doc_len=%d" % len(_doc6))
 
 
+# ============================================================
+# 维护第七轮（2026-11 / v2.1.3.7）
+# 对应 _维护报告/audit/core.md 的 C-16 / C-28 / C-29 / C-30、§4 I-8，
+# 以及 build-P2-4 剩余项（ISCC 版本钉死）。
+# ============================================================
+import ctypes as _ctypes7  # noqa: E402
+
+# —— C-16：静默升级后跨会话拉起托盘（纯函数 + 行为级 + 触发点结构）——
+check("维护 R7-C16：非 Windows 不拉（原因可读）",
+      _au.tray_relaunch_decision("posix", True, True, True)[0] is False
+      and "Windows" in _au.tray_relaunch_decision("posix", True, True, True)[1])
+check("维护 R7-C16：用户关了托盘自启 → 不拉",
+      _au.tray_relaunch_decision("nt", False, True, True)[0] is False
+      and "关闭" in _au.tray_relaunch_decision("nt", False, True, True)[1])
+check("维护 R7-C16：pythonw.exe 缺失 → 不拉",
+      _au.tray_relaunch_decision("nt", True, False, True)[0] is False
+      and "pythonw" in _au.tray_relaunch_decision("nt", True, False, True)[1])
+check("维护 R7-C16：tray.py 缺失 → 不拉",
+      _au.tray_relaunch_decision("nt", True, True, False)[0] is False
+      and "tray.py" in _au.tray_relaunch_decision("nt", True, True, False)[1])
+check("维护 R7-C16：全都满足 → 拉（无原因串）",
+      _au.tray_relaunch_decision("nt", True, True, True) == (True, ""))
+check("维护 R7-C16：命令行逐字 = 双引号包裹的 pythonw + tray.py",
+      _au.tray_relaunch_command("C:\\app\\python\\pythonw.exe", "C:\\app\\tray.py")
+      == '"C:\\app\\python\\pythonw.exe" "C:\\app\\tray.py"')
+
+# 行为级：dry_run 只算不拉；本机不是 LocalSystem，真调用必须回 ok=False + 可读原因（不抛）
+_saved_base7 = _au.__dict__.get("BASE_DIR")
+_had_base7 = "BASE_DIR" in _au.__dict__
+_au.BASE_DIR = os.getcwd()          # 仓库根没有 python/pythonw.exe，决策必然停在「缺文件」
+try:
+    try:
+        _rl7_dry = _au._relaunch_tray_in_user_session(dry_run=True)
+        _rl7_dry_err = ""
+    except Exception as _exc7:      # noqa: BLE001
+        _rl7_dry, _rl7_dry_err = None, repr(_exc7)
+    check("维护 R7-C16（行为级）：dry_run 返回结构化 dict、ok 为 bool、不抛异常",
+          isinstance(_rl7_dry, dict) and isinstance(_rl7_dry.get("ok"), bool)
+          and _rl7_dry_err == "",
+          _rl7_dry_err or repr(_rl7_dry))
+    check("维护 R7-C16（行为级）：dry_run 不真正拉起（ok=False + 中文原因）",
+          isinstance(_rl7_dry, dict) and _rl7_dry.get("ok") is False
+          and bool(_rl7_dry.get("reason")), repr(_rl7_dry))
+    try:
+        _rl7_real = _au._relaunch_tray_in_user_session()
+        _rl7_real_err = ""
+    except Exception as _exc7b:     # noqa: BLE001
+        _rl7_real, _rl7_real_err = None, repr(_exc7b)
+    check("维护 R7-C16（行为级）：真实调用在非 SYSTEM 环境只回失败原因（绝不抛 / 绝不拉进程）",
+          _rl7_real_err == "" and isinstance(_rl7_real, dict)
+          and _rl7_real.get("ok") is False and bool(_rl7_real.get("reason")),
+          _rl7_real_err or repr(_rl7_real))
+    _wts7 = _au._wts_query_user_token()
+    check("维护 R7-C16：辅助拆分可单独导入调用（_wts_query_user_token 返回失败 dict 不抛）",
+          isinstance(_wts7, dict) and isinstance(_wts7.get("ok"), bool)
+          and _wts7.get("ok") is False and bool(_wts7.get("reason")), repr(_wts7))
+    check("维护 R7-C16：_enable_privilege 拿不到 SeTcbPrivilege 时返回 False（不抛）",
+          _au._enable_privilege("SeTcbPrivilege") is False)
+finally:
+    if _had_base7:
+        _au.BASE_DIR = _saved_base7
+    else:
+        _au.__dict__.pop("BASE_DIR", None)
+
+# 行为级：启动钩子的「要不要拉托盘」门 —— 没升级过绝不拉；刚升级成功才拉一次
+_saved_f2 = {}
+for _k in ("_cleanup_update_leftovers", "_ensure_nssm_appexit_sane",
+           "_ensure_tray_autostart_sane", "_start_deferred_runner_recheck",
+           "_report_update_runner_result", "_relaunch_tray_in_user_session",
+           "LOG_DIR", "UPGRADE_LOG_FILE", "BASE_DIR", "logger", "STATE", "STATE_LOCK"):
+    _saved_f2[_k] = (_k in _au.__dict__, _au.__dict__.get(_k))
+_f2_dir = tempfile.mkdtemp(prefix="au_f2_")
+_f2_calls = []
+
+
+def _f2_stub_ok(**_kw):
+    _f2_calls.append(1)
+    return {"ok": True, "pid": 4321, "reason": "", "command": "x"}
+
+
+def _f2_stub_fail(**_kw):
+    return {"ok": False, "pid": None, "reason": "测试原因：拿不到 SeTcbPrivilege", "command": "x"}
+
+
+try:
+    _au.LOG_DIR = _f2_dir
+    _au.UPGRADE_LOG_FILE = os.path.join(_f2_dir, "upgrade.log")
+    _au.BASE_DIR = _f2_dir
+    _au.logger = logging.getLogger("smoke_r7_au")   # 启动钩子里 _log_upgrade / WARN 分支要用
+    _au.STATE = {}
+    _au.STATE_LOCK = _th2.RLock()
+    _au._cleanup_update_leftovers = lambda: None
+    _au._ensure_nssm_appexit_sane = lambda: "Ignore"
+    _au._ensure_tray_autostart_sane = lambda: {"action": "keep", "want": True, "current": "x"}
+    _au._start_deferred_runner_recheck = lambda *_a, **_k: None
+    _au._report_update_runner_result = lambda *_a, **_k: False
+    _au._relaunch_tray_in_user_session = _f2_stub_ok
+    _au._post_upgrade_startup()
+    _f2_none = len(_f2_calls)
+    _au._write_update_attempt(_au.VERSION, count=1, state="attempted")
+    _au._post_upgrade_startup()
+    _f2_one = len(_f2_calls)
+    _f2_log_ok = pathlib.Path(_au.UPGRADE_LOG_FILE).read_text(encoding="utf-8")
+    _au._relaunch_tray_in_user_session = _f2_stub_fail
+    _au._write_update_attempt(_au.VERSION, count=1, state="attempted")
+    _au._post_upgrade_startup()
+    _f2_log_fail = pathlib.Path(_au.UPGRADE_LOG_FILE).read_text(encoding="utf-8")
+finally:
+    for _k, (_had, _v) in _saved_f2.items():
+        if _had:
+            _au.__dict__[_k] = _v
+        else:
+            _au.__dict__.pop(_k, None)
+
+check("维护 R7-C16（行为级）：没升级过 → 绝不拉托盘；刚升级成功 → 拉一次并记 pid",
+      _f2_none == 0 and _f2_one == 1
+      and "托盘已在当前登录会话重新拉起（pid=4321）" in _f2_log_ok,
+      "none=%d one=%d" % (_f2_none, _f2_one))
+check("维护 R7-C16（行为级）：拉起失败 → 日志带中文原因 + 「下次登录会由自启项启动」",
+      "托盘未能在当前会话自动拉起（测试原因：拿不到 SeTcbPrivilege）" in _f2_log_fail
+      and "下次登录会由自启项启动" in _f2_log_fail, repr(_f2_log_fail[-160:]))
+
+_src_upd7 = pathlib.Path("auto_update.py").read_text(encoding="utf-8")
+_f7_post = _src_upd7.find("def _post_upgrade_startup")
+_f7_loop = _src_upd7.find("def _auto_update_loop")
+_f7_tray = _src_upd7.find("_ensure_tray_autostart_sane()")
+_f7_call = _src_upd7.find("_relaunch_tray_in_user_session()")
+_f7_guard = _src_upd7.rfind("if just_upgraded:", 0, _f7_call) if _f7_call >= 0 else -1
+check("维护 R7-C16：触发点在启动钩子里「托盘自启」之后（不是另起一条路径）",
+      -1 < _f7_loop < _f7_post < _f7_tray < _f7_call,
+      "loop=%d post=%d tray=%d call=%d" % (_f7_loop, _f7_post, _f7_tray, _f7_call))
+check("维护 R7-C16：调用受 just_upgraded 守卫（不是每次服务启动都拉）",
+      _f7_guard > _f7_post and 0 < _f7_call - _f7_guard < 400
+      and _src_upd7.count("if just_upgraded:") == 1,
+      "guard=%d call=%d" % (_f7_guard, _f7_call))
+check("维护 R7-C16：just_upgraded 只由「目标版本 == 当前版本」的成功分支置真",
+      _src_upd7.find("just_upgraded = False") > 0
+      and _src_upd7.find("_compare_versions(VERSION, target) == 0")
+      < _src_upd7.find("just_upgraded = True")
+      and _src_upd7.find("just_upgraded = True") < _f7_call)
+check("维护 R7-C16：服务每次启动路径（_auto_update_loop）里没有拉托盘调用",
+      _f7_loop >= 0 and "_relaunch_tray_in_user_session" not in _src_upd7[_f7_loop:_f7_post]
+      and "just_upgraded" not in _src_upd7[_f7_loop:_f7_post])
+_BS7 = chr(92)
+check("维护 R7-C16：ctypes 关键调用齐全（会话令牌 / 复制令牌 / 用户进程 / 桌面名 / 提权）",
+      all(_s in _src_upd7 for _s in (
+          "WTSQueryUserToken", "DuplicateTokenEx", "CreateProcessAsUserW",
+          "AdjustTokenPrivileges", "SeTcbPrivilege",
+          'si.lpDesktop = "winsta0' + _BS7 + _BS7 + 'default"',
+          "ctypes.create_unicode_buffer(command)")))
+check("维护 R7-C16：成功 / 失败都写一行中文 upgrade.log（含 C-16 标注）",
+      "托盘已在当前登录会话重新拉起" in _src_upd7
+      and "C-16" in _src_upd7.split("托盘已在当前登录会话重新拉起", 1)[1][:120]
+      and "下次登录会由自启项启动" in _src_upd7)
+
+# —— C-30：指纹补头部哈希（同长度、同秒内改写必须能被发现）+ 日志轮转失败兜底 ——
+_sig7 = os.path.join(tmp, "tray_sig_same_len.py")
+pathlib.Path(_sig7).write_text("AAAA", encoding="utf-8")
+_sig7_a = _tray.code_signature(_sig7)
+_sig7_st = os.stat(_sig7)
+pathlib.Path(_sig7).write_text("BBBB", encoding="utf-8")
+os.utime(_sig7, (_sig7_st.st_atime, _sig7_st.st_mtime))   # 强行保持 mtime / size 不变
+_sig7_b = _tray.code_signature(_sig7)
+check("维护 R7-C30（行为级）：mtime+size 完全相同、只改内容 → 指纹仍变（关键回归）",
+      isinstance(_sig7_a, tuple) and len(_sig7_a) == 3
+      and _sig7_a[:2] == _sig7_b[:2] and _sig7_a != _sig7_b,
+      repr((_sig7_a, _sig7_b)))
+check("维护 R7-C30：指纹第三段 = 16 位小写十六进制（sha256 前 16 位）",
+      isinstance(_sig7_a[2], str) and len(_sig7_a[2]) == 16
+      and all(c in "0123456789abcdef" for c in _sig7_a[2]), repr(_sig7_a))
+
+_saved7 = (_tray.LOG_DIR, _tray.LOG_FILE, _tray.LOG_MAX_BYTES,
+           _tray._LOG_ROTATE_FAIL_STREAK)
+_real_replace7 = os.replace
+_log7_dir = tempfile.mkdtemp(prefix="tray_log7_")
+try:
+    _tray.LOG_DIR = _log7_dir
+    _tray.LOG_FILE = os.path.join(_log7_dir, "tray.log")
+    _tray.LOG_MAX_BYTES = 200
+    _tray._LOG_ROTATE_FAIL_STREAK = 0
+    pathlib.Path(_tray.LOG_FILE).write_text("x" * 600, encoding="utf-8")
+
+    def _bad_replace7(_a, _b):
+        raise OSError("模拟日志文件被占用")
+
+    os.replace = _bad_replace7
+    _log7_err = ""
+    try:
+        _tray._log("轮转失败兜底冒烟")
+    except Exception as _exc7c:     # noqa: BLE001
+        _log7_err = repr(_exc7c)
+    finally:
+        os.replace = _real_replace7
+    _log7_txt = pathlib.Path(_tray.LOG_FILE).read_text(encoding="utf-8")
+    _log7_size = os.path.getsize(_tray.LOG_FILE)
+    check("维护 R7-C30（行为级）：轮转失败 → 截断重写（文件有界）+ 中文说明，且不抛异常",
+          _log7_err == "" and _log7_size < 600
+          and "日志轮转失败，已截断重写" in _log7_txt,
+          "err=%s size=%d" % (_log7_err, _log7_size))
+
+    # 连续失败 >= 3 次 → 本次进程放弃 rename 尝试，但仍截断（不无界增长）
+    _tray._LOG_ROTATE_FAIL_STREAK = 3
+    pathlib.Path(_tray.LOG_FILE).write_text("y" * 600, encoding="utf-8")
+    _replace7_calls = []
+    os.replace = lambda _a, _b: _replace7_calls.append((_a, _b))
+    try:
+        _tray._log("放弃轮转尝试")
+    finally:
+        os.replace = _real_replace7
+    check("维护 R7-C30（行为级）：连续失败≥3 次后放弃 rename（仍截断，文件有界）",
+          not _replace7_calls and os.path.getsize(_tray.LOG_FILE) < 600,
+          "calls=%d" % len(_replace7_calls))
+finally:
+    os.replace = _real_replace7
+    (_tray.LOG_DIR, _tray.LOG_FILE, _tray.LOG_MAX_BYTES,
+     _tray._LOG_ROTATE_FAIL_STREAK) = _saved7
+
+# —— C-28 / C-29：--self-test 不再假通过；互斥体细节 ——
+_src_tray7 = pathlib.Path("tray.py").read_text(encoding="utf-8")
+check("维护 R7-C28：--self-test 互斥体分支返回独立退出码 7（结构级）",
+      "EXIT_SELF_TEST_SKIP = 7" in _src_tray7
+      and "return EXIT_SELF_TEST_SKIP" in _src_tray7
+      and "托盘已在运行，自检跳过" in _src_tray7)
+check("维护 R7-C28：--help 与 --check / --test-event 分支不变（开工前后语义一致）",
+      '"--help" in argv or "-h" in argv' in _src_tray7
+      and "--check" in _src_tray7 and "--test-event" in _src_tray7)
+check("维护 R7-C29：CreateMutexW 失败（句柄为 0）→ 中文警告 + 返回 (None, True)",
+      "if not handle:" in _src_tray7 and "return None, True" in _src_tray7
+      and "避免双实例" in _src_tray7)
+check("维护 R7-C29：already 分支与正常退出都关闭句柄（单实例语义不变）",
+      "def _close_handle(handle)" in _src_tray7
+      and _src_tray7.count("_close_handle(") >= 5
+      and "app.mutex_handle = None" in _src_tray7)
+
+if os.name == "nt":
+    # 行为级：自己先持有同名互斥体，再真跑一次 tray.py --self-test 读退出码
+    _k327 = _ctypes7.windll.kernel32
+    _k327.CreateMutexW.restype = _ctypes7.c_void_p
+    _mut7 = _k327.CreateMutexW(None, False, _tray.MUTEX_NAME)
+    try:
+        _proc7 = subprocess.run(
+            [sys.executable, os.path.join(os.getcwd(), "tray.py"), "--self-test"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+        _rc7 = _proc7.returncode
+    finally:
+        if _mut7:
+            _k327.CloseHandle(_mut7)
+    _out7 = _proc7.stdout.decode("utf-8", errors="replace")
+    check("维护 R7-C28（行为级）：托盘在运行时 --self-test 退出码 = 7（SKIP，不再假通过）",
+          _rc7 == 7, "rc=%s stdout=%r" % (_rc7, _out7[-200:]))
+    check("维护 R7-C28（行为级）：明确输出「自检跳过」原因（不是静默返回）",
+          "自检跳过" in _out7, repr(_out7[-200:]))
+else:
+    print("SKIP  维护 R7-C28（行为级）：非 Windows，跳过「真子进程 + 互斥体」退出码断言，"
+          "上面已有结构级断言兜底")
+
+# —— build-P2-4 剩余项：ISCC 版本钉死 6.7.1 ——
+_wf7 = pathlib.Path(".github/workflows/build-installer.yml").read_text(encoding="utf-8")
+_lock7 = pathlib.Path("tools.lock.json").read_text(encoding="utf-8")
+_doc7 = pathlib.Path("docs/RELEASING.md").read_text(encoding="utf-8")
+check("维护 R7-ISCC：CI 主路径按 6.7.1 钉版安装（choco --version=6.7.1）",
+      "choco install innosetup --version=6.7.1 --no-progress -y" in _wf7)
+check("维护 R7-ISCC：装完读注册表 DisplayVersion 并与 6.7.1 比对，不一致 throw",
+      "DisplayVersion" in _wf7 and "6.7.1" in _wf7
+      and "throw" in _wf7.split("DisplayVersion", 1)[1][:2500])
+check("维护 R7-ISCC：官方静默安装器兜底路径明确警告「版本未钉死」",
+      "兜底" in _wf7 and "未钉死" in _wf7)
+check("维护 R7-ISCC：tools.lock 的 not_locked 两条说明已更新（版本钉死 / 内容哈希仍不校验）",
+      "6.7.1" in _lock7 and "内容哈希" in _lock7 and "钉死" in _lock7)
+check("维护 R7-ISCC：发版手册写明 ISCC 升级步骤（改 version + 核对注册表 + 本地实测）",
+      "6.7.1" in _doc7 and "DisplayVersion" in _doc7 and "本地实测" in _doc7)
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -4172,7 +4447,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.6", version.VERSION == "2.1.3.6", version.VERSION)
+check("版本 = 2.1.3.7", version.VERSION == "2.1.3.7", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

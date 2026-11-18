@@ -18,6 +18,7 @@ v2.0.7.0（B3）新增**事件驱动重连**：托盘本来就是用户会话里
 
 自检（真加一次图标 + 弹一次气泡，用来确认环境 OK；会看到气泡一闪）：
     "{app}\\python\\python.exe" "{app}\\tray.py" --self-test
+    退出码：0 = 通过，1/2/3 = 失败，**7 = SKIP**（托盘已在运行，为免抢图标而跳过自检）
 
 单次检查（不建图标，只打印一次判定结果；CI / 排障用）：
     "{app}\\python\\python.exe" "{app}\\tray.py" --check
@@ -27,6 +28,7 @@ v2.0.7.0（B3）新增**事件驱动重连**：托盘本来就是用户会话里
     "{app}\\python\\python.exe" "{app}\\tray.py" --test-event net      # 当作网络变了
 """
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
@@ -52,22 +54,47 @@ HTTP_TIMEOUT = 5
 # —— v2.0.7.0（B3）：事件驱动重连 ——
 RECONNECT_MIN_GAP_SEC = 5      # 事件去抖：唤醒与地址变化常常连着来，别打成一串
 WAKE_SETTLE_SEC = 4            # 唤醒后等几秒再触发：网卡 / 无线这时才刚连上
+# 审计 C-28：--self-test 撞上单实例互斥体时的退出码。返回 0 会骗人（脚本 / 用户以为自检
+# 通过，其实一次 NIM_ADD 都没跑），返回 1 又会被当成失败 → 7 = SKIP（这次没自检）。
+EXIT_SELF_TEST_SKIP = 7
 
 
 # ============================================================
 # 日志 / 配置读取
 # ============================================================
+# 审计 C-30：日志轮转失败（tray.log 被别的进程 / 杀软短暂占住）连续这么多次后，
+# 本次进程不再尝试 rename，直接截断重写 —— 保证文件有界，也避免每 10 秒都撞一次失败。
+_LOG_ROTATE_FAIL_STREAK = 0
+_LOG_ROTATE_MAX_FAILS = 3
+
+
 def _log(msg):
-    """写一行日志（托盘没有控制台，只能落盘；失败也绝不抛）。"""
+    """写一行日志（托盘没有控制台，只能落盘；失败也绝不抛）。
+
+    审计 C-30：旧实现轮转失败时静默 ``pass`` → tray.log 无界增长（LOG_MAX_BYTES 只检查
+    不使用）。现在兜底「截断重写」并记一行「日志轮转失败，已截断重写」；连续失败达到
+    ``_LOG_ROTATE_MAX_FAILS`` 次后本次进程放弃轮转尝试（仍截断）。
+    **本函数内不得再调用自身** —— 截断失败会变成递归。
+    """
+    global _LOG_ROTATE_FAIL_STREAK
     line = "[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
     try:
         if not os.path.isdir(LOG_DIR):
             os.makedirs(LOG_DIR)
         if os.path.isfile(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
-            try:
-                os.replace(LOG_FILE, LOG_FILE + ".1")
-            except OSError:
-                pass
+            rotated = False
+            if _LOG_ROTATE_FAIL_STREAK < _LOG_ROTATE_MAX_FAILS:
+                try:
+                    os.replace(LOG_FILE, LOG_FILE + ".1")
+                    rotated = True
+                    _LOG_ROTATE_FAIL_STREAK = 0
+                except OSError:
+                    _LOG_ROTATE_FAIL_STREAK += 1
+            if not rotated:
+                # 拿不到归档机会也不能让它长到几 MB：截断重开，先写一行说明。
+                with open(LOG_FILE, "w", encoding="utf-8") as f:
+                    f.write("[%s] 日志轮转失败，已截断重写（本次进程第 %d 次）\n"
+                            % (time.strftime("%Y-%m-%d %H:%M:%S"), _LOG_ROTATE_FAIL_STREAK))
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line)
     except OSError:
@@ -203,17 +230,25 @@ def should_reconnect(last_at, now, gap=RECONNECT_MIN_GAP_SEC):
 
 
 def code_signature(path):
-    """脚本的「版本指纹」= ``(mtime, size)``；读不到就返回 None。
+    """脚本的「版本指纹」= ``(mtime, size, sha256[:16])``；读不到就返回 None。
 
     v2.0.7.1：升级会替换安装目录里的 `tray.py`，但**正在跑的那个进程还是旧代码** ——
     安装器再拉一个实例也会被单实例互斥体挡掉（v2.0.7.0 真机验证时发现：升级后 PID 没变，
     新装的唤醒/换网重连等于白装 ✗）。所以托盘自己盯着这个指纹，一变就换个新进程接着跑。
+
+    审计 C-30：旧指纹只有 (mtime, size) —— **同长度、同一秒内**完成的整文件替换
+    （NTFS 时间戳精度到秒）指纹不变，托盘会继续跑旧代码。现在补上**前 4096 字节**的
+    SHA-256 前 16 位；只读头部是因为托盘每 10 秒检查一次，不能把整个文件读进来。
+    读文件失败仍返回 None —— 沿用「读不到 = 已卸载，交给卸载逻辑」的原语义。
     """
     try:
         st = os.stat(path)
+        with open(path, "rb") as f:
+            head = f.read(4096)
+        digest = hashlib.sha256(head).hexdigest()[:16]
     except OSError:
         return None
-    return (int(st.st_mtime), int(st.st_size))
+    return (int(st.st_mtime), int(st.st_size), digest)
 
 
 def decide_events(prev_kind, cur_kind, down_streak):
@@ -513,7 +548,11 @@ class TrayApp(object):
 
     # —— v2.0.7.1：升级后换上新代码（不然托盘一直跑着内存里的旧版本）——
     def _code_changed(self):
-        """安装目录里的 tray.py 被换过了吗？第一次调用只记指纹。"""
+        """安装目录里的 tray.py 被换过了吗？第一次调用只记指纹。
+
+        审计 C-30：指纹是 (mtime, size, sha256[:16]) 三元组 —— 同长度同一秒内的替换
+        也能认出来（旧实现只比 (mtime, size)，升级后可能一直跑内存里的旧代码）。
+        """
         sig = code_signature(os.path.join(APP_DIR, "tray.py"))
         if sig is None:
             return False                    # 读不到 → 交给上面「已卸载」那套逻辑
@@ -527,7 +566,8 @@ class TrayApp(object):
 
         为什么必须**先放手**：新实例起来会抢 `Local\\DrcomAutoLoginTray`，
         我们不放手它就立刻自己退出（这正是升级后托盘一直是旧代码的原因 ✗）。
-        先记下新指纹再动手：万一这次没起来，也只重试一次，不会每 10 秒刷一遍日志。
+        先记下新指纹（含头部 SHA-256 的三元组，审计 C-30）再动手：万一这次没起来，
+        也只重试一次，不会每 10 秒刷一遍日志。
         """
         self.code_sig = code_signature(os.path.join(APP_DIR, "tray.py"))
         _log("检测到 tray.py 已被升级 → 换上新代码重启托盘")
@@ -787,16 +827,34 @@ def _out(text):
         pass
 
 
+def _close_handle(handle):
+    """关一个内核句柄（审计 C-29：失败只吞掉，绝不抛）。句柄为空时什么都不做。"""
+    if not handle:
+        return
+    try:
+        ctypes.windll.kernel32.CloseHandle(handle)
+    except (OSError, AttributeError):
+        pass
+
+
 def _single_instance():
     """抢单实例互斥体。返回 (handle, already_running)。
 
     用 CreateMutexW 而不是锁文件：句柄随进程退出由内核释放，进程被强杀也不会留残留锁
     （这正是托盘这种"随登录起、可能被任务管理器杀掉"的进程需要的）。
+
+    审计 C-29：CreateMutexW 失败（句柄为 0）时旧的 already=False → 照常启动 → 多开。
+    现在记一条中文警告并返回 (None, True)：**宁可这次不启动，也不能双实例**
+    （两个托盘抢同一个通知区图标，菜单 / 气泡行为不可预期）。
     """
     k32 = ctypes.windll.kernel32
     k32.CreateMutexW.restype = wintypes.HANDLE
     k32.SetLastError(0)
     handle = k32.CreateMutexW(None, False, MUTEX_NAME)
+    if not handle:
+        err = k32.GetLastError()
+        _log("创建单实例互斥体失败（Win32 错误 %s）：为避免双实例，本次不启动托盘" % err)
+        return None, True
     return handle, k32.GetLastError() == 183      # 183 = ERROR_ALREADY_EXISTS
 
 
@@ -824,16 +882,35 @@ def main(argv):
         return TrayApp().test_event(_kind)
     handle, already = _single_instance()
     if already:
+        # 审计 C-29：already 分支也要把非空句柄关掉（进程退出内核会回收，语义上仍应关）。
+        if "--self-test" in argv:
+            # 审计 C-28：以前这里同样 return 0 —— 脚本 / 用户以为自检通过，实际一次
+            # NIM_ADD 都没跑（真正的托盘可能自己反复重建图标，也可能已经卡死）。
+            # 7 = SKIP：明确「这次没自检」，并告诉人怎么真正自检。
+            _out("托盘已在运行，自检跳过（避免与运行中的托盘抢图标）")
+            _out("退出码 7 = SKIP：请先从托盘菜单退出托盘，再运行 --self-test")
+            _close_handle(handle)
+            return EXIT_SELF_TEST_SKIP
         _out("托盘已经在运行了，本次退出。")
+        _close_handle(handle)
         return 0
     app = TrayApp()
     app.mutex_handle = handle        # v2.0.7.1：换新代码重启自己前要先放手这个互斥体
     if "--self-test" in argv:
-        code = app.self_test()
+        try:
+            code = app.self_test()
+        finally:
+            _close_handle(app.mutex_handle)
+            app.mutex_handle = None
         _out("托盘自检%s" % ("通过 ✓" if code == 0 else "失败 ✗（code=%d）" % code))
         _out("日志：%s" % LOG_FILE)
         return code
-    return app.run()
+    try:
+        return app.run()
+    finally:
+        # 审计 C-29：正常退出也顺手关互斥体（单实例语义不变；_restart_self 里已关时为 None）。
+        _close_handle(app.mutex_handle)
+        app.mutex_handle = None
 
 
 if __name__ == "__main__":
