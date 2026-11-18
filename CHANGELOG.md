@@ -5,6 +5,43 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v3.0.0.0-preview.3 (feature) — 2026-11-18 · 代号 `Altair`（牛郎星）· **3.0 预览线**
+
+> 3.0「Altair」线（`desktop/`，Rust + Slint，零功能型第三方依赖）的 **M4 第二块：
+> 自动更新的自我替换 / 回滚**。3.0 **只发预览版**（R6），正式用户的自动更新收不到它；
+> `main` 的 2.x 稳定线完全不受影响 ✓。
+
+### 🔧 ① 自我替换 / 回滚（单文件便携 exe 的就地升级）
+- 新增 `core::zipread`（`zipwriter` 的只读对偶）：只收 **store ZIP**（method 8 → 中文报错拒绝），
+  逐条校验 **CRC-32**，路径穿越 / 盘符 / 绝对路径 / 反斜杠 / `..` 段走白名单，条目数 / 单条目 / 总量都有上限，
+  Zip64 与加密条目直接拒绝 ✓；**零新增 crate**（R1）。
+- 新增 `core::update_apply`：`plan_apply` / `apply_replace` / `install_zip` / `rollback_replace` /
+  `list_backups` / `cleanup_stale_files` / `restart_detached`，以及平台魔数校验
+  （MZ / ELF / Mach-O）与「一层目录内挑唯一 exe」✓。
+- **Windows rename 舞步**（运行中的 exe 不能删除 / 覆盖，但**可以改名**）：备份当前 exe →
+  新 exe 复制到同目录临时名 → 旧 exe 改名 → 新 exe 放正式名 → 拉起新进程 → 旧进程退出；
+  **任一步失败自动回滚**，连回滚都失败的极端情况会在错误里写清旧程序现在的文件名 ✓。
+- **备份布局** `<安装目录>/backup/<当前版本>/<exe 名>`；`update rollback [--version V]` 回滚、
+  `update backups` 列出；CLI 三个新子命令都有 `--dry-run` 出口（不动盘、逐行打印计划）✓。
+- **GUI**：主窗口「更新」一行在有新版本时出现「**下载并安装**」（下载 → SHA256 → 解包 → 备份 → 换 exe），
+  成功后自动重启（先放单实例端口 → 拉起新程序 → 旧进程退出）；失败给可读中文错误、按钮可重试 ✓；
+  启动时清一次上次没删掉的 `.old-*` / `.incoming-*` ✓。
+- 版本号 `APP_CHANNEL_SEQ` 2 → 3（`v3.0.0.0-preview.3`）✓。
+
+### 🔒 ② 边界与隐私（硬约束照旧）
+- **绝不碰用户数据目录**（`platform::data_dir()`）：下载走系统临时目录、备份只放安装目录 `backup/` ✓；
+  不写注册表、不改服务、不动 2.x 的 `version.py` 与 `build-installer.yml` ✓。
+- 所有错误文案都是中文可读（本块不涉及账号 / 密码 / 网关，也就没有需要脱敏的 URL）✓；
+  测试夹具全是**一眼假**的合成值（只含 `MZ` / `ELF` 魔数 + 假标记），仓库内无任何凭据 ✓。
+- 安装包只信**本项目 CI 用 `archive` 打的 store ZIP**（GitHub 资产名逐个对得上）；2.x 的 `*.exe` 不会被认 ✓。
+
+### 🧪 ③ 自检
+- `cargo test --workspace` **306 项单元 + 1 项文档测试全绿**（基线 272 + 1，本轮 **+34**：
+  `zipread` 10 + `update_apply` 17 + `platform::spawn_detached` 1 + CLI 3 + GUI 3）✓；
+- 构建：`cargo build -p drcom-ui` 通过（改过界面必须重建 ✓）；
+- 真机冒烟（Windows，**临时目录模拟安装目录**，不联网、不碰本机已装程序）：`update apply --dry-run` 不动盘；
+  真 apply 后 exe 内容 / 备份内容逐字节正确；`update rollback` 回到旧字节；假 ZIP 报错且不动程序 ✓。
+
 ## v2.1.0.0 (feature) — 2026-09-28 · 代号 `Vega`（织女星）· **开 2.1 线**
 
 > **2.0 线（`Sirius` 天狼星）在 v2.0.14.0 收束** —— 这一版起进入 **2.1 线，代号 `Vega`** ✓

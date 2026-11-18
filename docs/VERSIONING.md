@@ -129,7 +129,9 @@ VERSION_FULL = "2.0.4.0 Sirius"   # 展示串：安装器标题 / Web UI 徽章 
 3. CI 行为：三平台测试 + 六目标构建全绿后，`publish-preview` job 读取 `APP_VERSION` / `APP_CHANNEL_SEQ`，
    创建 **prerelease** `v3.0.0.0-preview.N`，上传六个目标的 `.zip` / `.deb` / `.dmg` 与一份 `SHA256SUMS`。
 4. **验证**：`stardust-flash-link update check --channel preview` 应能发现该版本并按平台挑到正确资产；
-   正式通道（`release`）必须看不见它 ✓。
+   正式通道（`release`）必须看不见它 ✓。预览版自 preview.3 起可直接 `update apply <zip> --dry-run`
+   预演、`update apply <zip>` 自我替换（先备份到 `backup/<版本>/`，失败自动回滚；`update rollback` 可回滚）——
+   替换只认本项目 CI 用 `archive` 打的 store ZIP ✓。
 5. **不要**给预览版打「正式版」标记、**不要**把 3.0 往 `main` 合（R6）；正式版另行走 2.x 的发布链路。
 
 ---
