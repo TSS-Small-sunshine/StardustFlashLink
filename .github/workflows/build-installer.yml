@@ -192,10 +192,17 @@ jobs:
             }
           }
 
-      - name: Install Inno Setup 6 (Chocolatey)
+      - name: Install Inno Setup 6 (Chocolatey, pinned)
         shell: pwsh
         continue-on-error: true
-        run: choco install innosetup --no-progress -y
+        run: |
+          # build-P2-4 剩余项：主路径的 ISCC 版本必须可控。以前不带 --version，取的是
+          # Chocolatey 社区源当前最新版 → 上游一发版，构建用的编译器就跟着变（不可复现）。
+          # 6.7.1 是 choco 源当前版本（核对：community.chocolatey.org 的 FindPackagesById?id='innosetup'）。
+          choco install innosetup --version=6.7.1 --no-progress -y
+          if ($LASTEXITCODE -eq 0) {
+            "ISCC_INSTALL_SOURCE=choco" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
 
       - name: Fallback install Inno Setup 6 (official silent installer)
         shell: pwsh
@@ -210,10 +217,43 @@ jobs:
           # 因此没有写进 tools.lock.json 的 tools[]（见 not_locked）。它是 choco 失败时的兜底，
           # 且 ISCC 只参与编译、不进安装包、不以服务身份常驻 —— 风险等级低于 nssm / 内嵌 Python。
           Write-Host "::warning::Inno Setup 官方安装器未做哈希校验（URL 浮动、不含版本号），见 tools.lock.json 的 not_locked"
+          Write-Host "::warning::本次走官方静默安装器兜底路径，ISCC 版本未钉死（主路径 choco 固定 6.7.1，兜底只能接受上游当前最新）"
           $exe = Join-Path $env:RUNNER_TEMP "innosetup.exe"
           Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $exe -UseBasicParsing
           Start-Process -FilePath $exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait
           if (-not ($candidates | Where-Object { Test-Path $_ })) { throw "Inno Setup 安装失败" }
+
+      - name: Record and verify ISCC version (pinned)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pinned = "6.7.1"
+          # Inno Setup 6 的卸载项写在 Inno Setup 6_is1 下；32 位安装器落在 WOW6432Node，
+          # 64 位安装器落在原生视图 —— 两个都看，取到哪个用哪个。
+          $keys = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1"
+          )
+          $installed = $null
+          foreach ($k in $keys) {
+            if (Test-Path $k) {
+              $v = (Get-ItemProperty -Path $k -Name DisplayVersion -ErrorAction SilentlyContinue).DisplayVersion
+              if ($v) { $installed = [string]$v; break }
+            }
+          }
+          if (-not $installed) { throw "读不到 Inno Setup 版本（注册表 Inno Setup 6_is1 缺 DisplayVersion）" }
+          Write-Host "ISCC 版本 = $installed（期望 $pinned）"
+          "ISCC_VERSION=$installed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ($env:ISCC_INSTALL_SOURCE -eq "choco") {
+            # 主路径必须可控：choco 装出来的版本与钉死值不一致 = 构建不可复现，直接红。
+            if ($installed -ne $pinned) {
+              throw "Chocolatey 主路径装出的 Inno Setup 版本为 $installed，与钉死的 $pinned 不一致（主路径版本必须可控）"
+            }
+            Write-Host "ISCC 版本核对通过（choco 主路径，$pinned）"
+          } else {
+            # 兜底路径不改行为，但必须诚实暴露「版本没钉死」，不能假装可复现。
+            Write-Host "::warning::本次没走 choco 主路径（退回官方静默安装器兜底），ISCC 版本未钉死：实际 $installed"
+          }
 
       - name: Locate ISCC and ensure Chinese language file
         shell: pwsh

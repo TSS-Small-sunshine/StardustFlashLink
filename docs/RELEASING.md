@@ -232,7 +232,24 @@ Remove-Item $tmp
 > 下载会 404 —— 此时 CI / 本地都会降级为 warning 并回退 `Default.isl`（英文界面，构建不中断），
 > 按上面的步骤换一个新 commit 即可恢复中文。
 
-### 8.3 不允许的「收口」方式
+### 8.3 升级 ISCC（Inno Setup 编译器，CI 钉死 `6.7.1`）
+
+CI 主路径用 `choco install innosetup --version=6.7.1` 钉死版本；装完后会读注册表
+`HKLM\SOFTWARE[\WOW6432Node]\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1`
+的 `DisplayVersion` 与 6.7.1 比对，不一致直接让构建失败（主路径版本必须可控）。
+只有 choco 失败时才退回官方静默安装器 —— 那条路径的 ISCC 版本**未钉死**，CI 会打
+`::warning::` 明确说明，而不是假装可复现。升级步骤：
+
+1. 改 `.github/workflows/build-installer.yml` 里 `choco install ... --version=` 与
+   「Record and verify ISCC version」步骤的 `$pinned`（两处必须一致，否则核对必红）；
+2. 本地实测一次构建：`packaging\build.ps1` 能正常编译出安装包（ISCC 只参与编译）；
+3. 合并后手动 `workflow_dispatch` 一次（`dry_run=true` 也行），确认「记录并核对 ISCC 版本」步骤为绿；
+4. `CHANGELOG.md` 记一笔「ISCC 升级到哪个版本」。
+
+> 为什么不锁内容哈希：choco / nupkg 不提供稳定内容哈希（包体由上游重打包），写死哈希会把
+> 「上游正常重传」变成「构建必红」；版本钉死 + 注册表核对已经能保证「用的编译器是哪一版」。
+
+### 8.4 不允许的「收口」方式
 
 - 把哈希写回 YAML / PS1 / bat（R4 会红）；
 - 把 `Assert-LockedDownload` 改成永远放行，或把 `-Required` / 哈希校验删掉；
