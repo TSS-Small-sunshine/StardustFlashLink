@@ -1488,14 +1488,22 @@ def _relaunch_tray_in_user_session(dry_run=False):
         # 新进程会落在服务的窗口站里 —— 图标在用户桌面上看不见。
         si.lpDesktop = "winsta0\\default"
         pi = _PROCESS_INFORMATION()
-        kernel32.CreateProcessAsUserW.argtypes = [
+        # 规范导出在 **advapi32**（文档 Library 就是 Advapi32.dll）；个别系统 / 精简镜像上
+        # kernel32 只有兼容转发，反过来没有。两个都试、优先 advapi32，免得在别的机器上
+        # 撞 AttributeError 把整条自愈路径静默废掉（本轮真机自测发现的差异）。
+        create_as_user = getattr(advapi32, "CreateProcessAsUserW", None) \
+            or getattr(kernel32, "CreateProcessAsUserW", None)
+        if create_as_user is None:
+            info["reason"] = "系统里找不到 CreateProcessAsUserW（无法跨会话拉起托盘）"
+            return info
+        create_as_user.argtypes = [
             wintypes.HANDLE, wintypes.LPCWSTR, wintypes.LPWSTR,
             ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL, wintypes.DWORD,
             ctypes.c_void_p, wintypes.LPCWSTR,
             ctypes.POINTER(_STARTUPINFOW), ctypes.POINTER(_PROCESS_INFORMATION)]
-        kernel32.CreateProcessAsUserW.restype = wintypes.BOOL
+        create_as_user.restype = wintypes.BOOL
         command_line = ctypes.create_unicode_buffer(command)
-        created = kernel32.CreateProcessAsUserW(
+        created = create_as_user(
             primary_token,
             pythonw,                       # lpApplicationName
             command_line,                  # lpCommandLine（引号写法与 setup.iss [Run] 同形）

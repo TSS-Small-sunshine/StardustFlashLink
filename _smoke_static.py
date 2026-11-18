@@ -4233,7 +4233,7 @@ _BS7 = chr(92)
 check("维护 R7-C16：ctypes 关键调用齐全（会话令牌 / 复制令牌 / 用户进程 / 桌面名 / 提权）",
       all(_s in _src_upd7 for _s in (
           "WTSQueryUserToken", "DuplicateTokenEx", "CreateProcessAsUserW",
-          "AdjustTokenPrivileges", "SeTcbPrivilege",
+          'getattr(advapi32, "CreateProcessAsUserW"', "AdjustTokenPrivileges", "SeTcbPrivilege",
           'si.lpDesktop = "winsta0' + _BS7 + _BS7 + 'default"',
           "ctypes.create_unicode_buffer(command)")))
 check("维护 R7-C16：成功 / 失败都写一行中文 upgrade.log（含 C-16 标注）",
