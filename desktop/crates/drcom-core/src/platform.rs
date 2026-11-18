@@ -232,6 +232,68 @@ fn writable(dir: &Path) -> bool {
     }
 }
 
+/// 起一个**与当前进程脱离**的子进程（自我替换成功后「拉起新程序」用 ✓）。
+///
+/// 为什么要脱离（而不是 `Command::spawn` 完事）：
+///   - 更新流程最后旧进程要退出 —— 子进程不能跟着一起死，也不能继承控制台的 stdio
+///     （Windows 上把 stdout 接给一个要退出的控制台，退出时子进程写日志会报错 ✗；
+///     服务 / 双击启动的场景根本没有控制台 ✓）；
+///   - **平台差异只许出现在这里**（R2 ✓）：Windows 用 `DETACHED_PROCESS`，
+///     Unix 用 `process_group(0)`（脱离终端的进程组，SIGHUP 不会带走它 ✓）。
+///
+/// 注意：这里**只负责「拉起来」**，不等它退、不判断它是否成功启动（那是新进程自己的事 ✓）。
+pub fn spawn_detached(exe: &Path, args: &[&str]) -> Result<(), String> {
+    spawn_detached_impl(exe, args)
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_detached_impl(exe: &Path, args: &[&str]) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    /// 新进程不挂在当前控制台上（旧进程退出它也能活着 ✓）。
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    /// 新进程自成一个进程组（Ctrl+C / 控制台事件不波及它 ✓）。
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let mut command = Command::new(exe);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    command
+        .spawn()
+        .map(|_child| ())
+        .map_err(|error| format!("启动 {} 失败：{}", exe.display(), error))
+}
+
+#[cfg(unix)]
+fn spawn_detached_impl(exe: &Path, args: &[&str]) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(exe);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // 自成进程组：终端关闭 / Ctrl+C 不会把它一起带走 ✓
+        .process_group(0);
+    command
+        .spawn()
+        .map(|_child| ())
+        .map_err(|error| format!("启动 {} 失败：{}", exe.display(), error))
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+fn spawn_detached_impl(exe: &Path, _args: &[&str]) -> Result<(), String> {
+    Err(format!(
+        "本平台（{}）没有实现「脱离式启动」，请手动启动 {}",
+        std::env::consts::OS,
+        exe.display()
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +340,16 @@ mod tests {
             legacy_data_dir_for(Os::Linux, Some(program_files), Some(override_dir)),
             Some(override_dir.to_path_buf())
         );
+    }
+
+    #[test]
+    fn detached_spawn_reports_missing_program_readably() {
+        // 真实起进程的路径无法在单测里断言（会拉窗口 / 拉程序 ✗），但**失败分支**可以：
+        // 指到一个不存在的路径 → 必须给可读中文错误，绝不 panic ✓
+        let missing = std::env::temp_dir().join("sfl-no-such-program-for-detached-spawn");
+        let err = spawn_detached(&missing, &[]).unwrap_err();
+        assert!(err.contains("启动"), "{}", err);
+        assert!(!err.contains("panicked"), "{}", err);
     }
 
     #[test]
