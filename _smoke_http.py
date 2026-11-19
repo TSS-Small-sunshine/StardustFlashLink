@@ -498,6 +498,70 @@ try:
     _pstore.update(_p38_saved_cfg)
 
     # ============================================================
+    # v2.1.3.8（审计 P3-9）：并发两次 POST /api/login 只能有一次 triggered:true。
+    # 旧实现两个请求都读到 STATE["login_in_progress"]=False（那是 protocol 抢到
+    # RUN_LOCK 之后才置位的）→ 两个响应都 triggered:true，第二个线程其实空转，
+    # 前端却要干等 120 秒才超时 ✗。
+    # ============================================================
+    _p39_names = ("STATE", "STATE_LOCK", "run_once", "_login_submit_pending")
+    _p39_had = {n: hasattr(web_api, n) for n in _p39_names}
+    _p39_old = {n: getattr(web_api, n, None) for n in _p39_names}
+    _p39_gate = threading.Event()
+    _p39_started = threading.Event()
+    _p39_calls = []
+
+    def _p39_run_once(reason):
+        _p39_calls.append(reason)
+        _p39_started.set()
+        _p39_gate.wait(5)
+
+    web_api.STATE = {"login_in_progress": False}
+    web_api.STATE_LOCK = threading.Lock()
+    web_api._login_submit_pending = False
+    web_api.run_once = _p39_run_once
+    _p39_results = []
+    _p39_bar = threading.Barrier(2)
+
+    def _p39_post():
+        _p39_bar.wait(5)
+        _p39_results.append(_post_json("/api/login", {}))
+
+    _p39_threads = [threading.Thread(target=_p39_post) for _ in range(2)]
+    for _p39_t in _p39_threads:
+        _p39_t.start()
+    for _p39_t in _p39_threads:
+        _p39_t.join(10)
+    _p39_triggered = [b for (_st, b) in _p39_results if (b or {}).get("triggered") is True]
+    _p39_already = [b for (_st, b) in _p39_results
+                    if (b or {}).get("reason") == "already_in_progress"]
+    _check("维护 P3-9：并发两次 POST /api/login → 恰好一次 triggered:true，另一次 already_in_progress",
+           (_p39_results and all(st == 200 for st, _ in _p39_results),
+            len(_p39_results), len(_p39_triggered), len(_p39_already)),
+           (True, 2, 1, 1), repr(_p39_results))
+    _p39_gate.set()
+    _p39_started.wait(5)
+
+    def _p39_run_fast(reason):
+        return
+
+    web_api.run_once = _p39_run_fast
+    _p39_got = None
+    _p39_deadline = _time.time() + 5
+    while _time.time() < _p39_deadline:
+        _st39, _b39 = _post_json("/api/login", {})
+        if (_b39 or {}).get("triggered") is True:
+            _p39_got = (_st39, _b39)
+            break
+        _time.sleep(0.01)
+    _check("维护 P3-9：上一次触发结束后闸门自动释放（下次点击仍 triggered:true，不会永久 already_in_progress）",
+           _p39_got is not None and _p39_got[0] == 200, True, repr(_p39_got))
+    for _n in _p39_names:
+        if _p39_had[_n]:
+            setattr(web_api, _n, _p39_old[_n])
+        elif hasattr(web_api, _n):
+            delattr(web_api, _n)
+
+    # ============================================================
     # v2.1.3.8（审计 P3-15）：配置导入的坏请求文案必须中文、可读、不回声内部异常。
     # 第一轮（P1-2 / P1-3）已把「加密 / 损坏 zip」与「请求体过大」改成中文；
     # 这里钉住此前漏掉的空 body 分支，并给「不是 zip」补一条行为级回归。

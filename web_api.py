@@ -659,13 +659,38 @@ def api_post_password(payload):
     return 200, {"ok": True}
 
 
+# 审计 P3-9：连点「立即登录」的 TOCTOU 闸门。STATE["login_in_progress"] 是
+# protocol.run_once **抢到 RUN_LOCK 之后**才置位的；两个 HTTP 请求同时到达时会
+# 一起读到 False → 两个线程都起、两个响应都是 triggered:true。后一个线程其实
+# 在抢锁时空转返回（不会重复登录），但前端不知道，会干等 120 秒超时 ✗。
+# 现在在 STATE_LOCK 下先占位：第二个请求立刻拿到 already_in_progress；
+# run_once 返回（包括抢不到锁空转）时在 finally 里释放。只增字段、不改字段名（I5）。
+_login_submit_pending = False
+
+
 def api_post_login():
-    """异步触发 run_once('manual')。"""
+    """异步触发 run_once('manual')；同一时刻只接受一个手动触发（审计 P3-9）。"""
+    global _login_submit_pending
     with STATE_LOCK:
-        if STATE["login_in_progress"]:
+        if STATE["login_in_progress"] or _login_submit_pending:
             return 200, {"triggered": False, "reason": "already_in_progress"}
-    t = threading.Thread(target=run_once, args=("manual",), daemon=True)
-    t.start()
+        _login_submit_pending = True
+
+    def _runner():
+        global _login_submit_pending
+        try:
+            run_once("manual")
+        finally:
+            # 周期自检抢着跑 / run_once 空转返回时，它自己不会清这个占位
+            with STATE_LOCK:
+                _login_submit_pending = False
+
+    try:
+        threading.Thread(target=_runner, daemon=True).start()
+    except Exception:  # noqa: BLE001 —— 线程起不来必须把闸门放掉，否则永远 already_in_progress
+        with STATE_LOCK:
+            _login_submit_pending = False
+        raise
     return 200, {"triggered": True}
 
 
