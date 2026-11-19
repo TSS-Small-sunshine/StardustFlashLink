@@ -977,6 +977,19 @@ def api_post_rollback(payload):
 # ============================================================
 # 自动升级 API（v1.3 新增）
 # ============================================================
+def _int_or(value, default=0):
+    """安全转 int：脏值（None / 非数字字符串 / 列表…）一律回落 default，绝不抛。
+
+    审计 P3-8：手改过 / 从旧版沿用的 config.json 里，数值字段可能是字符串；
+    api_get_update_status 旧实现直接 int()，一个 "abc" 就能把 GET 打成 500 ✗。
+    只数字字符串（"12"）照常转换，容错不等于丢掉合法值。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def api_get_update_status():
     """GET /api/update/status — 当前升级状态快照。"""
     _auto_update_mod._schedule_success_clear()  # 顺手清理过期绿 banner（v2.0.2.3.2 fix: 解耦后跨模块调用走 _auto_update_mod 注入）
@@ -989,13 +1002,13 @@ def api_get_update_status():
         "latest_url": snap.get("update_latest_url"),
         "update_available": bool(snap.get("update_available")),
         "state": snap.get("update_state"),
-        "progress_pct": int(snap.get("update_progress") or 0),
+        "progress_pct": _int_or(snap.get("update_progress"), 0),
         "progress_message": snap.get("update_progress_message") or "",
         "last_check_at": snap.get("update_last_check_at"),
         "last_error": snap.get("update_last_error"),
         "target_version": snap.get("update_target_version"),
-        "check_interval_hours": int(cfg.get("update_check_interval_hours", 6)),
-        "min_free_disk_mb": int(cfg.get("update_min_free_disk_mb", 200)),
+        "check_interval_hours": _int_or(cfg.get("update_check_interval_hours"), 6),
+        "min_free_disk_mb": _int_or(cfg.get("update_min_free_disk_mb"), 200),
     }
 
 

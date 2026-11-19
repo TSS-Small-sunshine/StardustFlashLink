@@ -464,6 +464,40 @@ try:
             pass
 
     # ============================================================
+    # v2.1.3.8（审计 P3-8）：状态接口不再直接 int() 信配置 / 状态里的值。
+    # 手改过或从旧版沿用的 config.json 里数值字段可能是字符串，旧实现一个 "abc"
+    # 就让 GET /api/update/status 抛 ValueError → 500（界面升级块整块空白）✗。
+    # ============================================================
+    _p38_saved_snap = web_api._snapshot_state
+    _p38_saved_cfg = dict(_pstore)
+    web_api._snapshot_state = lambda: {
+        "update_state": "downloading", "update_progress": "abc",
+        "update_progress_message": "下载中", "update_available": False,
+        "update_latest_version": None, "update_last_error": None,
+    }
+    _pstore.update({"update_check_interval_hours": "abc",
+                    "update_min_free_disk_mb": "not-a-number"})
+    _st38, _b38 = _get_json2("/api/update/status")
+    _b38 = _b38 or {}
+    _check("维护 P3-8：字符串型脏配置 / 脏状态不再 500（进度 / 间隔 / 磁盘余量回落默认）",
+           (_st38, _b38.get("progress_pct"), _b38.get("check_interval_hours"),
+            _b38.get("min_free_disk_mb")), (200, 0, 6, 200), repr((_st38, _b38)))
+    web_api._snapshot_state = lambda: {
+        "update_state": "downloading", "update_progress": "42",
+        "update_progress_message": "下载中", "update_available": False,
+        "update_latest_version": None, "update_last_error": None,
+    }
+    _pstore.update({"update_check_interval_hours": "12", "update_min_free_disk_mb": "512"})
+    _st38b, _b38b = _get_json2("/api/update/status")
+    _b38b = _b38b or {}
+    _check("维护 P3-8：数字字符串照常转换（容错只兜脏值，不把合法值当成脏值丢掉）",
+           (_st38b, _b38b.get("progress_pct"), _b38b.get("check_interval_hours"),
+            _b38b.get("min_free_disk_mb")), (200, 42, 12, 512), repr((_st38b, _b38b)))
+    web_api._snapshot_state = _p38_saved_snap
+    _pstore.clear()
+    _pstore.update(_p38_saved_cfg)
+
+    # ============================================================
     # v2.1.3.8（审计 P3-15）：配置导入的坏请求文案必须中文、可读、不回声内部异常。
     # 第一轮（P1-2 / P1-3）已把「加密 / 损坏 zip」与「请求体过大」改成中文；
     # 这里钉住此前漏掉的空 body 分支，并给「不是 zip」补一条行为级回归。
