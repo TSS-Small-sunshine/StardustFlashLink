@@ -3711,14 +3711,28 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   /* ============================================================
      分区 2/6 · API 客户端（路径 / 方法 / 字段严格对应后端）
      ============================================================ */
+  /* 审计 P3-4：统一判断 HTTP 状态码。旧实现四个 helper 都只 r.json() ——
+     非 2xx 的 JSON（{"ok": false, "error": "..."}）被当成成功解析，调用点再各自
+     看 body.ok；漏看的调用点（例如 fetchLog 对 /api/log_tail 的 400）就把错误
+     静默吞掉，界面既不报错也不刷新。现在非 2xx 一律 throw：
+     Error 文案优先用 body.error（服务端已中文化），没有就用 HTTP 状态。 */
+  function _readJsonResponse(r) {
+    return r.json().catch(function () { return null; }).then(function (body) {
+      if (!r.ok) {
+        throw new Error((body && body.error) || ('请求失败（HTTP ' + r.status + '）'));
+      }
+      return body;
+    });
+  }
+
   function getJson(url) {
-    return fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); });
+    return fetch(url, { cache: 'no-store' }).then(_readJsonResponse);
   }
 
   function postJson(url, body) {
     var opt = { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' } };
     if (body !== undefined) opt.body = JSON.stringify(body);
-    return fetch(url, opt).then(function (r) { return r.json(); });
+    return fetch(url, opt).then(_readJsonResponse);
   }
 
   /* v2.1.1.0：最近一次 /api/wifi 的结果（给「用当前 Wi-Fi」这类按钮复用） */
@@ -4541,12 +4555,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   var POLL_UPDATE_MS = 5000;
 
   function getUpdateJson(url) {
-    return fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); });
+    return fetch(url, { cache: 'no-store' }).then(_readJsonResponse);
   }
   function postUpdateJson(url, body) {
     var opt = { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' } };
     if (body !== undefined) opt.body = JSON.stringify(body);
-    return fetch(url, opt).then(function (r) { return r.json(); });
+    return fetch(url, opt).then(_readJsonResponse);
   }
 
   function renderUpdateBanner(data) {

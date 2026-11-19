@@ -4359,6 +4359,50 @@ check("维护 R7-ISCC：发版手册写明 ISCC 升级步骤（改 version + 核
       "6.7.1" in _doc7 and "DisplayVersion" in _doc7 and "本地实测" in _doc7)
 
 
+# ============================================================
+# v2.1.3.8（2026-11 web 审计 §四 P3）—— 内联前端结构断言
+# 前端 JS 无法在冒烟里执行，所以这里钉「能挡住回退的结构判据」：
+# 每条都必须是「改错了就必然不成立」的形态（统一入口 / 判据顺序 / 状态字段），
+# 而不是只 grep 一个函数名。
+# ============================================================
+
+
+def _js_func(name, src=None):
+    """从内联 JS 里抠出 function name(...) { ... } 整段源码（按花括号配平）。
+
+    抠不到返回空串（断言自会失败）。用于做「分支 / 顺序」级校验。
+    """
+    lines = (src if src is not None else _page).splitlines()
+    start = None
+    for _idx, _ln in enumerate(lines):
+        if re.search(r"function\s+%s\s*\(" % re.escape(name), _ln):
+            start = _idx
+            break
+    if start is None:
+        return ""
+    out = []
+    depth = 0
+    for _ln in lines[start:]:
+        out.append(_ln)
+        depth += _ln.count("{") - _ln.count("}")
+        if depth == 0:
+            break
+    return "\n".join(out)
+
+
+# —— P3-4：API 客户端统一判 r.ok（非 2xx 抛错，错误文案带 body.error）——
+_js4_helper = _js_func("_readJsonResponse")
+check("维护 P3-4：API 客户端统一判 r.ok，非 2xx 抛错并带服务端 body.error",
+      bool(_js4_helper) and "!r.ok" in _js4_helper and "throw new Error" in _js4_helper
+      and "body.error" in _js4_helper and "r.status" in _js4_helper,
+      _js4_helper.replace("\n", " ")[:160])
+for _fn4 in ("getJson", "postJson", "getUpdateJson", "postUpdateJson"):
+    _js4_fn = _js_func(_fn4)
+    check("维护 P3-4：%s 走统一 r.ok 判据（不再裸 r.json() 当成功）" % _fn4,
+          "_readJsonResponse" in _js4_fn and "return r.json();" not in _js4_fn,
+          (_js4_fn.replace("\n", " ")[:120] or "<函数没找到>"))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
