@@ -48,6 +48,19 @@ def _get_json(path):
         return {"_unparsable": body[:120]}
 
 
+def _get_json2(path):
+    """GET 一个 JSON 接口，同时返回 HTTP 状态码（断言「真收到 200」而不只是 body 长得对）。"""
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30)
+    conn.request("GET", path, headers={"Host": HOST})
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+    try:
+        return resp.status, json.loads(body)
+    except ValueError:
+        return resp.status, {"_unparsable": body[:120]}
+
+
 def _check(name, got, want, note=""):
     """want 为元组/列表时：got 也是元组则整体比较，否则按「属于其中之一」处理。"""
     if isinstance(want, (tuple, list)) and isinstance(got, (tuple, list)):
@@ -391,6 +404,65 @@ try:
            (_st_reset, len(_FakeUpdater.resets) - _resets_before,
             "任务进行中" in (_b_reset or {}).get("error", "")),
            (409, 1, True))
+    # ============================================================
+    # v2.1.3.8（审计 P3-2）：日志读取上限 + 轮转后 offset 复位。
+    # 旧实现两个坑：① 从 offset 一次 read() 到 EOF（20MB 日志整份进内存）；
+    # ② offset 超过文件大小（轮转）时 next_offset 仍指向旧文件末尾 → 新文件开头被跳过。
+    # 这里真起服务、真造 20MB 日志，断言响应有界且轮转后下一轮能补出新内容。
+    # ============================================================
+    _p32_dir = tempfile.mkdtemp(prefix="drcom_p32_")
+    _p32_log = os.path.join(_p32_dir, "campus_login.log")
+    _p32_line = "[2026-11-19 18:00:00] [INFO] 用于验证读取上限的合成日志行 0123456789abcdef\n"
+    _p32_chunk = _p32_line * 500
+    with open(_p32_log, "w", encoding="utf-8") as _p32_f:
+        _p32_size = 0
+        while _p32_size < 20 * 1024 * 1024:
+            _p32_f.write(_p32_chunk)
+            _p32_size += len(_p32_chunk.encode("utf-8"))
+    _p32_had = hasattr(web_api, "LOG_FILE")
+    _p32_old = getattr(web_api, "LOG_FILE", None)
+    web_api.LOG_FILE = _p32_log
+    try:
+        _p32_t0 = _time.time()
+        _st2a, _b2a = _get_json2("/api/log_tail?offset=0&max=500")
+        _p32_elapsed = _time.time() - _p32_t0
+        _b2a = _b2a or {}
+        _p32_next = _b2a.get("next_offset")
+        _check("维护 P3-2：20MB 日志单次响应有界（读到 4MB 上限即停，不整份读进内存）",
+               (_st2a, isinstance(_p32_next, int),
+                0 < (_p32_next or 0) <= web_api.LOG_TAIL_MAX_BYTES,
+                _p32_next < _b2a.get("total_size", 0),
+                len(_b2a.get("lines") or []) <= 500, bool(_b2a.get("lines")),
+                _p32_elapsed < 10.0),
+               (200, True, True, True, True, True, True),
+               repr((_st2a, _p32_next, _b2a.get("total_size"),
+                     len(_b2a.get("lines") or []), round(_p32_elapsed, 3))))
+        with open(_p32_log, "w", encoding="utf-8") as _p32_f:
+            _p32_f.write("轮转后的新文件第一行\n" * 10)
+        _st2b, _b2b = _get_json2("/api/log_tail?offset=%d&max=500" % (_p32_next or 0))
+        _b2b = _b2b or {}
+        _check("维护 P3-2：日志轮转后旧 offset 失效 → next_offset 复位为 0（不跳过新文件开头）",
+               (_st2b, _b2b.get("next_offset"), _b2b.get("lines")), (200, 0, []),
+               repr((_st2b, _b2b.get("next_offset"), _b2b.get("lines"))))
+        _st2c, _b2c = _get_json2("/api/log_tail?offset=0&max=500")
+        _b2c = _b2c or {}
+        _p32_new_size = os.path.getsize(_p32_log)
+        _check("维护 P3-2：复位后下一轮轮询补出新文件开头内容（不用手动刷新）",
+               (_st2c, "轮转后的新文件第一行" in "\n".join(_b2c.get("lines") or []),
+                _b2c.get("next_offset") == _p32_new_size),
+               (200, True, True),
+               repr((_st2c, _b2c.get("next_offset"), _p32_new_size)))
+    finally:
+        if _p32_had:
+            web_api.LOG_FILE = _p32_old
+        else:
+            del web_api.LOG_FILE
+        try:
+            os.remove(_p32_log)
+            os.rmdir(_p32_dir)
+        except OSError:
+            pass
+
     # ============================================================
     # v2.1.3.8（审计 P3-15）：配置导入的坏请求文案必须中文、可读、不回声内部异常。
     # 第一轮（P1-2 / P1-3）已把「加密 / 损坏 zip」与「请求体过大」改成中文；

@@ -672,6 +672,9 @@ def api_post_login():
 # —— 日志等级正则：从行内提取 [LEVEL] 前缀（用于按等级过滤 / 配色） ——
 _LOG_LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
 _VALID_LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
+# 审计 P3-2：单次日志读取的字节上限 —— 一次轮询最多读 4MB。旧实现从 offset
+# 一路 read() 到文件末尾，20MB 日志会被整份读进内存、再 split 成行 ✗。
+LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _parse_log_level(line):
@@ -701,14 +704,26 @@ def api_get_log_tail(offset, max_lines, level=None):
     if not os.path.isfile(LOG_FILE):
         return {"lines": [], "next_offset": 0, "total_size": 0, "level_filter": level_filter}
     total = os.path.getsize(LOG_FILE)
-    if offset >= total:
+    if offset > total:
+        # 审计 P3-2：offset 比文件还大 = 日志轮转了（旧文件被截断 / 换成了新文件）。
+        # 旧实现返回 next_offset = total，新文件开头的内容就会被永久跳过，
+        # 用户得手动点「刷新」才看得到 ✗。视为轮转 → 回 0，下一轮轮询从头补 ✓。
+        return {"lines": [], "next_offset": 0, "total_size": total, "level_filter": level_filter}
+    if offset == total:
         return {"lines": [], "next_offset": total, "total_size": total, "level_filter": level_filter}
+    read_len = min(total - offset, LOG_TAIL_MAX_BYTES)
     try:
         with open(LOG_FILE, "rb") as f:
             f.seek(offset)
-            data = f.read()
+            data = f.read(read_len)
     except OSError as exc:
         return {"lines": [], "next_offset": offset, "total_size": total, "error": str(exc), "level_filter": level_filter}
+    # 被字节上限截断时，截断点大概率落在半行 / 半个 UTF-8 字符上：
+    # 退回到最后一个换行符，让下一轮从整行边界继续，前端不会拼出半截行 ✓
+    if offset + len(data) < total:
+        _nl = data.rfind(b"\n")
+        if _nl >= 0:
+            data = data[: _nl + 1]
     # 拆分行为保留最后 max_lines 行
     try:
         text = data.decode("utf-8", errors="replace")
@@ -719,9 +734,9 @@ def api_get_log_tail(offset, max_lines, level=None):
         lines = [ln for ln in lines if _parse_log_level(ln) == level_filter]
     if len(lines) > max_lines:
         lines = lines[-max_lines:]
-        next_offset = total  # 已截断，next_offset 标记为文件末尾
-    else:
-        next_offset = offset + len(data)
+    # 本次真正消费到的字节位置（未被字节上限截断时恰好等于 total）。
+    # 不能在被截断时直接跳到 total，否则中间内容会被整段跳过 ✗
+    next_offset = offset + len(data)
     return {"lines": lines, "next_offset": next_offset, "total_size": total, "level_filter": level_filter}
 
 
