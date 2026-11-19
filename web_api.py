@@ -3898,7 +3898,11 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     /* —— 登录按钮 —— */
     if (loginWatch) {
       if (s.login_in_progress) loginWatch.sawProgress = true;
-      else if (loginWatch.sawProgress || (s.last_check_at && s.last_check_at !== loginWatch.baseCheckAt)) {
+      /* 审计 P3-6：baseCheckAt 为 null（基线还没取到 / 取基线失败）时**不比** ——
+         否则「null !== 上次检查时间」恒为真，登录刚触发就会误报「已完成」。 */
+      else if (loginWatch.sawProgress ||
+               (loginWatch.baseCheckAt && s.last_check_at &&
+                s.last_check_at !== loginWatch.baseCheckAt)) {
         finishLogin('登录流程已完成，请查看上方状态与日志。', 'success');
       } else if (Date.now() > loginWatch.deadline) {
         finishLogin('等待登录结果超时，请查看日志确认。', 'warn');
@@ -3978,8 +3982,16 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         sawProgress: false,
         baseCheckAt: null
       };
-      API.status().then(function (s) { loginWatch && (loginWatch.baseCheckAt = s.last_check_at); }).catch(function () {});
-      API.login().then(function (r) {
+      /* 审计 P3-6：先取「登录前」的 last_check_at 当基线，再触发登录（then 链）。
+         以前 status 与 login 并行发，status 没回来时 baseCheckAt 还是 null，
+         首个状态轮询就把「null !== last_check_at」当成登录完成。 */
+      API.status().then(function (s) {
+        if (loginWatch) loginWatch.baseCheckAt = (s && s.last_check_at) || null;
+      }).catch(function () {
+        /* 取不到基线就不比，交给 sawProgress / 120 秒超时收尾（绝不当「已完成」） */
+      }).then(function () {
+        return API.login();
+      }).then(function (r) {
         if (r && r.triggered) {
           toast('已触发登录检查', 'success');
         } else if (r && r.reason === 'already_in_progress') {

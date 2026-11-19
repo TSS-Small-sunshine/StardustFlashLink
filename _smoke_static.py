@@ -4420,6 +4420,21 @@ check("维护 P3-5：过期响应在写 logLines / logOffset 之前被丢弃（�
       repr((_js5.count("seq !== logSeq"), _i5_guard, _i5_concat, _i5_off)))
 
 
+# —— P3-6：登录结果判定竞态（先取 status 基线再登录；null 基线不参与比较）——
+_js6_bind = _js_func("bindLogin")
+_i6_status = _js6_bind.find("API.status()")
+_i6_login = _js6_bind.find("API.login()")
+check("维护 P3-6：点「立即登录」先取 status 基线再触发 login（then 链，不再并行抢跑）",
+      bool(_js6_bind) and -1 < _i6_status < _i6_login
+      and "return API.login();" in _js6_bind,
+      repr((_i6_status, _i6_login)))
+_js6_render = _js_func("renderStatus")
+check("维护 P3-6：baseCheckAt 为 null 时不做「上次检查时间变了」判断（否则登录刚触发就误报已完成）",
+      "loginWatch.baseCheckAt &&" in _js6_render
+      and "s.last_check_at !== loginWatch.baseCheckAt" in _js6_render,
+      _js6_render.replace("\n", " ")[:160])
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
