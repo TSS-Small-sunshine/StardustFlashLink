@@ -5,6 +5,63 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.8 (fix) — 2026-11-19 · 代号 `Vega`（织女星）
+
+> 主题：**Web 面板体验与健壮性** —— 清掉 web 审计（`_维护报告/audit/web.md` §四）里的 8 条 P3。
+> 接口路径 / 字段名、配置结构、服务名、安装路径、密码文件格式**都没动** ✓；仍零第三方依赖 ✓；
+> 页面仍全部内联在 `web_api.py`（无 CDN / 无构建步骤 / 无新增静态文件 ✓）。
+
+### 📜 ① 日志面板（用户可感知）
+- **单次读取加上限（P3-2）**：`/api/log_tail` 以前从 offset 一路 `read()` 到文件末尾 ——
+  实测 20 MB 日志会被整份读进内存再 split 成行。现在单次最多读 **4 MB**，截断点**回退到最后一个换行**
+  （下一轮从整行边界继续，前端不会拼出半截行），`next_offset` 按真正消费到的字节推进。
+- **轮转后 offset 复位（P3-2）**：旧文件被轮转 / 截断后，旧 offset 比文件还大 → 旧实现仍把
+  `next_offset` 指向旧文件末尾，**新文件开头的内容会被永久跳过**，用户得手动点「刷新」。现在
+  `offset > total` 视为轮转 → `next_offset = 0`，下一轮 2 秒轮询自动补出新文件开头。
+- **轮询不再重复拼行（P3-5）**：`fetchLog` 每 2 秒发一次，请求没回来时 offset 未推进 → 两个在途请求
+  用同一 offset，响应各自 concat → 同一段日志被追加两遍。现在每次请求先领**递增序号**，
+  只有最新序号的响应允许改 `logLines` / `logOffset` / 渲染（成功与失败两条路径都有判据）。
+
+### 🧭 ② 前端错误处理与竞态
+- **API 客户端统一判状态码（P3-4）**：`getJson` / `postJson` / `getUpdateJson` / `postUpdateJson`
+  以前只 `r.json()` —— 非 2xx 的 JSON（`{"ok": false, "error": ...}`）被当成成功；漏看 `body.ok` 的调用点
+  （如 `fetchLog` 对 400）就把错误静默吞掉。现在统一走 `_readJsonResponse`：非 2xx **抛错并带服务端
+  可读原因**（`body.error` → 中文；没有就带 HTTP 状态）。配套把 7 处关键 `catch` 改成消费
+  `err.message`（保留「任务进行中（下载中 42%）」这类具体原因，不退化成一句「请求失败」）。
+- **登录结果判定竞态（P3-6）**：点「立即登录」时原先 `API.status()` 与 `API.login()` **并行**发，
+  status 没回来时 `baseCheckAt` 仍是 null，首个状态轮询就判 `null !== last_check_at` →
+  登录刚触发就误报「登录流程已完成」。现在改成 then 链：**先取基线再触发**；基线取不到时
+  `null` 不参与比较，交给「见过 in_progress / 120 秒超时」收尾。
+- **连点登录只触发一次（P3-9）**：`login_in_progress` 是 `protocol.run_once` **抢到 RUN_LOCK 之后**
+  才置位的，两个 HTTP 请求同时到达会一起读到 False → 两个都回 `triggered:true`（第二个线程其实空转，
+  前端却要干等 120 秒）。现在在 `STATE_LOCK` 下先占位：并发时第二个请求立刻拿到
+  `{triggered:false, reason:"already_in_progress"}`；`run_once` 返回（含抢不到锁空转）或线程起不来时
+  `finally` 释放占位 —— 后一次点击仍能正常触发。只增字段、不改字段名（I5）。
+
+### 🧰 ③ 健壮性与无障碍
+- **脏配置不再把接口打成 500（P3-8）**：`/api/update/status` 里三处裸 `int()` 换成 `_int_or(value, default)` ——
+  手改过 / 从旧版沿用的 `config.json` 里数值字段是字符串（如 `"abc"`）时，旧实现 ValueError → 500、
+  界面升级块整块空白 ✗。现在脏值回落默认（进度 0 / 间隔 6 / 磁盘余量 200），数字字符串（`"12"`）
+  照常转换（容错不等于丢掉合法值 ✓）。
+- **导入错误文案中文化（P3-15）**：第 1 轮已把「加密 / 损坏 zip」「请求体过大」改成中文；本轮补上
+  此前漏掉的英文分支 —— 空 body ×2、缺 `manifest.json`、`schema_version` 不受支持、缺 `config.json`，
+  以及日志里的 `config import failed`；用户只看到一句能懂的中文，技术细节进日志（不回显异常原文 ✓）。
+- **弹窗焦点管理（P3-12）**：升级历史 / CHANGELOG 两个弹窗以前只切 `hidden` —— 打开后焦点仍留在背景
+  按钮（Tab 继续走到背景控件），关闭后也回不到触发元素，键盘 / 读屏用户基本没法用。现在统一
+  `openModal(el, focusEl)` / `closeModal(el, opener)`：打开时记住 `document.activeElement` 并把焦点
+  送到「关闭」按钮，关闭时归还焦点；ESC / 点遮罩 / 两个关闭按钮全部走同一对 helper。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **571 项**（基线 558，+13：统一 `r.ok` 判据与四个 helper 不裸 `r.json` /
+  `fetchLog` 序号先领号且过期响应不落地 / 登录 then 链与 null 基线不比 / 弹窗 helper 与两个弹窗不再裸切
+  `hidden` / `catch` 消费 `err.message`）；
+- HTTP `_smoke_http.py` **61 项**（基线 51，+10，全部真起服务的行为断言：20 MB 日志单次响应有界 /
+  轮转后 `next_offset` 复位 / 复位后下一轮补出新内容 / 字符串脏配置回落默认 / 数字字符串照常转换 /
+  并发两次 `POST /api/login` 恰好一次 `triggered` 且闸门自动释放 / 空 body 与坏 zip 的中文 400 /
+  413 中文「请求体过大」）；
+- `pr_review.py --self-test`、`render_release_notes.py --self-test` 全绿；隐私守卫照旧
+  （日志 / API 响应零明文凭据，测试夹具全是一眼假的合成值）。
+
 ## v2.1.3.7 (fix) — 2026-11-18 · 代号 `Vega`（织女星）
 
 > 主题：**静默升级后托盘跨会话自愈 + 托盘健壮性三连 + ISCC 钉版** —— 第七轮审计/维护的剩余项

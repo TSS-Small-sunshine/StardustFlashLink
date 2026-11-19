@@ -48,6 +48,19 @@ def _get_json(path):
         return {"_unparsable": body[:120]}
 
 
+def _get_json2(path):
+    """GET 一个 JSON 接口，同时返回 HTTP 状态码（断言「真收到 200」而不只是 body 长得对）。"""
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30)
+    conn.request("GET", path, headers={"Host": HOST})
+    resp = conn.getresponse()
+    body = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+    try:
+        return resp.status, json.loads(body)
+    except ValueError:
+        return resp.status, {"_unparsable": body[:120]}
+
+
 def _check(name, got, want, note=""):
     """want 为元组/列表时：got 也是元组则整体比较，否则按「属于其中之一」处理。"""
     if isinstance(want, (tuple, list)) and isinstance(got, (tuple, list)):
@@ -65,6 +78,21 @@ def _post_json(path, payload):
     conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=15)
     conn.request("POST", path, body=body, headers={
         "Host": HOST, "Content-Type": "application/json",
+        "X-Requested-With": "DrcomUI", "Content-Length": str(len(body))})
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+    try:
+        return resp.status, json.loads(raw)
+    except ValueError:
+        return resp.status, {"_unparsable": raw[:120]}
+
+
+def _post_raw(path, body, ctype="application/zip"):
+    """POST 原始字节（/api/config/import 是二进制上传，不走 JSON 解析）。"""
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30)
+    conn.request("POST", path, body=body, headers={
+        "Host": HOST, "Content-Type": ctype,
         "X-Requested-With": "DrcomUI", "Content-Length": str(len(body))})
     resp = conn.getresponse()
     raw = resp.read().decode("utf-8", errors="replace")
@@ -376,6 +404,188 @@ try:
            (_st_reset, len(_FakeUpdater.resets) - _resets_before,
             "任务进行中" in (_b_reset or {}).get("error", "")),
            (409, 1, True))
+    # ============================================================
+    # v2.1.3.8（审计 P3-2）：日志读取上限 + 轮转后 offset 复位。
+    # 旧实现两个坑：① 从 offset 一次 read() 到 EOF（20MB 日志整份进内存）；
+    # ② offset 超过文件大小（轮转）时 next_offset 仍指向旧文件末尾 → 新文件开头被跳过。
+    # 这里真起服务、真造 20MB 日志，断言响应有界且轮转后下一轮能补出新内容。
+    # ============================================================
+    _p32_dir = tempfile.mkdtemp(prefix="drcom_p32_")
+    _p32_log = os.path.join(_p32_dir, "campus_login.log")
+    _p32_line = "[2026-11-19 18:00:00] [INFO] 用于验证读取上限的合成日志行 0123456789abcdef\n"
+    _p32_chunk = _p32_line * 500
+    with open(_p32_log, "w", encoding="utf-8") as _p32_f:
+        _p32_size = 0
+        while _p32_size < 20 * 1024 * 1024:
+            _p32_f.write(_p32_chunk)
+            _p32_size += len(_p32_chunk.encode("utf-8"))
+    _p32_had = hasattr(web_api, "LOG_FILE")
+    _p32_old = getattr(web_api, "LOG_FILE", None)
+    web_api.LOG_FILE = _p32_log
+    try:
+        _p32_t0 = _time.time()
+        _st2a, _b2a = _get_json2("/api/log_tail?offset=0&max=500")
+        _p32_elapsed = _time.time() - _p32_t0
+        _b2a = _b2a or {}
+        _p32_next = _b2a.get("next_offset")
+        _check("维护 P3-2：20MB 日志单次响应有界（读到 4MB 上限即停，不整份读进内存）",
+               (_st2a, isinstance(_p32_next, int),
+                0 < (_p32_next or 0) <= web_api.LOG_TAIL_MAX_BYTES,
+                _p32_next < _b2a.get("total_size", 0),
+                len(_b2a.get("lines") or []) <= 500, bool(_b2a.get("lines")),
+                _p32_elapsed < 10.0),
+               (200, True, True, True, True, True, True),
+               repr((_st2a, _p32_next, _b2a.get("total_size"),
+                     len(_b2a.get("lines") or []), round(_p32_elapsed, 3))))
+        with open(_p32_log, "w", encoding="utf-8") as _p32_f:
+            _p32_f.write("轮转后的新文件第一行\n" * 10)
+        _st2b, _b2b = _get_json2("/api/log_tail?offset=%d&max=500" % (_p32_next or 0))
+        _b2b = _b2b or {}
+        _check("维护 P3-2：日志轮转后旧 offset 失效 → next_offset 复位为 0（不跳过新文件开头）",
+               (_st2b, _b2b.get("next_offset"), _b2b.get("lines")), (200, 0, []),
+               repr((_st2b, _b2b.get("next_offset"), _b2b.get("lines"))))
+        _st2c, _b2c = _get_json2("/api/log_tail?offset=0&max=500")
+        _b2c = _b2c or {}
+        _p32_new_size = os.path.getsize(_p32_log)
+        _check("维护 P3-2：复位后下一轮轮询补出新文件开头内容（不用手动刷新）",
+               (_st2c, "轮转后的新文件第一行" in "\n".join(_b2c.get("lines") or []),
+                _b2c.get("next_offset") == _p32_new_size),
+               (200, True, True),
+               repr((_st2c, _b2c.get("next_offset"), _p32_new_size)))
+    finally:
+        if _p32_had:
+            web_api.LOG_FILE = _p32_old
+        else:
+            del web_api.LOG_FILE
+        try:
+            os.remove(_p32_log)
+            os.rmdir(_p32_dir)
+        except OSError:
+            pass
+
+    # ============================================================
+    # v2.1.3.8（审计 P3-8）：状态接口不再直接 int() 信配置 / 状态里的值。
+    # 手改过或从旧版沿用的 config.json 里数值字段可能是字符串，旧实现一个 "abc"
+    # 就让 GET /api/update/status 抛 ValueError → 500（界面升级块整块空白）✗。
+    # ============================================================
+    _p38_saved_snap = web_api._snapshot_state
+    _p38_saved_cfg = dict(_pstore)
+    web_api._snapshot_state = lambda: {
+        "update_state": "downloading", "update_progress": "abc",
+        "update_progress_message": "下载中", "update_available": False,
+        "update_latest_version": None, "update_last_error": None,
+    }
+    _pstore.update({"update_check_interval_hours": "abc",
+                    "update_min_free_disk_mb": "not-a-number"})
+    _st38, _b38 = _get_json2("/api/update/status")
+    _b38 = _b38 or {}
+    _check("维护 P3-8：字符串型脏配置 / 脏状态不再 500（进度 / 间隔 / 磁盘余量回落默认）",
+           (_st38, _b38.get("progress_pct"), _b38.get("check_interval_hours"),
+            _b38.get("min_free_disk_mb")), (200, 0, 6, 200), repr((_st38, _b38)))
+    web_api._snapshot_state = lambda: {
+        "update_state": "downloading", "update_progress": "42",
+        "update_progress_message": "下载中", "update_available": False,
+        "update_latest_version": None, "update_last_error": None,
+    }
+    _pstore.update({"update_check_interval_hours": "12", "update_min_free_disk_mb": "512"})
+    _st38b, _b38b = _get_json2("/api/update/status")
+    _b38b = _b38b or {}
+    _check("维护 P3-8：数字字符串照常转换（容错只兜脏值，不把合法值当成脏值丢掉）",
+           (_st38b, _b38b.get("progress_pct"), _b38b.get("check_interval_hours"),
+            _b38b.get("min_free_disk_mb")), (200, 42, 12, 512), repr((_st38b, _b38b)))
+    web_api._snapshot_state = _p38_saved_snap
+    _pstore.clear()
+    _pstore.update(_p38_saved_cfg)
+
+    # ============================================================
+    # v2.1.3.8（审计 P3-9）：并发两次 POST /api/login 只能有一次 triggered:true。
+    # 旧实现两个请求都读到 STATE["login_in_progress"]=False（那是 protocol 抢到
+    # RUN_LOCK 之后才置位的）→ 两个响应都 triggered:true，第二个线程其实空转，
+    # 前端却要干等 120 秒才超时 ✗。
+    # ============================================================
+    _p39_names = ("STATE", "STATE_LOCK", "run_once", "_login_submit_pending")
+    _p39_had = {n: hasattr(web_api, n) for n in _p39_names}
+    _p39_old = {n: getattr(web_api, n, None) for n in _p39_names}
+    _p39_gate = threading.Event()
+    _p39_started = threading.Event()
+    _p39_calls = []
+
+    def _p39_run_once(reason):
+        _p39_calls.append(reason)
+        _p39_started.set()
+        _p39_gate.wait(5)
+
+    web_api.STATE = {"login_in_progress": False}
+    web_api.STATE_LOCK = threading.Lock()
+    web_api._login_submit_pending = False
+    web_api.run_once = _p39_run_once
+    _p39_results = []
+    _p39_bar = threading.Barrier(2)
+
+    def _p39_post():
+        _p39_bar.wait(5)
+        _p39_results.append(_post_json("/api/login", {}))
+
+    _p39_threads = [threading.Thread(target=_p39_post) for _ in range(2)]
+    for _p39_t in _p39_threads:
+        _p39_t.start()
+    for _p39_t in _p39_threads:
+        _p39_t.join(10)
+    _p39_triggered = [b for (_st, b) in _p39_results if (b or {}).get("triggered") is True]
+    _p39_already = [b for (_st, b) in _p39_results
+                    if (b or {}).get("reason") == "already_in_progress"]
+    _check("维护 P3-9：并发两次 POST /api/login → 恰好一次 triggered:true，另一次 already_in_progress",
+           (_p39_results and all(st == 200 for st, _ in _p39_results),
+            len(_p39_results), len(_p39_triggered), len(_p39_already)),
+           (True, 2, 1, 1), repr(_p39_results))
+    _p39_gate.set()
+    _p39_started.wait(5)
+
+    def _p39_run_fast(reason):
+        return
+
+    web_api.run_once = _p39_run_fast
+    _p39_got = None
+    _p39_deadline = _time.time() + 5
+    while _time.time() < _p39_deadline:
+        _st39, _b39 = _post_json("/api/login", {})
+        if (_b39 or {}).get("triggered") is True:
+            _p39_got = (_st39, _b39)
+            break
+        _time.sleep(0.01)
+    _check("维护 P3-9：上一次触发结束后闸门自动释放（下次点击仍 triggered:true，不会永久 already_in_progress）",
+           _p39_got is not None and _p39_got[0] == 200, True, repr(_p39_got))
+    for _n in _p39_names:
+        if _p39_had[_n]:
+            setattr(web_api, _n, _p39_old[_n])
+        elif hasattr(web_api, _n):
+            delattr(web_api, _n)
+
+    # ============================================================
+    # v2.1.3.8（审计 P3-15）：配置导入的坏请求文案必须中文、可读、不回声内部异常。
+    # 第一轮（P1-2 / P1-3）已把「加密 / 损坏 zip」与「请求体过大」改成中文；
+    # 这里钉住此前漏掉的空 body 分支，并给「不是 zip」补一条行为级回归。
+    # ============================================================
+    def _has_cjk(s):
+        return any(ord(ch) > 0x2E80 for ch in (s or ""))
+
+    _st_empty, _b_empty = _post_raw("/api/config/import", b"")
+    _empty_err = (_b_empty or {}).get("error", "")
+    _check("维护 P3-15：空 body 导入 → 400 + 中文「请求体为空」（不再回英文 empty body）",
+           (_st_empty, "请求体为空" in _empty_err, "empty body" not in _empty_err,
+            "internal" not in _empty_err),
+           (400, True, True, True), repr((_st_empty, _empty_err)))
+    _st_bad, _b_bad = _post_raw("/api/config/import", b"this is not a zip")
+    _bad_err = (_b_bad or {}).get("error", "")
+    _check("维护 P3-15：不是 zip → 400 + 中文可读原因（不回显 Python 异常原文）",
+           (_st_bad, _has_cjk(_bad_err), "internal" not in _bad_err, "zip" in _bad_err),
+           (400, True, True, True), repr((_st_bad, _bad_err)))
+    _st_big, _b_big = _post_raw("/api/config/import",
+                                b"\0" * (web_api.CONFIG_IMPORT_MAX_BYTES + 1))
+    _big_err = (_b_big or {}).get("error", "")
+    _check("维护 P3-15：导入请求体过大 → 413 + 中文「请求体过大」（可读，不含内部异常）",
+           (_st_big, "请求体过大" in _big_err, "internal" not in _big_err),
+           (413, True, True), repr((_st_big, _big_err)))
 finally:
     server.shutdown()
 

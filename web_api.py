@@ -659,19 +659,47 @@ def api_post_password(payload):
     return 200, {"ok": True}
 
 
+# 审计 P3-9：连点「立即登录」的 TOCTOU 闸门。STATE["login_in_progress"] 是
+# protocol.run_once **抢到 RUN_LOCK 之后**才置位的；两个 HTTP 请求同时到达时会
+# 一起读到 False → 两个线程都起、两个响应都是 triggered:true。后一个线程其实
+# 在抢锁时空转返回（不会重复登录），但前端不知道，会干等 120 秒超时 ✗。
+# 现在在 STATE_LOCK 下先占位：第二个请求立刻拿到 already_in_progress；
+# run_once 返回（包括抢不到锁空转）时在 finally 里释放。只增字段、不改字段名（I5）。
+_login_submit_pending = False
+
+
 def api_post_login():
-    """异步触发 run_once('manual')。"""
+    """异步触发 run_once('manual')；同一时刻只接受一个手动触发（审计 P3-9）。"""
+    global _login_submit_pending
     with STATE_LOCK:
-        if STATE["login_in_progress"]:
+        if STATE["login_in_progress"] or _login_submit_pending:
             return 200, {"triggered": False, "reason": "already_in_progress"}
-    t = threading.Thread(target=run_once, args=("manual",), daemon=True)
-    t.start()
+        _login_submit_pending = True
+
+    def _runner():
+        global _login_submit_pending
+        try:
+            run_once("manual")
+        finally:
+            # 周期自检抢着跑 / run_once 空转返回时，它自己不会清这个占位
+            with STATE_LOCK:
+                _login_submit_pending = False
+
+    try:
+        threading.Thread(target=_runner, daemon=True).start()
+    except Exception:  # noqa: BLE001 —— 线程起不来必须把闸门放掉，否则永远 already_in_progress
+        with STATE_LOCK:
+            _login_submit_pending = False
+        raise
     return 200, {"triggered": True}
 
 
 # —— 日志等级正则：从行内提取 [LEVEL] 前缀（用于按等级过滤 / 配色） ——
 _LOG_LEVEL_RE = re.compile(r"\[(DEBUG|INFO|WARNING|ERROR|CRITICAL)\]")
 _VALID_LOG_LEVELS = ("debug", "info", "warning", "error", "critical")
+# 审计 P3-2：单次日志读取的字节上限 —— 一次轮询最多读 4MB。旧实现从 offset
+# 一路 read() 到文件末尾，20MB 日志会被整份读进内存、再 split 成行 ✗。
+LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _parse_log_level(line):
@@ -701,14 +729,26 @@ def api_get_log_tail(offset, max_lines, level=None):
     if not os.path.isfile(LOG_FILE):
         return {"lines": [], "next_offset": 0, "total_size": 0, "level_filter": level_filter}
     total = os.path.getsize(LOG_FILE)
-    if offset >= total:
+    if offset > total:
+        # 审计 P3-2：offset 比文件还大 = 日志轮转了（旧文件被截断 / 换成了新文件）。
+        # 旧实现返回 next_offset = total，新文件开头的内容就会被永久跳过，
+        # 用户得手动点「刷新」才看得到 ✗。视为轮转 → 回 0，下一轮轮询从头补 ✓。
+        return {"lines": [], "next_offset": 0, "total_size": total, "level_filter": level_filter}
+    if offset == total:
         return {"lines": [], "next_offset": total, "total_size": total, "level_filter": level_filter}
+    read_len = min(total - offset, LOG_TAIL_MAX_BYTES)
     try:
         with open(LOG_FILE, "rb") as f:
             f.seek(offset)
-            data = f.read()
+            data = f.read(read_len)
     except OSError as exc:
         return {"lines": [], "next_offset": offset, "total_size": total, "error": str(exc), "level_filter": level_filter}
+    # 被字节上限截断时，截断点大概率落在半行 / 半个 UTF-8 字符上：
+    # 退回到最后一个换行符，让下一轮从整行边界继续，前端不会拼出半截行 ✓
+    if offset + len(data) < total:
+        _nl = data.rfind(b"\n")
+        if _nl >= 0:
+            data = data[: _nl + 1]
     # 拆分行为保留最后 max_lines 行
     try:
         text = data.decode("utf-8", errors="replace")
@@ -719,9 +759,9 @@ def api_get_log_tail(offset, max_lines, level=None):
         lines = [ln for ln in lines if _parse_log_level(ln) == level_filter]
     if len(lines) > max_lines:
         lines = lines[-max_lines:]
-        next_offset = total  # 已截断，next_offset 标记为文件末尾
-    else:
-        next_offset = offset + len(data)
+    # 本次真正消费到的字节位置（未被字节上限截断时恰好等于 total）。
+    # 不能在被截断时直接跳到 total，否则中间内容会被整段跳过 ✗
+    next_offset = offset + len(data)
     return {"lines": lines, "next_offset": next_offset, "total_size": total, "level_filter": level_filter}
 
 
@@ -962,6 +1002,19 @@ def api_post_rollback(payload):
 # ============================================================
 # 自动升级 API（v1.3 新增）
 # ============================================================
+def _int_or(value, default=0):
+    """安全转 int：脏值（None / 非数字字符串 / 列表…）一律回落 default，绝不抛。
+
+    审计 P3-8：手改过 / 从旧版沿用的 config.json 里，数值字段可能是字符串；
+    api_get_update_status 旧实现直接 int()，一个 "abc" 就能把 GET 打成 500 ✗。
+    只数字字符串（"12"）照常转换，容错不等于丢掉合法值。
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def api_get_update_status():
     """GET /api/update/status — 当前升级状态快照。"""
     _auto_update_mod._schedule_success_clear()  # 顺手清理过期绿 banner（v2.0.2.3.2 fix: 解耦后跨模块调用走 _auto_update_mod 注入）
@@ -974,13 +1027,13 @@ def api_get_update_status():
         "latest_url": snap.get("update_latest_url"),
         "update_available": bool(snap.get("update_available")),
         "state": snap.get("update_state"),
-        "progress_pct": int(snap.get("update_progress") or 0),
+        "progress_pct": _int_or(snap.get("update_progress"), 0),
         "progress_message": snap.get("update_progress_message") or "",
         "last_check_at": snap.get("update_last_check_at"),
         "last_error": snap.get("update_last_error"),
         "target_version": snap.get("update_target_version"),
-        "check_interval_hours": int(cfg.get("update_check_interval_hours", 6)),
-        "min_free_disk_mb": int(cfg.get("update_min_free_disk_mb", 200)),
+        "check_interval_hours": _int_or(cfg.get("update_check_interval_hours"), 6),
+        "min_free_disk_mb": _int_or(cfg.get("update_min_free_disk_mb"), 200),
     }
 
 
@@ -1362,7 +1415,7 @@ def api_post_config_import(handler):
     except ValueError:
         length = 0
     if length <= 0:
-        _send_json(handler, 400, {"ok": False, "error": "empty body"})
+        _send_json(handler, 400, {"ok": False, "error": "请求体为空（没有收到 zip 数据）"})
         return
     if length > CONFIG_IMPORT_MAX_BYTES:
         # 审计 P1-3：直接回 413 会让 Windows 在客户端仍在发 body 时关连接 → RST 把 413 冲掉，
@@ -1374,7 +1427,7 @@ def api_post_config_import(handler):
         return
     raw = handler.rfile.read(length)
     if not raw:
-        _send_json(handler, 400, {"ok": False, "error": "empty body"})
+        _send_json(handler, 400, {"ok": False, "error": "请求体为空（没有收到 zip 数据）"})
         return
     applied = []
     try:
@@ -1393,7 +1446,7 @@ def api_post_config_import(handler):
                     CONFIG_IMPORT_MAX_UNCOMPRESSED_BYTES, _total)})
                 return
             if "manifest.json" not in names:
-                _send_json(handler, 400, {"ok": False, "error": "missing manifest.json"})
+                _send_json(handler, 400, {"ok": False, "error": "不是有效的配置备份包（缺少 manifest.json）"})
                 return
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
             # v2.0.14.0（P1-6）：`schema_version` 可能是任何 JSON 类型 —— 旧实现直接 int()，
@@ -1405,10 +1458,10 @@ def api_post_config_import(handler):
                     manifest.get("schema_version"))})
                 return
             if _schema != CONFIG_EXPORT_SCHEMA_VERSION:
-                _send_json(handler, 400, {"ok": False, "error": "unsupported schema_version: {}".format(manifest.get("schema_version"))})
+                _send_json(handler, 400, {"ok": False, "error": "配置备份包的格式版本不受支持（schema_version={}）".format(manifest.get("schema_version"))})
                 return
             if "config.json" not in names:
-                _send_json(handler, 400, {"ok": False, "error": "missing config.json"})
+                _send_json(handler, 400, {"ok": False, "error": "不是有效的配置备份包（缺少 config.json）"})
                 return
             cfg_text = zf.read("config.json").decode("utf-8")
             cfg_data = json.loads(cfg_text)
@@ -1453,7 +1506,7 @@ def api_post_config_import(handler):
         # 另补 RuntimeError（加密 zip）/ NotImplementedError（未知压缩方法）/ EOFError /
         # zlib.error —— 这些以前逃逸成 500，还把英文异常原文回显给界面 ✗。
         # 用户只该看到一句能懂的话；技术细节进日志。
-        _log("config import failed: %s", exc, level=logging.ERROR)
+        _log("配置导入失败: %s", exc, level=logging.ERROR)
         _send_json(handler, 400, {"ok": False,
                                   "error": "导入的 zip 无法解析（可能已加密、损坏，或压缩方式不受支持）"})
         return
@@ -3658,14 +3711,28 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   /* ============================================================
      分区 2/6 · API 客户端（路径 / 方法 / 字段严格对应后端）
      ============================================================ */
+  /* 审计 P3-4：统一判断 HTTP 状态码。旧实现四个 helper 都只 r.json() ——
+     非 2xx 的 JSON（{"ok": false, "error": "..."}）被当成成功解析，调用点再各自
+     看 body.ok；漏看的调用点（例如 fetchLog 对 /api/log_tail 的 400）就把错误
+     静默吞掉，界面既不报错也不刷新。现在非 2xx 一律 throw：
+     Error 文案优先用 body.error（服务端已中文化），没有就用 HTTP 状态。 */
+  function _readJsonResponse(r) {
+    return r.json().catch(function () { return null; }).then(function (body) {
+      if (!r.ok) {
+        throw new Error((body && body.error) || ('请求失败（HTTP ' + r.status + '）'));
+      }
+      return body;
+    });
+  }
+
   function getJson(url) {
-    return fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); });
+    return fetch(url, { cache: 'no-store' }).then(_readJsonResponse);
   }
 
   function postJson(url, body) {
     var opt = { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' } };
     if (body !== undefined) opt.body = JSON.stringify(body);
-    return fetch(url, opt).then(function (r) { return r.json(); });
+    return fetch(url, opt).then(_readJsonResponse);
   }
 
   /* v2.1.1.0：最近一次 /api/wifi 的结果（给「用当前 Wi-Fi」这类按钮复用） */
@@ -3831,7 +3898,11 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     /* —— 登录按钮 —— */
     if (loginWatch) {
       if (s.login_in_progress) loginWatch.sawProgress = true;
-      else if (loginWatch.sawProgress || (s.last_check_at && s.last_check_at !== loginWatch.baseCheckAt)) {
+      /* 审计 P3-6：baseCheckAt 为 null（基线还没取到 / 取基线失败）时**不比** ——
+         否则「null !== 上次检查时间」恒为真，登录刚触发就会误报「已完成」。 */
+      else if (loginWatch.sawProgress ||
+               (loginWatch.baseCheckAt && s.last_check_at &&
+                s.last_check_at !== loginWatch.baseCheckAt)) {
         finishLogin('登录流程已完成，请查看上方状态与日志。', 'success');
       } else if (Date.now() > loginWatch.deadline) {
         finishLogin('等待登录结果超时，请查看日志确认。', 'warn');
@@ -3911,8 +3982,16 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         sawProgress: false,
         baseCheckAt: null
       };
-      API.status().then(function (s) { loginWatch && (loginWatch.baseCheckAt = s.last_check_at); }).catch(function () {});
-      API.login().then(function (r) {
+      /* 审计 P3-6：先取「登录前」的 last_check_at 当基线，再触发登录（then 链）。
+         以前 status 与 login 并行发，status 没回来时 baseCheckAt 还是 null，
+         首个状态轮询就把「null !== last_check_at」当成登录完成。 */
+      API.status().then(function (s) {
+        if (loginWatch) loginWatch.baseCheckAt = (s && s.last_check_at) || null;
+      }).catch(function () {
+        /* 取不到基线就不比，交给 sawProgress / 120 秒超时收尾（绝不当「已完成」） */
+      }).then(function () {
+        return API.login();
+      }).then(function (r) {
         if (r && r.triggered) {
           toast('已触发登录检查', 'success');
         } else if (r && r.reason === 'already_in_progress') {
@@ -4106,8 +4185,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       } else {
         toast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
       }
-    }).catch(function () {
-      toast('保存请求失败，请检查服务状态', 'error');
+    }).catch(function (err) {
+      toast('保存失败：' + ((err && err.message) || '请求失败，请检查服务状态'), 'error');
     }).then(function () { if (btn) btn.disabled = false; });
   }
 
@@ -4151,8 +4230,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           } else {
             setFieldError('pwd-new', 'err-pwd', (r && r.error) || '保存失败');
           }
-        }).catch(function () {
-          setFieldError('pwd-new', 'err-pwd', '请求失败，请检查服务状态');
+        }).catch(function (err) {
+          setFieldError('pwd-new', 'err-pwd', (err && err.message) || '请求失败，请检查服务状态');
         }).then(function () { pwdBtn.disabled = false; });
       });
     }
@@ -4166,6 +4245,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   var logTimer = null;
   var logUpdatedAt = null;
   var logLevel = '';  /* 当前等级筛选：'' 表示全部 */
+  var logSeq = 0;     /* 审计 P3-5：请求序号 —— 只有最新一次请求的响应允许落地 */
 
   function renderLog() {
     var box = $('log-box');
@@ -4183,11 +4263,19 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     text($('log-count'), (keyword ? view.length + ' / ' + logLines.length : view.length) + ' 行');
   }
 
-  /* 增量拉取：只追加新内容，保留已有滚动位置 */
+  /* 增量拉取：只追加新内容，保留已有滚动位置。
+     审计 P3-5：请求没回来时 logOffset 还没推进，2 秒后又发一次 —— 两个在途请求
+     用的是同一个 offset，响应各自 concat → 同一段日志被重复追加。reloadLog(force)
+     与在途请求交叉时还会错位 / 丢行。现在每次请求先领一个递增序号（logSeq），
+     只有「最新序号」的响应才允许改 logLines / logOffset / 渲染；过期响应直接丢弃。
+     这样即使服务器慢到两次请求都在飞，落地也只有最后一棒。 */
   function fetchLog(force) {
     if (document.hidden && !force) return Promise.resolve();
+    var seq = ++logSeq;
     if (force) { logOffset = 0; logLines = []; }
-    return API.logTail(logOffset, 500, logLevel).then(function (r) {
+    var reqOffset = logOffset;
+    return API.logTail(reqOffset, 500, logLevel).then(function (r) {
+      if (seq !== logSeq) return;   /* 过期响应：已有更新的一次请求在路上 / 已落地 */
       if (!r || typeof r !== 'object') return;
       var incoming = r.lines || [];
       if (incoming.length) {
@@ -4201,6 +4289,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       text($('log-size'), fmtBytes(r.total_size || 0));
       text($('log-updated'), '更新于 ' + logUpdatedAt);
     }).catch(function () {
+      if (seq !== logSeq) return;   /* 过期请求的失败也别覆盖最新状态 */
       text($('log-updated'), '拉取失败');
     });
   }
@@ -4374,7 +4463,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       if (!window.confirm('确认重启服务？NSSM 将自动重新拉起进程。')) return;
       API.restart().then(function (r) {
         toast((r && r.message) || '服务正在重启，3 秒后请刷新页面', 'success');
-      }).catch(function () { toast('重启请求失败', 'error'); });
+      }).catch(function (err) { toast((err && err.message) || '重启请求失败', 'error'); });
     });
     var btnUninstall = $('btn-uninstall');
     if (btnUninstall) btnUninstall.addEventListener('click', function () {
@@ -4488,12 +4577,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   var POLL_UPDATE_MS = 5000;
 
   function getUpdateJson(url) {
-    return fetch(url, { cache: 'no-store' }).then(function (r) { return r.json(); });
+    return fetch(url, { cache: 'no-store' }).then(_readJsonResponse);
   }
   function postUpdateJson(url, body) {
     var opt = { method: 'POST', cache: 'no-store', headers: { 'Content-Type': 'application/json' } };
     if (body !== undefined) opt.body = JSON.stringify(body);
-    return fetch(url, opt).then(function (r) { return r.json(); });
+    return fetch(url, opt).then(_readJsonResponse);
   }
 
   function renderUpdateBanner(data) {
@@ -4604,7 +4693,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var modalCloseBtn = $('update-history-close-btn');
     var backdrop = $('update-history-backdrop');
     function _closeModal() {
-      var m = $('update-history-modal'); if (m) m.hidden = true;
+      closeModal($('update-history-modal'));
     }
     if (modalClose) modalClose.addEventListener('click', _closeModal);
     if (modalCloseBtn) modalCloseBtn.addEventListener('click', _closeModal);
@@ -4618,9 +4707,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     document.addEventListener('keydown', function (ev) {
       if (ev.key === 'Escape') {
         var m = $('update-history-modal');
-        if (m && !m.hidden) m.hidden = true;
+        if (m && !m.hidden) closeModal(m);
         var cm = $('changelog-modal');
-        if (cm && !cm.hidden) cm.hidden = true;
+        if (cm && !cm.hidden) closeModal(cm);
       }
     });
     // 更新日志弹窗关闭按钮（v2.0.0 新增）
@@ -4652,9 +4741,35 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     });
   }
 
+  /* ============================================================
+     弹窗焦点管理（审计 P3-12）
+     两个弹窗以前只切 hidden：打开后焦点还留在背景按钮上（Tab 会继续走到背景控件），
+     关闭后焦点也回不到触发它的按钮 —— 键盘 / 读屏用户基本没法用。
+     统一走这一对 helper：打开时记住触发元素并把焦点送到「关闭」按钮，
+     关闭时把焦点还给触发元素（opener 可显式传入，默认用打开时记住的那个）。
+     ============================================================ */
+  function openModal(el, focusEl) {
+    if (!el) return;
+    el._modalOpener = document.activeElement || null;
+    el.hidden = false;
+    if (focusEl && typeof focusEl.focus === 'function') {
+      try { focusEl.focus(); } catch (e) { /* 元素不可聚焦时忽略 */ }
+    }
+  }
+
+  function closeModal(el, opener) {
+    if (!el) return;
+    el.hidden = true;
+    var back = opener || el._modalOpener;
+    el._modalOpener = null;
+    if (back && typeof back.focus === 'function') {
+      try { back.focus(); } catch (e) { /* 触发元素已不在文档里时忽略 */ }
+    }
+  }
+
   function openUpdateHistoryModal() {
     var m = $('update-history-modal'); if (!m) return;
-    m.hidden = false;
+    openModal(m, $('update-history-close'));
     loadUpdateHistoryLines();
   }
 
@@ -4664,7 +4779,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var body = $('changelog-body');
     if (!modal || !body) return;
     body.textContent = '加载中...';
-    modal.hidden = false;
+    openModal(modal, $('changelog-close'));
     fetch('/api/changelog').then(function (r) { return r.json(); }).then(function (data) {
       if (data && data.content) {
         body.textContent = data.content;
@@ -4688,8 +4803,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   }
 
   function closeChangelogModal() {
-    var modal = $('changelog-modal');
-    if (modal) modal.hidden = true;
+    closeModal($('changelog-modal'));
   }
 
   // 在升级成功横幅 action 按钮旁动态插入一个「查看更新日志」快捷链接
@@ -4786,7 +4900,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           }
           if (typeof pollUpdate === 'function') pollUpdate();
         })
-        .catch(function () { toast('请求失败，请检查服务状态', 'error'); });
+        .catch(function (err) { toast('检查失败：' + ((err && err.message) || '请求失败，请检查服务状态'), 'error', 6000); });
     });
     if (installBtn) installBtn.addEventListener('click', function () {
       if (!confirm('确认立即升级？\n\n升级期间（约 30-60 秒）：\n- 服务会短暂停止\n- Web UI 不可用\n- 进度通过升级状态横幅实时显示\n\n继续？')) return;
@@ -4800,7 +4914,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           }
           if (typeof pollUpdate === 'function') pollUpdate();
         })
-        .catch(function () { toast('请求失败', 'error'); });
+        .catch(function (err) { toast('升级启动失败：' + ((err && err.message) || '请求失败'), 'error', 6000); });
     });
   })();
 
@@ -4866,7 +4980,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           }
           if (typeof pollUpdate === 'function') pollUpdate();
         })
-        .catch(function () { toast('请求失败（服务可能正在重启）', 'error', 6000); });
+        .catch(function (err) { toast('回滚失败：' + ((err && err.message) || '请求失败（服务可能正在重启）'), 'error', 6000); });
     });
 
     load();
@@ -5068,8 +5182,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         } else {
           setFieldError('profile-pwd', 'err-profile-pwd', (r && r.error) || '保存失败');
         }
-      }).catch(function () {
-        setFieldError('profile-pwd', 'err-profile-pwd', '请求失败，请检查服务状态');
+      }).catch(function (err) {
+        setFieldError('profile-pwd', 'err-profile-pwd', (err && err.message) || '请求失败，请检查服务状态');
       }).then(function () { credBtn.disabled = false; });
     });
     loadProfiles();

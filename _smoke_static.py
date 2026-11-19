@@ -4359,6 +4359,113 @@ check("维护 R7-ISCC：发版手册写明 ISCC 升级步骤（改 version + 核
       "6.7.1" in _doc7 and "DisplayVersion" in _doc7 and "本地实测" in _doc7)
 
 
+# ============================================================
+# v2.1.3.8（2026-11 web 审计 §四 P3）—— 内联前端结构断言
+# 前端 JS 无法在冒烟里执行，所以这里钉「能挡住回退的结构判据」：
+# 每条都必须是「改错了就必然不成立」的形态（统一入口 / 判据顺序 / 状态字段），
+# 而不是只 grep 一个函数名。
+# ============================================================
+
+
+def _js_func(name, src=None):
+    """从内联 JS 里抠出 function name(...) { ... } 整段源码（按花括号配平）。
+
+    抠不到返回空串（断言自会失败）。用于做「分支 / 顺序」级校验。
+    """
+    lines = (src if src is not None else _page).splitlines()
+    start = None
+    for _idx, _ln in enumerate(lines):
+        if re.search(r"function\s+%s\s*\(" % re.escape(name), _ln):
+            start = _idx
+            break
+    if start is None:
+        return ""
+    out = []
+    depth = 0
+    for _ln in lines[start:]:
+        out.append(_ln)
+        depth += _ln.count("{") - _ln.count("}")
+        if depth == 0:
+            break
+    return "\n".join(out)
+
+
+# —— P3-4：API 客户端统一判 r.ok（非 2xx 抛错，错误文案带 body.error）——
+_js4_helper = _js_func("_readJsonResponse")
+check("维护 P3-4：API 客户端统一判 r.ok，非 2xx 抛错并带服务端 body.error",
+      bool(_js4_helper) and "!r.ok" in _js4_helper and "throw new Error" in _js4_helper
+      and "body.error" in _js4_helper and "r.status" in _js4_helper,
+      _js4_helper.replace("\n", " ")[:160])
+for _fn4 in ("getJson", "postJson", "getUpdateJson", "postUpdateJson"):
+    _js4_fn = _js_func(_fn4)
+    check("维护 P3-4：%s 走统一 r.ok 判据（不再裸 r.json() 当成功）" % _fn4,
+          "_readJsonResponse" in _js4_fn and "return r.json();" not in _js4_fn,
+          (_js4_fn.replace("\n", " ")[:120] or "<函数没找到>"))
+
+
+# —— P3-5：fetchLog 竞态（请领序号，只有最新响应落地，过期响应不得拼行 / 改 offset）——
+_js5 = _js_func("fetchLog")
+_i5_seq = _js5.find("++logSeq")
+_i5_req = _js5.find("API.logTail(")
+_i5_concat = _js5.find("logLines.concat")
+_i5_off = _js5.find("logOffset = r.next_offset")
+_i5_guard = _js5.find("seq !== logSeq")
+check("维护 P3-5：fetchLog 先领请求序号再发请求（同一 offset 的并发响应不会各拼一次）",
+      "var logSeq = 0;" in _page and bool(_js5)
+      and -1 < _i5_seq < _i5_req and _i5_concat > _i5_req,
+      repr((_i5_seq, _i5_req, _i5_concat)))
+check("维护 P3-5：过期响应在写 logLines / logOffset 之前被丢弃（成功与失败路径都有序号判据）",
+      _js5.count("seq !== logSeq") >= 2
+      and -1 < _i5_guard < _i5_concat and _i5_guard < _i5_off,
+      repr((_js5.count("seq !== logSeq"), _i5_guard, _i5_concat, _i5_off)))
+
+
+# —— P3-6：登录结果判定竞态（先取 status 基线再登录；null 基线不参与比较）——
+_js6_bind = _js_func("bindLogin")
+_i6_status = _js6_bind.find("API.status()")
+_i6_login = _js6_bind.find("API.login()")
+check("维护 P3-6：点「立即登录」先取 status 基线再触发 login（then 链，不再并行抢跑）",
+      bool(_js6_bind) and -1 < _i6_status < _i6_login
+      and "return API.login();" in _js6_bind,
+      repr((_i6_status, _i6_login)))
+_js6_render = _js_func("renderStatus")
+check("维护 P3-6：baseCheckAt 为 null 时不做「上次检查时间变了」判断（否则登录刚触发就误报已完成）",
+      "loginWatch.baseCheckAt &&" in _js6_render
+      and "s.last_check_at !== loginWatch.baseCheckAt" in _js6_render,
+      _js6_render.replace("\n", " ")[:160])
+
+
+# —— P3-12：弹窗焦点管理（打开记住触发元素 + focus 关闭按钮，关闭归还焦点）——
+_js12_open = _js_func("openModal")
+_js12_close = _js_func("closeModal")
+_js12_hist = _js_func("openUpdateHistoryModal")
+_js12_cl = _js_func("openChangelogModal")
+_js12_clc = _js_func("closeChangelogModal")
+_js12_bind = _js_func("bindUpdate")
+check("维护 P3-12：打开弹窗时记录触发元素并把焦点送到关闭按钮",
+      bool(_js12_open) and "document.activeElement" in _js12_open
+      and "_modalOpener" in _js12_open and "focusEl.focus()" in _js12_open
+      and "hidden = false" in _js12_open,
+      _js12_open.replace("\n", " ")[:160])
+check("维护 P3-12：关闭弹窗时把焦点归还给触发元素（统一 closeModal(el, opener)）",
+      bool(_js12_close) and "_modalOpener" in _js12_close
+      and "back.focus()" in _js12_close and "hidden = true" in _js12_close,
+      _js12_close.replace("\n", " ")[:160])
+check("维护 P3-12：两个弹窗的打开 / 关闭都走统一 helper（不再各自裸切 hidden）",
+      "openModal(" in _js12_hist and "update-history-close" in _js12_hist
+      and "openModal(" in _js12_cl and "changelog-close" in _js12_cl
+      and _js12_clc.count("closeModal(") == 1
+      and _js12_bind.count("closeModal(") >= 3
+      and "m.hidden = true" not in _js12_bind,
+      repr((_js12_bind.count("closeModal("), "m.hidden = true" in _js12_bind)))
+
+
+check("维护 P3-4：错误提示在 catch 里消费抛出的 err.message（保留服务端可读原因，不退化成一句「请求失败」）",
+      _page.count("err && err.message") >= 6
+      and "err.message" in _js_func("saveConfigFrom"),
+      "err.message 出现 %d 次" % _page.count("err && err.message"))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -4447,7 +4554,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.7", version.VERSION == "2.1.3.7", version.VERSION)
+check("版本 = 2.1.3.8", version.VERSION == "2.1.3.8", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
