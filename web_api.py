@@ -1362,7 +1362,7 @@ def api_post_config_import(handler):
     except ValueError:
         length = 0
     if length <= 0:
-        _send_json(handler, 400, {"ok": False, "error": "empty body"})
+        _send_json(handler, 400, {"ok": False, "error": "请求体为空（没有收到 zip 数据）"})
         return
     if length > CONFIG_IMPORT_MAX_BYTES:
         # 审计 P1-3：直接回 413 会让 Windows 在客户端仍在发 body 时关连接 → RST 把 413 冲掉，
@@ -1374,7 +1374,7 @@ def api_post_config_import(handler):
         return
     raw = handler.rfile.read(length)
     if not raw:
-        _send_json(handler, 400, {"ok": False, "error": "empty body"})
+        _send_json(handler, 400, {"ok": False, "error": "请求体为空（没有收到 zip 数据）"})
         return
     applied = []
     try:
@@ -1393,7 +1393,7 @@ def api_post_config_import(handler):
                     CONFIG_IMPORT_MAX_UNCOMPRESSED_BYTES, _total)})
                 return
             if "manifest.json" not in names:
-                _send_json(handler, 400, {"ok": False, "error": "missing manifest.json"})
+                _send_json(handler, 400, {"ok": False, "error": "不是有效的配置备份包（缺少 manifest.json）"})
                 return
             manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
             # v2.0.14.0（P1-6）：`schema_version` 可能是任何 JSON 类型 —— 旧实现直接 int()，
@@ -1405,10 +1405,10 @@ def api_post_config_import(handler):
                     manifest.get("schema_version"))})
                 return
             if _schema != CONFIG_EXPORT_SCHEMA_VERSION:
-                _send_json(handler, 400, {"ok": False, "error": "unsupported schema_version: {}".format(manifest.get("schema_version"))})
+                _send_json(handler, 400, {"ok": False, "error": "配置备份包的格式版本不受支持（schema_version={}）".format(manifest.get("schema_version"))})
                 return
             if "config.json" not in names:
-                _send_json(handler, 400, {"ok": False, "error": "missing config.json"})
+                _send_json(handler, 400, {"ok": False, "error": "不是有效的配置备份包（缺少 config.json）"})
                 return
             cfg_text = zf.read("config.json").decode("utf-8")
             cfg_data = json.loads(cfg_text)
@@ -1453,7 +1453,7 @@ def api_post_config_import(handler):
         # 另补 RuntimeError（加密 zip）/ NotImplementedError（未知压缩方法）/ EOFError /
         # zlib.error —— 这些以前逃逸成 500，还把英文异常原文回显给界面 ✗。
         # 用户只该看到一句能懂的话；技术细节进日志。
-        _log("config import failed: %s", exc, level=logging.ERROR)
+        _log("配置导入失败: %s", exc, level=logging.ERROR)
         _send_json(handler, 400, {"ok": False,
                                   "error": "导入的 zip 无法解析（可能已加密、损坏，或压缩方式不受支持）"})
         return

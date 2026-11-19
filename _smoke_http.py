@@ -75,6 +75,21 @@ def _post_json(path, payload):
         return resp.status, {"_unparsable": raw[:120]}
 
 
+def _post_raw(path, body, ctype="application/zip"):
+    """POST 原始字节（/api/config/import 是二进制上传，不走 JSON 解析）。"""
+    conn = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30)
+    conn.request("POST", path, body=body, headers={
+        "Host": HOST, "Content-Type": ctype,
+        "X-Requested-With": "DrcomUI", "Content-Length": str(len(body))})
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+    try:
+        return resp.status, json.loads(raw)
+    except ValueError:
+        return resp.status, {"_unparsable": raw[:120]}
+
+
 server = ThreadingHTTPServer(("127.0.0.1", PORT), web_api._Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 
@@ -376,6 +391,31 @@ try:
            (_st_reset, len(_FakeUpdater.resets) - _resets_before,
             "任务进行中" in (_b_reset or {}).get("error", "")),
            (409, 1, True))
+    # ============================================================
+    # v2.1.3.8（审计 P3-15）：配置导入的坏请求文案必须中文、可读、不回声内部异常。
+    # 第一轮（P1-2 / P1-3）已把「加密 / 损坏 zip」与「请求体过大」改成中文；
+    # 这里钉住此前漏掉的空 body 分支，并给「不是 zip」补一条行为级回归。
+    # ============================================================
+    def _has_cjk(s):
+        return any(ord(ch) > 0x2E80 for ch in (s or ""))
+
+    _st_empty, _b_empty = _post_raw("/api/config/import", b"")
+    _empty_err = (_b_empty or {}).get("error", "")
+    _check("维护 P3-15：空 body 导入 → 400 + 中文「请求体为空」（不再回英文 empty body）",
+           (_st_empty, "请求体为空" in _empty_err, "empty body" not in _empty_err,
+            "internal" not in _empty_err),
+           (400, True, True, True), repr((_st_empty, _empty_err)))
+    _st_bad, _b_bad = _post_raw("/api/config/import", b"this is not a zip")
+    _bad_err = (_b_bad or {}).get("error", "")
+    _check("维护 P3-15：不是 zip → 400 + 中文可读原因（不回显 Python 异常原文）",
+           (_st_bad, _has_cjk(_bad_err), "internal" not in _bad_err, "zip" in _bad_err),
+           (400, True, True, True), repr((_st_bad, _bad_err)))
+    _st_big, _b_big = _post_raw("/api/config/import",
+                                b"\0" * (web_api.CONFIG_IMPORT_MAX_BYTES + 1))
+    _big_err = (_b_big or {}).get("error", "")
+    _check("维护 P3-15：导入请求体过大 → 413 + 中文「请求体过大」（可读，不含内部异常）",
+           (_st_big, "请求体过大" in _big_err, "internal" not in _big_err),
+           (413, True, True), repr((_st_big, _big_err)))
 finally:
     server.shutdown()
 
