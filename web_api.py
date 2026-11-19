@@ -4693,7 +4693,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var modalCloseBtn = $('update-history-close-btn');
     var backdrop = $('update-history-backdrop');
     function _closeModal() {
-      var m = $('update-history-modal'); if (m) m.hidden = true;
+      closeModal($('update-history-modal'));
     }
     if (modalClose) modalClose.addEventListener('click', _closeModal);
     if (modalCloseBtn) modalCloseBtn.addEventListener('click', _closeModal);
@@ -4707,9 +4707,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     document.addEventListener('keydown', function (ev) {
       if (ev.key === 'Escape') {
         var m = $('update-history-modal');
-        if (m && !m.hidden) m.hidden = true;
+        if (m && !m.hidden) closeModal(m);
         var cm = $('changelog-modal');
-        if (cm && !cm.hidden) cm.hidden = true;
+        if (cm && !cm.hidden) closeModal(cm);
       }
     });
     // 更新日志弹窗关闭按钮（v2.0.0 新增）
@@ -4741,9 +4741,35 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     });
   }
 
+  /* ============================================================
+     弹窗焦点管理（审计 P3-12）
+     两个弹窗以前只切 hidden：打开后焦点还留在背景按钮上（Tab 会继续走到背景控件），
+     关闭后焦点也回不到触发它的按钮 —— 键盘 / 读屏用户基本没法用。
+     统一走这一对 helper：打开时记住触发元素并把焦点送到「关闭」按钮，
+     关闭时把焦点还给触发元素（opener 可显式传入，默认用打开时记住的那个）。
+     ============================================================ */
+  function openModal(el, focusEl) {
+    if (!el) return;
+    el._modalOpener = document.activeElement || null;
+    el.hidden = false;
+    if (focusEl && typeof focusEl.focus === 'function') {
+      try { focusEl.focus(); } catch (e) { /* 元素不可聚焦时忽略 */ }
+    }
+  }
+
+  function closeModal(el, opener) {
+    if (!el) return;
+    el.hidden = true;
+    var back = opener || el._modalOpener;
+    el._modalOpener = null;
+    if (back && typeof back.focus === 'function') {
+      try { back.focus(); } catch (e) { /* 触发元素已不在文档里时忽略 */ }
+    }
+  }
+
   function openUpdateHistoryModal() {
     var m = $('update-history-modal'); if (!m) return;
-    m.hidden = false;
+    openModal(m, $('update-history-close'));
     loadUpdateHistoryLines();
   }
 
@@ -4753,7 +4779,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     var body = $('changelog-body');
     if (!modal || !body) return;
     body.textContent = '加载中...';
-    modal.hidden = false;
+    openModal(modal, $('changelog-close'));
     fetch('/api/changelog').then(function (r) { return r.json(); }).then(function (data) {
       if (data && data.content) {
         body.textContent = data.content;
@@ -4777,8 +4803,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   }
 
   function closeChangelogModal() {
-    var modal = $('changelog-modal');
-    if (modal) modal.hidden = true;
+    closeModal($('changelog-modal'));
   }
 
   // 在升级成功横幅 action 按钮旁动态插入一个「查看更新日志」快捷链接

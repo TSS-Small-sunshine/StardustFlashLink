@@ -4435,6 +4435,31 @@ check("维护 P3-6：baseCheckAt 为 null 时不做「上次检查时间变了�
       _js6_render.replace("\n", " ")[:160])
 
 
+# —— P3-12：弹窗焦点管理（打开记住触发元素 + focus 关闭按钮，关闭归还焦点）——
+_js12_open = _js_func("openModal")
+_js12_close = _js_func("closeModal")
+_js12_hist = _js_func("openUpdateHistoryModal")
+_js12_cl = _js_func("openChangelogModal")
+_js12_clc = _js_func("closeChangelogModal")
+_js12_bind = _js_func("bindUpdate")
+check("维护 P3-12：打开弹窗时记录触发元素并把焦点送到关闭按钮",
+      bool(_js12_open) and "document.activeElement" in _js12_open
+      and "_modalOpener" in _js12_open and "focusEl.focus()" in _js12_open
+      and "hidden = false" in _js12_open,
+      _js12_open.replace("\n", " ")[:160])
+check("维护 P3-12：关闭弹窗时把焦点归还给触发元素（统一 closeModal(el, opener)）",
+      bool(_js12_close) and "_modalOpener" in _js12_close
+      and "back.focus()" in _js12_close and "hidden = true" in _js12_close,
+      _js12_close.replace("\n", " ")[:160])
+check("维护 P3-12：两个弹窗的打开 / 关闭都走统一 helper（不再各自裸切 hidden）",
+      "openModal(" in _js12_hist and "update-history-close" in _js12_hist
+      and "openModal(" in _js12_cl and "changelog-close" in _js12_cl
+      and _js12_clc.count("closeModal(") == 1
+      and _js12_bind.count("closeModal(") >= 3
+      and "m.hidden = true" not in _js12_bind,
+      repr((_js12_bind.count("closeModal("), "m.hidden = true" in _js12_bind)))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
