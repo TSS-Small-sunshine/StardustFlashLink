@@ -62,6 +62,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // 「更新」行的初始文案：只读版本与配置拼出来（**不发任何网络请求** ✓）——
     // 3.0 M4 的 GUI 入口是纯手动的：启动时绝不自动检查更新 ✗（与 auto_update_enabled 无关 ✓）
     set_update(&ui, "info", &model::update_idle_line());
+    // 「版本回滚」区的初始内容：备份在安装目录里，只读扫一遍（**不联网** ✓）
+    apply_rollback(&ui, &model::rollback_view());
 
     // 刷新状态
     let weak = ui.as_weak();
@@ -173,6 +175,69 @@ fn main() -> Result<(), slint::PlatformError> {
                             "warn",
                             &format!("已安装，但自动重启失败：{}（请手动打开新程序）", error),
                         );
+                    }
+                }
+            });
+        });
+    });
+
+    // ── M4 收尾：「版本回滚」：先选版本（确认），再后台换文件 + 重启 ✓ ──
+    // 两步确认：点版本只进入「确认回滚」状态，必须再点「确认回滚」才动盘 ✓
+    let weak = ui.as_weak();
+    ui.on_rollback_request(move |version| {
+        if let Some(ui) = weak.upgrade() {
+            if ui.get_rollback_busy() {
+                return;
+            }
+            ui.set_rollback_pending(version);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_rollback_cancel(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_rollback_pending(SharedString::from(""));
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_rollback_confirm(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let version = ui.get_rollback_pending().to_string();
+        if version.is_empty() || ui.get_rollback_busy() {
+            return;
+        }
+        ui.set_rollback_pending(SharedString::from(""));
+        ui.set_rollback_busy(true);
+        set_update(&ui, "info", "正在回滚…（校验备份 → 换文件，可能需要几秒）");
+        let weak_back = ui.as_weak();
+        worker::spawn_rollback(version, move |result| {
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak_back.upgrade() else { return };
+                ui.set_rollback_busy(false);
+                match result {
+                    Ok(done) => {
+                        set_update(&ui, "ok", &done.line);
+                        apply_rollback(&ui, &model::rollback_view());
+                        let Some(target) = done.restart else {
+                            return;
+                        };
+                        // 与安装同一条重启路径：先放单实例端口 → 拉起新程序 → 退出旧进程 ✓
+                        INSTANCE_GUARD.with(|slot| *slot.borrow_mut() = None);
+                        match drcom_core::update_apply::restart_detached(&target) {
+                            Ok(()) => {
+                                slint::Timer::single_shot(std::time::Duration::from_millis(900), || {
+                                    let _ = slint::quit_event_loop();
+                                });
+                            }
+                            Err(error) => set_update(
+                                &ui,
+                                "warn",
+                                &format!("已回滚，但自动重启失败：{}（请手动打开程序）", error),
+                            ),
+                        }
+                    }
+                    Err(error) => {
+                        set_update(&ui, "danger", &error);
+                        apply_rollback(&ui, &model::rollback_view());
                     }
                 }
             });
@@ -560,6 +625,21 @@ fn set_result(ui: &AppWindow, kind: &str, text: &str) {
 fn set_update(ui: &AppWindow, kind: &str, text: &str) {
     ui.set_update_kind(SharedString::from(kind));
     ui.set_update_line(SharedString::from(text));
+}
+
+/// 「版本回滚」区（一行说明 + 可选版本列表）—— 界面只负责画 ✓
+fn apply_rollback(ui: &AppWindow, view: &model::RollbackView) {
+    ui.set_rollback_available(view.available);
+    ui.set_rollback_line(SharedString::from(view.line.as_str()));
+    let entries: Vec<RollbackEntry> = view
+        .entries
+        .iter()
+        .map(|entry| RollbackEntry {
+            version: SharedString::from(entry.version.as_str()),
+            label: SharedString::from(entry.label.as_str()),
+        })
+        .collect();
+    ui.set_rollback_entries(ModelRc::new(VecModel::from(entries)));
 }
 
 /// 结果类型 → 终端窗右上角那枚徽标 ✓

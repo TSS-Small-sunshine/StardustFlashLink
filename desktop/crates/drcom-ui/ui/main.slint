@@ -5,6 +5,12 @@ export { SettingsWindow } from "settings.slint";
 // （只 import 不 export 的话，生成出来的 Rust 模块里根本没有这个类型 ✗ —— 真踩过 ✓）
 export { Theme } from "theme.slint";
 
+// 「版本回滚」列表里的一行：Rust 侧把版本与程序清单拼好，界面只负责画 ✓
+export struct RollbackEntry {
+    version: string,
+    label: string,
+}
+
 // 主窗口 —— 版式照 2.x Web UI 的「状态」页搬 ✓：
 //   顶栏（品牌 + 版本徽标 + 通道徽标 + 主题切换）
 //   两栏：左栏「状态与主操作同一张卡 + 日常 5 格 + 诊断 4 格」/ 右栏「账户与登录密码卡」
@@ -47,6 +53,12 @@ export component AppWindow inherits Window {
     // M4 第二块：有更新才出现「下载并安装」（没更新时按钮不存在 = 不留死按钮 ✓）
     in property <bool>   update-available: false;
     in property <bool>   update-installing: false;  // 下载 + 校验 + 替换中（防连点 ✓）
+    // —— M4 收尾：版本回滚（有备份才显示；两步确认才动盘 ✓）——
+    in property <bool>   rollback-available: false;
+    in property <string> rollback-line: "";
+    in property <[RollbackEntry]> rollback-entries: [];
+    in property <string> rollback-pending: "";   // 非空 = 正在确认回滚到这个版本
+    in property <bool>   rollback-busy: false;   // 回滚中（换文件 + 重启）
 
     // —— 统计条与终端窗的内容（Rust 按上面那些字段拼好；界面只负责画 ✓）——
     in property <[StatCell]> daily-cells: [];
@@ -61,6 +73,9 @@ export component AppWindow inherits Window {
     callback toggle-theme();
     callback check-update();
     callback install-update();
+    callback rollback-request(version: string);
+    callback rollback-confirm();
+    callback rollback-cancel();
 
     // —— 整窗极光底（2.x baka 的「大图」：浅紫底 + 四团很淡的色晕）——
     // Slint 没有 CSS 那套 blur 滤镜：这里用「大面积 + 透明渐变」近似，观感一致 ✓
@@ -221,6 +236,65 @@ export component AppWindow inherits Window {
                             visible: root.update-available;
                             enabled: !root.update-busy && !root.update-installing;
                             clicked => { root.install-update(); }
+                        }
+                    }
+
+                    // —— M4 收尾：版本回滚（备份 = 安装目录/backup/<版本>/ ✓）——
+                    // 有备份才出现（不留死按钮 ✓）；点版本只进入确认态，再点「确认回滚」才动盘 ✓
+                    if root.rollback-available : VerticalLayout {
+                        spacing: 6px;
+                        Rectangle { height: 1px; background: Theme.hairline; }
+                        HorizontalLayout {
+                            spacing: Theme.gap-sm;
+                            Text {
+                                text: "回滚";
+                                font-size: 12px;
+                                color: Theme.text-3;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.rollback-pending != ""
+                                    ? "确认回滚到 " + root.rollback-pending + " ？会立即重启程序"
+                                    : root.rollback-line;
+                                font-size: 12px;
+                                color: root.rollback-pending != "" ? Theme.warn : Theme.text-2;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                vertical-alignment: center;
+                            }
+                            if root.rollback-pending != "" : HorizontalLayout {
+                                spacing: 8px;
+                                PillButton {
+                                    text: root.rollback-busy ? "回滚中…" : "确认回滚";
+                                    enabled: !root.rollback-busy;
+                                    clicked => { root.rollback-confirm(); }
+                                }
+                                PillButton {
+                                    text: "取消";
+                                    enabled: !root.rollback-busy;
+                                    clicked => { root.rollback-cancel(); }
+                                }
+                            }
+                        }
+                        if root.rollback-pending == "" : VerticalLayout {
+                            spacing: 4px;
+                            for entry in root.rollback-entries : HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: entry.label;
+                                    font-size: 11px;
+                                    color: Theme.text-2;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                PillButton {
+                                    text: "回滚到 " + entry.version;
+                                    enabled: !root.rollback-busy && !root.update-busy && !root.update-installing;
+                                    clicked => { root.rollback-request(entry.version); }
+                                }
+                            }
                         }
                     }
                 }

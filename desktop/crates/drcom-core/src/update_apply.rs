@@ -289,52 +289,26 @@ pub fn apply_plan(plan: &ApplyPlan, dry_run: bool) -> Result<ApplyOutcome, Strin
         return Err("内部错误：临时文件名不在安装目录里 —— 拒绝替换".to_string());
     }
 
-    // ① 校验（只读）
-    validate_executable(&plan.installed_exe, "当前程序")?;
-    validate_executable(&plan.staged_exe, "新程序")?;
-    let head = read_head(&plan.staged_exe)?;
-    if !exe_magic_ok(&head, Os::current()) {
-        return Err(format!(
-            "新程序「{}」不是本平台的可执行文件（魔数校验失败）—— 拒绝替换",
-            plan.staged_exe.display()
-        ));
-    }
-    if dry_run {
-        return Ok(ApplyOutcome {
-            new_exe: plan.installed_exe.clone(),
-            backup: plan.backup_exe.clone(),
-            stale_old: plan.old_exe.clone(),
-            dry_run: true,
-        });
-    }
-
-    // ② 备份（**先落盘并校验**，再动当前程序 ✓）
-    if let Some(parent) = plan.backup_exe.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "建备份目录 {} 失败：{}（安装目录没有写入权限？）—— 已中止，程序没有被改动",
-                parent.display(),
-                error
-            )
-        })?;
-    }
-    copy_atomic(&plan.installed_exe, &plan.backup_exe)?;
-    verify_same_bytes(&plan.installed_exe, &plan.backup_exe, "备份")?;
-
-    // ③ 新程序复制到同目录临时名 ✓
-    copy_atomic(&plan.staged_exe, &plan.incoming_exe)?;
-    verify_same_bytes(&plan.staged_exe, &plan.incoming_exe, "复制新程序")?;
-
-    // ④⑤ 换名舞步（失败自动回滚 ✓）
-    if let Err(error) = swap_incoming_into_place(&plan.incoming_exe, &plan.installed_exe, &plan.old_exe) {
-        let _ = std::fs::remove_file(&plan.incoming_exe);
-        return Err(error);
-    }
+    // 校验 / 备份 / 换名全部交给多文件引擎（单文件 = 只有一个元素的多文件 ✓）
+    let items = [SwapItem {
+        installed: plan.installed_exe.clone(),
+        staged: plan.staged_exe.clone(),
+        backup: Some(plan.backup_exe.clone()),
+        incoming: plan.incoming_exe.clone(),
+        old: plan.old_exe.clone(),
+        installed_role: "当前程序",
+        staged_role: "新程序",
+        verb: "替换",
+    }];
+    let mut done = execute_swaps(&items, dry_run)?;
+    let one = done
+        .pop()
+        .ok_or_else(|| "内部错误：替换计划没有结果".to_string())?;
     Ok(ApplyOutcome {
-        new_exe: plan.installed_exe.clone(),
-        backup: plan.backup_exe.clone(),
-        stale_old: plan.old_exe.clone(),
-        dry_run: false,
+        new_exe: one.installed,
+        backup: one.backup.unwrap_or_else(|| plan.backup_exe.clone()),
+        stale_old: one.stale_old,
+        dry_run,
     })
 }
 
@@ -520,35 +494,26 @@ pub fn rollback_plan(plan: &RollbackPlan, dry_run: bool) -> Result<RollbackOutco
     if plan.incoming_exe.parent() != Some(installed_parent) || plan.old_exe.parent() != Some(installed_parent) {
         return Err("内部错误：临时文件名不在安装目录里 —— 拒绝回滚".to_string());
     }
-    validate_executable(&plan.installed_exe, "当前程序")?;
-    validate_executable(&plan.restore_from, "备份程序")?;
-    let head = read_head(&plan.restore_from)?;
-    if !exe_magic_ok(&head, Os::current()) {
-        return Err(format!(
-            "备份「{}」不是本平台的可执行文件（魔数校验失败）—— 拒绝回滚",
-            plan.restore_from.display()
-        ));
-    }
-    if dry_run {
-        return Ok(RollbackOutcome {
-            new_exe: plan.installed_exe.clone(),
-            restored_from: plan.restore_from.clone(),
-            stale_old: plan.old_exe.clone(),
-            dry_run: true,
-        });
-    }
-    copy_atomic(&plan.restore_from, &plan.incoming_exe)?;
-    verify_same_bytes(&plan.restore_from, &plan.incoming_exe, "复制备份")?;
-    if let Err(error) = swap_incoming_into_place(&plan.incoming_exe, &plan.installed_exe, &plan.old_exe)
-    {
-        let _ = std::fs::remove_file(&plan.incoming_exe);
-        return Err(error);
-    }
+    // 回滚 = 「新文件来自备份、不再做备份」的同一套换文件引擎 ✓
+    let items = [SwapItem {
+        installed: plan.installed_exe.clone(),
+        staged: plan.restore_from.clone(),
+        backup: None,
+        incoming: plan.incoming_exe.clone(),
+        old: plan.old_exe.clone(),
+        installed_role: "当前程序",
+        staged_role: "备份程序",
+        verb: "回滚",
+    }];
+    let mut done = execute_swaps(&items, dry_run)?;
+    let one = done
+        .pop()
+        .ok_or_else(|| "内部错误：回滚计划没有结果".to_string())?;
     Ok(RollbackOutcome {
-        new_exe: plan.installed_exe.clone(),
+        new_exe: one.installed,
         restored_from: plan.restore_from.clone(),
-        stale_old: plan.old_exe.clone(),
-        dry_run: false,
+        stale_old: one.stale_old,
+        dry_run,
     })
 }
 
@@ -720,6 +685,453 @@ pub fn install_zip(
     })
 }
 
+// ── M4 收尾：同目录「多个程序一起换」（GUI 与 CLI 不再一旧一新 ✓）──────────────
+//
+// 为什么需要它：CI 的 zip 里同时有 GUI（stardust-flash-link-app）与 CLI
+// （stardust-flash-link）；只换正在运行的那个 → 同目录的另一半留在旧版 ✗
+// （「版本号对不上」比「没更新」更难查）。所以安装按**安装目录**工作：
+// 目录里有几个本项目程序，就一起换几个；只换本来就在目录里的 ✓（不凭空添加文件 ✗）。
+
+/// 安装目录里**当前存在的**本项目程序（GUI 在前，CLI 在后；不存在的跳过 ✓）。
+///
+/// 只更新「本来就在这个目录里的程序」：用户只解压了 GUI 单文件时，不会凭空
+/// 多出一个 CLI ✓（反过来也一样）。
+pub fn installed_programs(install_dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    for name in [expected_exe_name(), cli_exe_name()] {
+        let path = install_dir.join(name);
+        if path.is_file() {
+            found.push((name.to_string(), path));
+        }
+    }
+    found
+}
+
+/// 一次「多程序安装」的结论 ✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramsOutcome {
+    /// 安装目录 ✓。
+    pub install_dir: PathBuf,
+    /// 安装包带来的版本（读不出来时是「未知版本」✓）。
+    pub target_version: String,
+    /// 每个程序一份替换计划（CLI 的 --dry-run 逐份打印 ✓）。
+    pub plans: Vec<ApplyPlan>,
+    /// 旧文件待清理的位置（通常删不掉，下次启动清 ✓）。
+    pub stale_olds: Vec<PathBuf>,
+    /// 清理告警（删不掉不是错误 ✓）。
+    pub warnings: Vec<String>,
+    pub dry_run: bool,
+}
+
+impl ProgramsOutcome {
+    /// 装完之后该重新拉起哪个程序：**GUI 优先**，没有 GUI 就用第一个 ✓。
+    pub fn restart_target(&self) -> Option<PathBuf> {
+        let gui = self.install_dir.join(expected_exe_name());
+        if self.plans.iter().any(|plan| plan.installed_exe == gui) {
+            return Some(gui);
+        }
+        self.plans.first().map(|plan| plan.installed_exe.clone())
+    }
+}
+
+/// **纯函数 + 只读**：每个当前程序都要在安装包里找得到，且像样（非空 / 不太大 / 魔数对 ✓）。
+fn collect_payload_entries<'a>(
+    entries: &'a [ZipReadEntry],
+    programs: &[(String, PathBuf)],
+) -> Result<Vec<&'a ZipReadEntry>, String> {
+    let mut payload = Vec::with_capacity(programs.len());
+    for (_, path) in programs {
+        let name = file_name_lossy(path);
+        let entry = pick_exe_entry(entries, &name)?;
+        if entry.data.is_empty() {
+            return Err(format!("安装包里的「{}」是空文件 —— 拒绝安装", name));
+        }
+        if entry.data.len() as u64 > MAX_EXE_BYTES {
+            return Err(format!(
+                "安装包里的「{}」太大（{} 字节，上限 {}）—— 不像是本项目的程序",
+                name,
+                entry.data.len(),
+                MAX_EXE_BYTES
+            ));
+        }
+        if !exe_magic_ok(&entry.data, Os::current()) {
+            return Err(format!(
+                "安装包里的「{}」不是本平台的可执行文件（魔数校验失败）—— 可能下错了平台，拒绝安装",
+                name
+            ));
+        }
+        payload.push(entry);
+    }
+    Ok(payload)
+}
+
+/// **本地 ZIP → 校验 → 备份 → 一起替换安装目录里的全部本项目程序**（不联网 ✓）。
+///
+/// 与 install_zip 的区别：这个按**安装目录**工作 —— 目录里同时有 GUI 与 CLI 时
+/// 两个一起换（不会留下「GUI 是新版、CLI 还是旧版」的混合状态 ✗）；
+/// 只换本来就在目录里的程序（不凭空添加文件 ✓）。
+pub fn install_zip_into_dir(
+    install_dir: &Path,
+    zip_bytes: &[u8],
+    backup_root: &Path,
+    current_version: &str,
+    target_version: Option<&str>,
+    dry_run: bool,
+) -> Result<ProgramsOutcome, String> {
+    if !install_dir.is_dir() {
+        return Err(format!("安装目录不存在：{}", install_dir.display()));
+    }
+    let entries = zipread::read_entries(zip_bytes)?;
+    let programs = installed_programs(install_dir);
+    if programs.is_empty() {
+        return Err(format!(
+            "安装目录里没有本项目的程序（{} / {}）—— 用 --install-dir 指对目录",
+            expected_exe_name(),
+            cli_exe_name()
+        ));
+    }
+    let payload = collect_payload_entries(&entries, &programs)?;
+    let target = target_version
+        .map(str::to_string)
+        .or_else(|| package_version_hint(&entries).map(|version| version.to_string_full()))
+        .unwrap_or_else(|| "未知版本".to_string());
+    let mut plans = Vec::with_capacity(payload.len());
+    let mut staged_paths = Vec::with_capacity(payload.len());
+    for (_, path) in &programs {
+        let staged = staged_temp_path(&file_name_lossy(path));
+        plans.push(plan_apply(path, &staged, backup_root, current_version, &target));
+        staged_paths.push(staged);
+    }
+    if dry_run {
+        return Ok(ProgramsOutcome {
+            install_dir: install_dir.to_path_buf(),
+            target_version: target,
+            plans,
+            stale_olds: Vec::new(),
+            warnings: Vec::new(),
+            dry_run: true,
+        });
+    }
+    let result = (|| -> Result<Vec<ApplyOutcome>, String> {
+        for (staged, entry) in staged_paths.iter().zip(payload.iter()) {
+            write_staged(staged, &entry.data)?;
+        }
+        apply_plans(&plans, false)
+    })();
+    // 临时文件无论成败都清掉（清不掉也不影响结论 ✓）
+    for staged in &staged_paths {
+        let _ = std::fs::remove_file(staged);
+        if let Some(parent) = staged.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    let outcomes = result?;
+    let mut warnings = Vec::new();
+    for plan in &plans {
+        warnings.extend(cleanup_stale_files(
+            install_dir,
+            &file_name_lossy(&plan.installed_exe),
+        ));
+    }
+    let mut stale_olds = Vec::new();
+    for outcome in &outcomes {
+        stale_olds.push(outcome.stale_old.clone());
+        if outcome.stale_old.exists() {
+            warnings.push(format!(
+                "旧程序「{}」还占着（本进程正在用它）—— 下次启动会自动清掉",
+                file_name_lossy(&outcome.stale_old)
+            ));
+        }
+    }
+    Ok(ProgramsOutcome {
+        install_dir: install_dir.to_path_buf(),
+        target_version: target,
+        plans,
+        stale_olds,
+        warnings,
+        dry_run: false,
+    })
+}
+
+/// 同一次安装里**多个程序一起替换**（全有或全无 ✓）：任一文件失败 → 已换的全部换回去 ✓。
+pub fn apply_plans(plans: &[ApplyPlan], dry_run: bool) -> Result<Vec<ApplyOutcome>, String> {
+    if plans.is_empty() {
+        return Err("没有要替换的程序 —— 拒绝替换".to_string());
+    }
+    let Some(first_dir) = plans[0].installed_exe.parent() else {
+        return Err("当前程序没有所在目录 —— 拒绝替换".to_string());
+    };
+    let mut items = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let exe_name = file_name_lossy(&plan.installed_exe);
+        if !is_safe_exe_name(&exe_name) {
+            return Err(format!("安装目录里的程序名「{}」不合法 —— 拒绝替换", exe_name));
+        }
+        if plan.installed_exe.parent() != Some(first_dir) {
+            return Err("一次替换的程序必须在同一个安装目录里 —— 拒绝替换".to_string());
+        }
+        if plan.incoming_exe.parent() != Some(first_dir) || plan.old_exe.parent() != Some(first_dir) {
+            return Err("内部错误：临时文件名不在安装目录里 —— 拒绝替换".to_string());
+        }
+        items.push(SwapItem {
+            installed: plan.installed_exe.clone(),
+            staged: plan.staged_exe.clone(),
+            backup: Some(plan.backup_exe.clone()),
+            incoming: plan.incoming_exe.clone(),
+            old: plan.old_exe.clone(),
+            installed_role: "当前程序",
+            staged_role: "新程序",
+            verb: "替换",
+        });
+    }
+    let done = execute_swaps(&items, dry_run)?;
+    Ok(plans
+        .iter()
+        .zip(done)
+        .map(|(plan, done)| ApplyOutcome {
+            new_exe: done.installed,
+            backup: done.backup.unwrap_or_else(|| plan.backup_exe.clone()),
+            stale_old: done.stale_old,
+            dry_run,
+        })
+        .collect())
+}
+
+// ── M4 收尾：多程序回滚（备份里有几个程序就恢复几个 ✓）─────────────────────────
+
+/// 某个备份版本里的全部程序文件（GUI 在前 ✓）；没有可执行程序时是空 ✓。
+pub fn backup_program_files(backup_root: &Path, version: &str) -> Vec<(String, PathBuf)> {
+    let Ok(version_dir) = safe_version_segment(version) else {
+        return Vec::new();
+    };
+    let dir = backup_root.join(version_dir);
+    let mut found = Vec::new();
+    for name in [expected_exe_name(), cli_exe_name()] {
+        let path = dir.join(name);
+        if path.is_file() {
+            found.push((name.to_string(), path));
+        }
+    }
+    found
+}
+
+/// 所有备份版本（**新版本在前** ✓），每项带上这个版本里的程序文件清单 ✓。
+pub fn backup_versions(backup_root: &Path) -> Vec<(String, Vec<(String, PathBuf)>)> {
+    let Ok(entries) = std::fs::read_dir(backup_root) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(Option<Version>, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if backup_program_files(backup_root, &name).is_empty() {
+            continue;
+        }
+        found.push((Version::parse(&name), name));
+    }
+    found.sort_by(|left, right| match (&left.0, &right.0) {
+        (Some(a), Some(b)) => b.cmp(a), // 新的在前 ✓
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left.1.cmp(&right.1),
+    });
+    found
+        .into_iter()
+        .map(|(_, name)| {
+            let files = backup_program_files(backup_root, &name);
+            (name, files)
+        })
+        .collect()
+}
+
+/// 多程序回滚计划里的一项 ✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackItemPlan {
+    pub installed_exe: PathBuf,
+    pub restore_from: PathBuf,
+    pub incoming_exe: PathBuf,
+    pub old_exe: PathBuf,
+}
+
+/// 多程序回滚计划 ✓（不指定版本时取最新备份；备份里有什么就恢复什么 ✓）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramsRollbackPlan {
+    pub install_dir: PathBuf,
+    pub version: String,
+    pub items: Vec<RollbackItemPlan>,
+    /// 只读说明（哪些程序这次不恢复、为什么 ✓）。
+    pub notes: Vec<String>,
+    pub steps: Vec<String>,
+}
+
+/// **纯函数 + 只读查盘**：排多程序回滚计划 ✓。
+pub fn plan_rollback_all(
+    install_dir: &Path,
+    backup_root: &Path,
+    version: Option<&str>,
+) -> Result<ProgramsRollbackPlan, String> {
+    if !install_dir.is_dir() {
+        return Err(format!("安装目录不存在：{}", install_dir.display()));
+    }
+    let versions = backup_versions(backup_root);
+    if versions.is_empty() {
+        return Err(format!(
+            "还没有任何备份（{}）—— 只有做过一次 update apply 之后才有可回滚的版本",
+            backup_root.display()
+        ));
+    }
+    let (version_label, files) = match version {
+        Some(raw) => {
+            let label = safe_version_segment(raw)?.to_string();
+            let files = backup_program_files(backup_root, &label);
+            if files.is_empty() {
+                let existing: Vec<String> = versions.iter().map(|(name, _)| name.clone()).collect();
+                return Err(format!(
+                    "没有找到 {} 的备份（现有备份：{}）—— 用 update backups 看看有哪些版本",
+                    raw,
+                    existing.join(" / ")
+                ));
+            }
+            (label, files)
+        }
+        None => versions.into_iter().next().expect("上面刚判过非空"),
+    };
+    let backup_names: Vec<String> = files.iter().map(|(name, _)| name.clone()).collect();
+    let mut items = Vec::new();
+    let mut notes = Vec::new();
+    for (name, backup_file) in &files {
+        let installed_exe = install_dir.join(name);
+        if !installed_exe.is_file() {
+            notes.push(format!(
+                "备份 {} 里还有「{}」，但安装目录里没有它 —— 跳过（不凭空添加文件 ✓）",
+                version_label, name
+            ));
+            continue;
+        }
+        let incoming_exe = sibling_path(&installed_exe, INCOMING_TAG);
+        let old_exe = sibling_path(&installed_exe, ROLLBACK_TAG);
+        items.push(RollbackItemPlan {
+            installed_exe,
+            restore_from: backup_file.clone(),
+            incoming_exe,
+            old_exe,
+        });
+    }
+    if items.is_empty() {
+        return Err(format!(
+            "备份 {} 里的程序在安装目录（{}）里都不存在 —— 没有可恢复的文件",
+            version_label,
+            install_dir.display()
+        ));
+    }
+    // 反向说明：安装目录里有、但这个备份里没有的程序 —— 保持当前版本不动 ✓
+    for (name, _) in installed_programs(install_dir) {
+        if !backup_names.contains(&name) {
+            notes.push(format!(
+                "备份 {} 里没有「{}」—— 它保持当前版本（这次不动 ✓）",
+                version_label, name
+            ));
+        }
+    }
+    let mut steps = vec![format!(
+        "① 备份 {} 里有 {} 个程序，先把每个都校验一遍（非空 + 本平台魔数）",
+        version_label,
+        items.len()
+    )];
+    for item in &items {
+        steps.push(format!(
+            "   {}：{} → {}（先复制到同目录临时名，再走 rename 舞步）",
+            file_name_lossy(&item.installed_exe),
+            item.restore_from.display(),
+            item.installed_exe.display()
+        ));
+    }
+    steps.push("② 任一文件失败 → 本次已换的全部按相反顺序换回去（全有或全无 ✓）".to_string());
+    steps.push("③ 重新拉起回滚后的程序（除非 --no-restart / --dry-run）".to_string());
+    Ok(ProgramsRollbackPlan {
+        install_dir: install_dir.to_path_buf(),
+        version: version_label,
+        items,
+        notes,
+        steps,
+    })
+}
+
+/// 多程序回滚的结论 ✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramsRollbackOutcome {
+    pub version: String,
+    /// 回滚后的正式程序路径 ✓。
+    pub new_exes: Vec<PathBuf>,
+    /// 每个程序是从哪个备份恢复的 ✓。
+    pub restored_from: Vec<PathBuf>,
+    /// 被换下来的新程序（待清理 ✓）。
+    pub stale_olds: Vec<PathBuf>,
+    pub dry_run: bool,
+}
+
+impl ProgramsRollbackOutcome {
+    /// 回滚完该重新拉起哪个程序：**GUI 优先**，没有 GUI 就用第一个 ✓。
+    pub fn restart_target(&self) -> Option<PathBuf> {
+        self.new_exes
+            .iter()
+            .find(|path| file_name_lossy(path) == expected_exe_name())
+            .cloned()
+            .or_else(|| self.new_exes.first().cloned())
+    }
+}
+
+/// 按计划执行多程序回滚（dry_run 时只做只读校验 ✓）。
+pub fn rollback_programs(
+    plan: &ProgramsRollbackPlan,
+    dry_run: bool,
+) -> Result<ProgramsRollbackOutcome, String> {
+    if plan.items.is_empty() {
+        return Err("回滚计划里没有文件 —— 拒绝回滚".to_string());
+    }
+    let mut items = Vec::with_capacity(plan.items.len());
+    for item in &plan.items {
+        let installed_parent = item
+            .installed_exe
+            .parent()
+            .ok_or_else(|| "当前程序没有所在目录 —— 拒绝回滚".to_string())?;
+        if item.incoming_exe.parent() != Some(installed_parent)
+            || item.old_exe.parent() != Some(installed_parent)
+        {
+            return Err("内部错误：临时文件名不在安装目录里 —— 拒绝回滚".to_string());
+        }
+        items.push(SwapItem {
+            installed: item.installed_exe.clone(),
+            staged: item.restore_from.clone(),
+            backup: None,
+            incoming: item.incoming_exe.clone(),
+            old: item.old_exe.clone(),
+            installed_role: "当前程序",
+            staged_role: "备份程序",
+            verb: "回滚",
+        });
+    }
+    let done = execute_swaps(&items, dry_run)?;
+    let mut new_exes = Vec::with_capacity(done.len());
+    let mut restored_from = Vec::with_capacity(done.len());
+    let mut stale_olds = Vec::with_capacity(done.len());
+    for (item, done) in plan.items.iter().zip(done) {
+        new_exes.push(done.installed);
+        restored_from.push(item.restore_from.clone());
+        stale_olds.push(done.stale_old);
+    }
+    Ok(ProgramsRollbackOutcome {
+        version: plan.version.clone(),
+        new_exes,
+        restored_from,
+        stale_olds,
+        dry_run,
+    })
+}
+
 // ── 下面的都是内部工具（薄、可单测）────────────────────────────────────────────
 
 /// 文件名的 lossy 版本（路径不合法时给空串，由调用方判 ✓）。
@@ -802,6 +1214,144 @@ fn swap_incoming_into_place(
         };
     }
     Ok(())
+}
+
+// ── 多文件替换的公共引擎（单文件 / 多文件 / 回滚都走它）──────────────────────
+
+/// 一次「换文件」动作里的一个文件（内部结构；公开 API 是 ApplyPlan / RollbackPlan ✓）。
+struct SwapItem {
+    /// 安装目录里的正式名 ✓。
+    installed: PathBuf,
+    /// 新的字节来源（安装包解包 / 备份文件 ✓）。
+    staged: PathBuf,
+    /// 备份落点（None = 不备份：回滚不需要再备份 ✓）。
+    backup: Option<PathBuf>,
+    /// 与正式名同目录的临时名 ✓。
+    incoming: PathBuf,
+    /// 旧文件改名后的位置 ✓。
+    old: PathBuf,
+    /// 旧文件的角色说明（错误文案用 ✓）。
+    installed_role: &'static str,
+    /// 新文件的角色说明（错误文案用 ✓）。
+    staged_role: &'static str,
+    /// 动作名（替换 / 回滚；错误文案用 ✓）。
+    verb: &'static str,
+}
+
+/// 一个文件换完之后的结论 ✓。
+struct SwapDone {
+    installed: PathBuf,
+    backup: Option<PathBuf>,
+    stale_old: PathBuf,
+}
+
+/// **全有或全无**地执行一组换文件动作 ✓。
+///
+/// 顺序：先全部只读校验 → 全部备份并校验 → 全部落同目录临时名并校验 → 逐个 rename 换名；
+/// 任何一步失败都会把**已经换掉的文件按相反顺序换回去** ✓
+/// （新程序还没被启动过，所以能从正式名删掉；旧程序改回原名即可 ✓）。
+fn execute_swaps(items: &[SwapItem], dry_run: bool) -> Result<Vec<SwapDone>, String> {
+    if items.is_empty() {
+        return Err("没有要替换的程序 —— 拒绝".to_string());
+    }
+    // ① 全部先做只读校验（一个不对就一个都不动 ✓）
+    for item in items {
+        validate_executable(&item.installed, item.installed_role)?;
+        validate_executable(&item.staged, item.staged_role)?;
+        let head = read_head(&item.staged)?;
+        if !exe_magic_ok(&head, Os::current()) {
+            return Err(format!(
+                "{}「{}」不是本平台的可执行文件（魔数校验失败）—— 拒绝{}",
+                item.staged_role,
+                item.staged.display(),
+                item.verb
+            ));
+        }
+    }
+    if dry_run {
+        return Ok(items
+            .iter()
+            .map(|item| SwapDone {
+                installed: item.installed.clone(),
+                backup: item.backup.clone(),
+                stale_old: item.old.clone(),
+            })
+            .collect());
+    }
+    // ② 先把**所有**备份落盘并逐字节校验（备份不齐 → 一个都不动 ✓）
+    for item in items {
+        let Some(backup) = &item.backup else {
+            continue;
+        };
+        if let Some(parent) = backup.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "建备份目录 {} 失败：{}（安装目录没有写入权限？）—— 已中止，程序没有被改动",
+                    parent.display(),
+                    error
+                )
+            })?;
+        }
+        copy_atomic(&item.installed, backup)?;
+        verify_same_bytes(&item.installed, backup, "备份")?;
+    }
+    // ③ 新文件先全部落到同目录临时名并校验（同盘 rename 才是原子的 ✓）
+    for (index, item) in items.iter().enumerate() {
+        let copied = copy_atomic(&item.staged, &item.incoming)
+            .and_then(|()| verify_same_bytes(&item.staged, &item.incoming, "复制新程序"));
+        if let Err(error) = copied {
+            for pending in items.iter().skip(index) {
+                let _ = std::fs::remove_file(&pending.incoming);
+            }
+            return Err(error);
+        }
+    }
+    // ④⑤ 逐个换名；失败 → 已换的全部换回去 ✓
+    let mut swapped: Vec<usize> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        match swap_incoming_into_place(&item.incoming, &item.installed, &item.old) {
+            Ok(()) => swapped.push(index),
+            Err(error) => {
+                // 还没换的临时文件清掉（已经换过的在下面回退 ✓）
+                for pending in items.iter().skip(index) {
+                    let _ = std::fs::remove_file(&pending.incoming);
+                }
+                let mut undo_errors = Vec::new();
+                for swapped_index in swapped.iter().rev() {
+                    let item = &items[*swapped_index];
+                    // 新程序还没被启动过 → 可以从正式名删掉，再把旧程序改回正式名 ✓
+                    if let Err(remove_error) = std::fs::remove_file(&item.installed) {
+                        undo_errors.push(format!(
+                            "清掉新程序「{}」失败：{}",
+                            file_name_lossy(&item.installed),
+                            remove_error
+                        ));
+                    }
+                    if let Err(restore_error) = std::fs::rename(&item.old, &item.installed) {
+                        undo_errors.push(format!(
+                            "把旧程序「{}」改回原名失败：{} —— 它现在在「{}」，请手动改回",
+                            file_name_lossy(&item.installed),
+                            restore_error,
+                            item.old.display()
+                        ));
+                    }
+                }
+                return Err(if undo_errors.is_empty() {
+                    format!("{}（已把本次换过的文件全部换回去，程序完好无损）", error)
+                } else {
+                    format!("{}；回退本次已换文件时又出错：{}", error, undo_errors.join("；"))
+                });
+            }
+        }
+    }
+    Ok(items
+        .iter()
+        .map(|item| SwapDone {
+            installed: item.installed.clone(),
+            backup: item.backup.clone(),
+            stale_old: item.old.clone(),
+        })
+        .collect())
 }
 
 /// 原子复制：先写同目录唯一 tmp（atomicfile 的命名规矩 ✓），再 rename ✓。
@@ -1486,6 +2036,211 @@ mod tests {
         let err = apply_plan(&plan, false).unwrap_err();
         assert!(err.contains("内部错误"), "{}", err);
         assert_eq!(std::fs::read(&installed).unwrap(), fake_exe(b"OLD"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── M4 收尾：多程序一起换 / 一起回滚 ✓ ─────────────────────────────────────
+
+    /// 造一个同时带 GUI 与 CLI 的安装包（每个文件都在 staging/ 下 ✓）。
+    fn multi_package_zip(files: &[(&str, &[u8])], version: &str) -> Vec<u8> {
+        let readme = format!("星尘闪连 {} · 预览版（test-target）
+", version);
+        let names: Vec<String> = files.iter().map(|(name, _)| format!("staging/{}", name)).collect();
+        let mut entries: Vec<ZipEntry> = vec![ZipEntry {
+            name: "staging/README.txt",
+            data: readme.as_bytes(),
+        }];
+        for (index, (_, data)) in files.iter().enumerate() {
+            entries.push(ZipEntry { name: names[index].as_str(), data });
+        }
+        build(&entries, at(0)).unwrap()
+    }
+
+    #[test]
+    fn install_zip_into_dir_replaces_gui_and_cli_together() {
+        let dir = temp_dir("multi-install");
+        let gui_name = expected_exe_name();
+        let cli_name = cli_exe_name();
+        let gui = dir.join(gui_name);
+        let cli = dir.join(cli_name);
+        std::fs::write(&gui, fake_exe(b"OLD-GUI")).unwrap();
+        std::fs::write(&cli, fake_exe(b"OLD-CLI")).unwrap();
+        let backup_root = dir.join(BACKUP_DIR_NAME);
+        let zip = multi_package_zip(
+            &[
+                (gui_name, &fake_exe(b"NEW-GUI")),
+                (cli_name, &fake_exe(b"NEW-CLI")),
+            ],
+            "3.0.0.0-preview.4",
+        );
+
+        let outcome = install_zip_into_dir(
+            &dir,
+            &zip,
+            &backup_root,
+            "3.0.0.0-preview.3",
+            Some("3.0.0.0-preview.4"),
+            false,
+        )
+        .expect("多程序安装必须成功");
+        assert_eq!(outcome.plans.len(), 2, "安装目录里两个程序都要换: {:?}", outcome.plans);
+        assert_eq!(outcome.target_version, "3.0.0.0-preview.4");
+        assert_eq!(std::fs::read(&gui).unwrap(), fake_exe(b"NEW-GUI"), "GUI 必须换成新版 ✓");
+        assert_eq!(std::fs::read(&cli).unwrap(), fake_exe(b"NEW-CLI"), "CLI 也要一起换（不许一旧一新 ✗）");
+        let version_dir = backup_root.join("3.0.0.0-preview.3");
+        assert_eq!(std::fs::read(version_dir.join(gui_name)).unwrap(), fake_exe(b"OLD-GUI"));
+        assert_eq!(std::fs::read(version_dir.join(cli_name)).unwrap(), fake_exe(b"OLD-CLI"));
+        assert!(version_dir.join(gui_name).is_file());
+        // 重启目标必须优先 GUI（界面程序）✓
+        assert_eq!(outcome.restart_target(), Some(gui.clone()));
+        // 清理后不许留下临时文件 ✓
+        let _ = cleanup_stale_files(&dir, gui_name);
+        let _ = cleanup_stale_files(&dir, cli_name);
+        let leftovers: Vec<String> = dir_names(&dir)
+            .into_iter()
+            .filter(|name| name.contains(".old-") || name.contains(".incoming-"))
+            .collect();
+        assert!(leftovers.is_empty(), "不该留下临时文件: {:?}", leftovers);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_zip_into_dir_only_touches_programs_already_installed() {
+        let dir = temp_dir("multi-install-single");
+        let gui_name = expected_exe_name();
+        let cli_name = cli_exe_name();
+        let gui = dir.join(gui_name);
+        std::fs::write(&gui, fake_exe(b"OLD-GUI")).unwrap();
+        let backup_root = dir.join(BACKUP_DIR_NAME);
+        let zip = multi_package_zip(
+            &[
+                (gui_name, &fake_exe(b"NEW-GUI")),
+                (cli_name, &fake_exe(b"NEW-CLI")),
+            ],
+            "3.0.0.0-preview.4",
+        );
+
+        let outcome = install_zip_into_dir(&dir, &zip, &backup_root, "v1", Some("v2"), false)
+            .expect("只有 GUI 时也能装");
+        assert_eq!(outcome.plans.len(), 1, "只换本来就在目录里的 GUI ✓");
+        assert_eq!(std::fs::read(&gui).unwrap(), fake_exe(b"NEW-GUI"));
+        assert!(
+            !dir.join(cli_name).exists(),
+            "不许凭空多出一个 CLI 文件（只更新已有程序 ✓）"
+        );
+        let _ = cleanup_stale_files(&dir, gui_name);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_zip_into_dir_refuses_a_half_package_and_touches_nothing() {
+        let dir = temp_dir("multi-install-half");
+        let gui_name = expected_exe_name();
+        let cli_name = cli_exe_name();
+        let gui = dir.join(gui_name);
+        let cli = dir.join(cli_name);
+        std::fs::write(&gui, fake_exe(b"OLD-GUI")).unwrap();
+        std::fs::write(&cli, fake_exe(b"OLD-CLI")).unwrap();
+        let backup_root = dir.join(BACKUP_DIR_NAME);
+        // 包里只有 GUI，但安装目录里有两个程序 → 只换一半更糟，整包拒绝 ✓
+        let half = multi_package_zip(&[(gui_name, &fake_exe(b"NEW-GUI"))], "3.0.0.0-preview.4");
+
+        let err = install_zip_into_dir(&dir, &half, &backup_root, "v1", None, false).unwrap_err();
+        assert!(err.contains("没有") && err.contains(cli_name), "{}", err);
+        assert_eq!(std::fs::read(&gui).unwrap(), fake_exe(b"OLD-GUI"), "拒绝时一个文件都不许动 ✗");
+        assert_eq!(std::fs::read(&cli).unwrap(), fake_exe(b"OLD-CLI"));
+        assert!(!backup_root.exists(), "拒绝时不许产生备份 ✗");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_install_failure_restores_every_swapped_file() {
+        let dir = temp_dir("multi-install-rollback");
+        let first = dir.join("first.bin");
+        let second = dir.join("second.bin");
+        std::fs::write(&first, b"OLD-FIRST").unwrap();
+        std::fs::write(&second, b"OLD-SECOND").unwrap();
+        let staged_first = write_staged_file(&dir.join("staging"), &fake_exe(b"NEW-FIRST"));
+        let staged_second = write_staged_file(&dir.join("staging-2"), &fake_exe(b"NEW-SECOND"));
+        let backup_root = dir.join(BACKUP_DIR_NAME);
+
+        let first_plan = plan_apply(&first, &staged_first, &backup_root, "v1", "v2");
+        let mut second_plan = plan_apply(&second, &staged_second, &backup_root, "v1", "v2");
+        // 给第二个文件安排一个「挡路的目录」当旧文件落点 → 第 ④ 步 rename 必失败 ✓
+        let blocked_old = dir.join("blocked-old");
+        std::fs::create_dir_all(&blocked_old).unwrap();
+        second_plan.old_exe = blocked_old;
+
+        let err = apply_plans(&[first_plan.clone(), second_plan], false).unwrap_err();
+        assert!(err.contains("换回去"), "错误里要说清已经回退: {}", err);
+        assert_eq!(std::fs::read(&first).unwrap(), b"OLD-FIRST", "已换掉的文件必须换回旧字节 ✓");
+        assert_eq!(std::fs::read(&second).unwrap(), b"OLD-SECOND", "失败的那个文件不许动 ✓");
+        // 备份已写（在换名之前就落了 ✓），但正式名必须完好 ✓
+        let version_dir = backup_root.join("v1");
+        assert_eq!(std::fs::read(version_dir.join("first.bin")).unwrap(), b"OLD-FIRST");
+        // 没有遗留的临时文件 ✓
+        let leftovers: Vec<String> = dir_names(&dir)
+            .into_iter()
+            .filter(|name| name.contains(".incoming-") || name.contains(".old-"))
+            .collect();
+        assert!(leftovers.is_empty(), "失败后不该留下临时文件: {:?}", leftovers);
+        // dry-run 的计划不碰盘 ✓
+        let before = dir_names(&dir);
+        let dry = apply_plans(&[first_plan], true).unwrap();
+        assert!(dry[0].dry_run);
+        assert_eq!(dir_names(&dir), before, "dry-run 不许产生新文件 ✗");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_rollback_restores_every_program_in_the_backup() {
+        let dir = temp_dir("multi-rollback");
+        let gui_name = expected_exe_name();
+        let cli_name = cli_exe_name();
+        let gui = dir.join(gui_name);
+        let cli = dir.join(cli_name);
+        std::fs::write(&gui, fake_exe(b"CURRENT-GUI")).unwrap();
+        std::fs::write(&cli, fake_exe(b"CURRENT-CLI")).unwrap();
+        let backup_root = dir.join(BACKUP_DIR_NAME);
+        // 两个版本：preview.2 里两个程序都有；preview.3 里只有 GUI ✓
+        let old_dir = backup_root.join("3.0.0.0-preview.2");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join(gui_name), fake_exe(b"OLD-GUI")).unwrap();
+        std::fs::write(old_dir.join(cli_name), fake_exe(b"OLD-CLI")).unwrap();
+        let newer_dir = backup_root.join("3.0.0.0-preview.3");
+        std::fs::create_dir_all(&newer_dir).unwrap();
+        std::fs::write(newer_dir.join(gui_name), fake_exe(b"NEWER-GUI")).unwrap();
+
+        // 列表：新版本在前；每个版本带上自己的程序清单 ✓
+        let versions = backup_versions(&backup_root);
+        assert_eq!(versions.len(), 2, "{:?}", versions);
+        assert_eq!(versions[0].0, "3.0.0.0-preview.3");
+        assert_eq!(versions[0].1.len(), 1, "preview.3 备份里只有 GUI: {:?}", versions[0].1);
+        assert_eq!(versions[1].1.len(), 2, "preview.2 备份里两个程序都有 ✓");
+
+        // 不指定版本 → 取最新备份（只有 GUI）→ CLI 跳过并给出说明 ✓
+        let plan = plan_rollback_all(&dir, &backup_root, None).unwrap();
+        assert_eq!(plan.version, "3.0.0.0-preview.3");
+        assert_eq!(plan.items.len(), 1);
+        assert!(plan.notes.iter().any(|note| note.contains(cli_name)), "{:?}", plan.notes);
+        let outcome = rollback_programs(&plan, false).unwrap();
+        assert_eq!(std::fs::read(&gui).unwrap(), fake_exe(b"NEWER-GUI"));
+        assert_eq!(std::fs::read(&cli).unwrap(), fake_exe(b"CURRENT-CLI"), "没备份的程序不许动 ✓");
+        assert_eq!(outcome.restart_target(), Some(gui.clone()));
+
+        // 指定 preview.2 → 两个程序一起恢复 ✓
+        let plan = plan_rollback_all(&dir, &backup_root, Some("3.0.0.0-preview.2")).unwrap();
+        assert_eq!(plan.items.len(), 2);
+        let outcome = rollback_programs(&plan, false).unwrap();
+        assert_eq!(std::fs::read(&gui).unwrap(), fake_exe(b"OLD-GUI"));
+        assert_eq!(std::fs::read(&cli).unwrap(), fake_exe(b"OLD-CLI"));
+        assert_eq!(outcome.restored_from.len(), 2);
+        let _ = cleanup_stale_files(&dir, gui_name);
+        let _ = cleanup_stale_files(&dir, cli_name);
+
+        // 指定不存在的版本 → 可读错误 + 提示 update backups ✓
+        let err = plan_rollback_all(&dir, &backup_root, Some("9.9.9.9")).unwrap_err();
+        assert!(err.contains("没有找到") && err.contains("update backups"), "{}", err);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

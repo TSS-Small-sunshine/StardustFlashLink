@@ -55,7 +55,7 @@ pub const APP_VERSION: &str = "3.0.0.0";
 /// 当前构建属于哪条通道（开发期是预览版 → 不会进正式用户的自动更新 ✓）。
 pub const APP_CHANNEL: Channel = Channel::Preview;
 /// 通道内序号（每次发预览版 +1）。
-pub const APP_CHANNEL_SEQ: u32 = 3;
+pub const APP_CHANNEL_SEQ: u32 = 4;
 /// 产品名（界面 / 安装包 / 日志横幅统一用它）。
 pub const APP_NAME: &str = "星尘闪连";
 
