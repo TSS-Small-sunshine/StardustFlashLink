@@ -4233,6 +4233,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   var logTimer = null;
   var logUpdatedAt = null;
   var logLevel = '';  /* 当前等级筛选：'' 表示全部 */
+  var logSeq = 0;     /* 审计 P3-5：请求序号 —— 只有最新一次请求的响应允许落地 */
 
   function renderLog() {
     var box = $('log-box');
@@ -4250,11 +4251,19 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     text($('log-count'), (keyword ? view.length + ' / ' + logLines.length : view.length) + ' 行');
   }
 
-  /* 增量拉取：只追加新内容，保留已有滚动位置 */
+  /* 增量拉取：只追加新内容，保留已有滚动位置。
+     审计 P3-5：请求没回来时 logOffset 还没推进，2 秒后又发一次 —— 两个在途请求
+     用的是同一个 offset，响应各自 concat → 同一段日志被重复追加。reloadLog(force)
+     与在途请求交叉时还会错位 / 丢行。现在每次请求先领一个递增序号（logSeq），
+     只有「最新序号」的响应才允许改 logLines / logOffset / 渲染；过期响应直接丢弃。
+     这样即使服务器慢到两次请求都在飞，落地也只有最后一棒。 */
   function fetchLog(force) {
     if (document.hidden && !force) return Promise.resolve();
+    var seq = ++logSeq;
     if (force) { logOffset = 0; logLines = []; }
-    return API.logTail(logOffset, 500, logLevel).then(function (r) {
+    var reqOffset = logOffset;
+    return API.logTail(reqOffset, 500, logLevel).then(function (r) {
+      if (seq !== logSeq) return;   /* 过期响应：已有更新的一次请求在路上 / 已落地 */
       if (!r || typeof r !== 'object') return;
       var incoming = r.lines || [];
       if (incoming.length) {
@@ -4268,6 +4277,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       text($('log-size'), fmtBytes(r.total_size || 0));
       text($('log-updated'), '更新于 ' + logUpdatedAt);
     }).catch(function () {
+      if (seq !== logSeq) return;   /* 过期请求的失败也别覆盖最新状态 */
       text($('log-updated'), '拉取失败');
     });
   }

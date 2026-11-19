@@ -4403,6 +4403,23 @@ for _fn4 in ("getJson", "postJson", "getUpdateJson", "postUpdateJson"):
           (_js4_fn.replace("\n", " ")[:120] or "<函数没找到>"))
 
 
+# —— P3-5：fetchLog 竞态（请领序号，只有最新响应落地，过期响应不得拼行 / 改 offset）——
+_js5 = _js_func("fetchLog")
+_i5_seq = _js5.find("++logSeq")
+_i5_req = _js5.find("API.logTail(")
+_i5_concat = _js5.find("logLines.concat")
+_i5_off = _js5.find("logOffset = r.next_offset")
+_i5_guard = _js5.find("seq !== logSeq")
+check("维护 P3-5：fetchLog 先领请求序号再发请求（同一 offset 的并发响应不会各拼一次）",
+      "var logSeq = 0;" in _page and bool(_js5)
+      and -1 < _i5_seq < _i5_req and _i5_concat > _i5_req,
+      repr((_i5_seq, _i5_req, _i5_concat)))
+check("维护 P3-5：过期响应在写 logLines / logOffset 之前被丢弃（成功与失败路径都有序号判据）",
+      _js5.count("seq !== logSeq") >= 2
+      and -1 < _i5_guard < _i5_concat and _i5_guard < _i5_off,
+      repr((_js5.count("seq !== logSeq"), _i5_guard, _i5_concat, _i5_off)))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
