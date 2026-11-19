@@ -4460,6 +4460,12 @@ check("维护 P3-12：两个弹窗的打开 / 关闭都走统一 helper（不再
       repr((_js12_bind.count("closeModal("), "m.hidden = true" in _js12_bind)))
 
 
+check("维护 P3-4：错误提示在 catch 里消费抛出的 err.message（保留服务端可读原因，不退化成一句「请求失败」）",
+      _page.count("err && err.message") >= 6
+      and "err.message" in _js_func("saveConfigFrom"),
+      "err.message 出现 %d 次" % _page.count("err && err.message"))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。

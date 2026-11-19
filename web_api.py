@@ -4185,8 +4185,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       } else {
         toast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
       }
-    }).catch(function () {
-      toast('保存请求失败，请检查服务状态', 'error');
+    }).catch(function (err) {
+      toast('保存失败：' + ((err && err.message) || '请求失败，请检查服务状态'), 'error');
     }).then(function () { if (btn) btn.disabled = false; });
   }
 
@@ -4230,8 +4230,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           } else {
             setFieldError('pwd-new', 'err-pwd', (r && r.error) || '保存失败');
           }
-        }).catch(function () {
-          setFieldError('pwd-new', 'err-pwd', '请求失败，请检查服务状态');
+        }).catch(function (err) {
+          setFieldError('pwd-new', 'err-pwd', (err && err.message) || '请求失败，请检查服务状态');
         }).then(function () { pwdBtn.disabled = false; });
       });
     }
@@ -4463,7 +4463,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       if (!window.confirm('确认重启服务？NSSM 将自动重新拉起进程。')) return;
       API.restart().then(function (r) {
         toast((r && r.message) || '服务正在重启，3 秒后请刷新页面', 'success');
-      }).catch(function () { toast('重启请求失败', 'error'); });
+      }).catch(function (err) { toast((err && err.message) || '重启请求失败', 'error'); });
     });
     var btnUninstall = $('btn-uninstall');
     if (btnUninstall) btnUninstall.addEventListener('click', function () {
@@ -4900,7 +4900,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           }
           if (typeof pollUpdate === 'function') pollUpdate();
         })
-        .catch(function () { toast('请求失败，请检查服务状态', 'error'); });
+        .catch(function (err) { toast('检查失败：' + ((err && err.message) || '请求失败，请检查服务状态'), 'error', 6000); });
     });
     if (installBtn) installBtn.addEventListener('click', function () {
       if (!confirm('确认立即升级？\n\n升级期间（约 30-60 秒）：\n- 服务会短暂停止\n- Web UI 不可用\n- 进度通过升级状态横幅实时显示\n\n继续？')) return;
@@ -4914,7 +4914,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           }
           if (typeof pollUpdate === 'function') pollUpdate();
         })
-        .catch(function () { toast('请求失败', 'error'); });
+        .catch(function (err) { toast('升级启动失败：' + ((err && err.message) || '请求失败'), 'error', 6000); });
     });
   })();
 
@@ -4980,7 +4980,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
           }
           if (typeof pollUpdate === 'function') pollUpdate();
         })
-        .catch(function () { toast('请求失败（服务可能正在重启）', 'error', 6000); });
+        .catch(function (err) { toast('回滚失败：' + ((err && err.message) || '请求失败（服务可能正在重启）'), 'error', 6000); });
     });
 
     load();
@@ -5182,8 +5182,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         } else {
           setFieldError('profile-pwd', 'err-profile-pwd', (r && r.error) || '保存失败');
         }
-      }).catch(function () {
-        setFieldError('profile-pwd', 'err-profile-pwd', '请求失败，请检查服务状态');
+      }).catch(function (err) {
+        setFieldError('profile-pwd', 'err-profile-pwd', (err && err.message) || '请求失败，请检查服务状态');
       }).then(function () { credBtn.disabled = false; });
     });
     loadProfiles();
