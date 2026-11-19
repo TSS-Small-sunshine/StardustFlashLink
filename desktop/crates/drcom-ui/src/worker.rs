@@ -180,6 +180,16 @@ pub fn spawn_update_install(
     spawn_once(crate::model::install_update, on_done);
 }
 
+/// 后台跑一次「版本回滚」（M4 收尾）：会把备份换回安装目录 → 成功后主线程重启 ✓。
+///
+/// 和安装一样会写安装目录（备份 → 校验 → 换文件），所以也必须在后台线程跑 ✓。
+pub fn spawn_rollback(
+    version: String,
+    on_done: impl FnOnce(Result<crate::model::RollbackDone, String>) + Send + 'static,
+) {
+    spawn_once(move || crate::model::rollback_to(&version), on_done);
+}
+
 /// 线程主体 ✓。
 fn run_loop(state: Arc<Mutex<WorkerState>>, stop: Arc<AtomicBool>) {
     let mut watcher = netwatch::Watcher::new();

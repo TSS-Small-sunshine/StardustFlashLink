@@ -427,18 +427,25 @@ pub fn install_update_with<H: HttpGet + HttpDownload>(
         }
         let zip_bytes =
             std::fs::read(&dest).map_err(|error| format!("读下载文件失败：{}", error))?;
-        let backup_root = update_apply::default_backup_root(installed_exe);
-        let outcome = update_apply::install_zip(
-            installed_exe,
+        let install_dir = installed_exe
+            .parent()
+            .ok_or_else(|| "本程序没有所在目录 —— 无法判断安装目录".to_string())?;
+        let backup_root = install_dir.join(update_apply::BACKUP_DIR_NAME);
+        let outcome = update_apply::install_zip_into_dir(
+            install_dir,
             &zip_bytes,
             &backup_root,
             &current.to_string_full(),
             Some(&release.version.to_string_full()),
             false,
         )?;
+        // 重启目标是 **GUI 优先**（装完之后要拉起的是界面程序 ✓）
+        let new_exe = outcome
+            .restart_target()
+            .ok_or_else(|| "内部错误：没有可重启的程序".to_string())?;
         Ok(InstalledUpdate {
             version: release.version.to_string_full(),
-            new_exe: outcome.plan.installed_exe.clone(),
+            new_exe,
             warnings: outcome.warnings.clone(),
         })
     })();
@@ -454,6 +461,148 @@ pub fn install_update() -> Result<InstalledUpdate, String> {
     let installed = std::env::current_exe()
         .map_err(|error| format!("拿不到本程序路径：{}", error))?;
     install_update_with(&CurlHttp, &installed)
+}
+
+// ── M4 收尾：「版本回滚」入口（列出备份 → 确认 → 恢复全部程序 ✓）──────────────
+
+/// 「版本回滚」列表里的一行 ✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackEntry {
+    pub version: String,
+    pub label: String,
+}
+
+/// 「版本回滚」区块要显示的东西 ✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackView {
+    pub available: bool,
+    pub line: String,
+    pub entries: Vec<RollbackEntry>,
+}
+
+/// 安装目录 = 本程序所在目录 ✓（便携版口径，与 CLI 一致 ✓）。
+fn current_install_dir() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|error| format!("拿不到本程序路径：{}", error))?;
+    exe.parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "本程序没有所在目录 —— 无法判断安装目录".to_string())
+}
+
+/// 程序文件 → 界面上的短名 ✓（纯函数，好测 ✓）。
+pub fn program_label(name: &str) -> String {
+    if name == update_apply::expected_exe_name() {
+        "界面".to_string()
+    } else if name == update_apply::cli_exe_name() {
+        "命令行".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// **纯函数**：备份列表 → 界面要显示的行与选项 ✓（只读，单测离线可跑 ✓）。
+pub fn rollback_view_of(backup_root: &std::path::Path) -> RollbackView {
+    let versions = update_apply::backup_versions(backup_root);
+    if versions.is_empty() {
+        return RollbackView {
+            available: false,
+            line: "还没有可回滚的版本（更新过一次之后会留备份）".to_string(),
+            entries: Vec::new(),
+        };
+    }
+    let total = versions.len();
+    let entries: Vec<RollbackEntry> = versions
+        .into_iter()
+        .take(3)
+        .map(|(version, files)| {
+            let names: Vec<String> = files.iter().map(|(name, _)| program_label(name)).collect();
+            RollbackEntry {
+                version: version.clone(),
+                label: format!("{}（{}）", version, names.join(" + ")),
+            }
+        })
+        .collect();
+    let line = if total > entries.len() {
+        format!(
+            "可回滚 {} 个版本（只列最新 {} 个；备份在安装目录的 backup/ 里 ✓）",
+            total,
+            entries.len()
+        )
+    } else {
+        format!("可回滚 {} 个版本（备份在安装目录的 backup/ 里 ✓）", total)
+    };
+    RollbackView {
+        available: true,
+        line,
+        entries,
+    }
+}
+
+/// 界面读一次回滚状态 ✓（安装目录取当前程序所在目录 ✓）。
+pub fn rollback_view() -> RollbackView {
+    match current_install_dir() {
+        Ok(dir) => rollback_view_of(&dir.join(update_apply::BACKUP_DIR_NAME)),
+        Err(error) => RollbackView {
+            available: false,
+            line: error,
+            entries: Vec::new(),
+        },
+    }
+}
+
+/// 回滚完成的结果：给界面一行文案 + 要不要重启（重启哪个程序）✓。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackDone {
+    pub line: String,
+    pub restart: Option<std::path::PathBuf>,
+}
+
+/// **可注入安装目录**的回滚入口（单测用临时目录 → 完全离线 ✓）。
+///
+/// 流程全部复用 core（R7：界面不做判断 ✓）：plan_rollback_all → rollback_programs。
+pub fn rollback_to_in(dir: &std::path::Path, version: &str) -> Result<RollbackDone, String> {
+    let backup_root = dir.join(update_apply::BACKUP_DIR_NAME);
+    let plan = update_apply::plan_rollback_all(dir, &backup_root, Some(version))?;
+    let outcome = update_apply::rollback_programs(&plan, false)?;
+    // 被换下来的新程序清一次（删不掉不是错误 ✓）
+    for exe in &outcome.new_exes {
+        if let Some(parent) = exe.parent() {
+            let name = exe
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            for warning in update_apply::cleanup_stale_files(parent, &name) {
+                eprintln!("[回滚] {}", warning);
+            }
+        }
+    }
+    let names: Vec<String> = outcome
+        .new_exes
+        .iter()
+        .map(|exe| {
+            exe.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    let mut line = format!(
+        "已回滚到 {}（{} 个程序：{}）—— 正在重启…",
+        outcome.version,
+        names.len(),
+        names.join(" + ")
+    );
+    if !plan.notes.is_empty() {
+        line.push_str(&format!("；{} 条说明（见终端日志）", plan.notes.len()));
+    }
+    Ok(RollbackDone {
+        line,
+        restart: outcome.restart_target(),
+    })
+}
+
+/// 真正的回滚入口：**只被 worker 的后台线程调用** ✓（会写安装目录 ✓）。
+pub fn rollback_to(version: &str) -> Result<RollbackDone, String> {
+    let dir = current_install_dir()?;
+    rollback_to_in(&dir, version)
 }
 
 
@@ -1352,6 +1501,21 @@ mod tests {
         .unwrap()
     }
 
+    /// 造一个同时带 GUI 与 CLI 的「本项目 archive 包」：staging/README.txt + 两个 exe ✓。
+    fn ui_multi_package_zip(files: &[(&str, &[u8])], version: &str) -> Vec<u8> {
+        use drcom_core::zipwriter;
+        let readme = format!("星尘闪连 {} · 预览版（test-target）\n", version);
+        let names: Vec<String> = files.iter().map(|(name, _)| format!("staging/{}", name)).collect();
+        let mut entries: Vec<zipwriter::ZipEntry> = vec![zipwriter::ZipEntry {
+            name: "staging/README.txt",
+            data: readme.as_bytes(),
+        }];
+        for (index, (_, data)) in files.iter().enumerate() {
+            entries.push(zipwriter::ZipEntry { name: names[index].as_str(), data });
+        }
+        zipwriter::build(&entries, std::time::UNIX_EPOCH).unwrap()
+    }
+
     /// 一条「比当前新」的 release JSON（资产名按 CI 约定拼，本机平台一定能挑中 ✓）。
     fn release_body_with(asset_name: &str, size: u64, digest: &str) -> String {
         format!(
@@ -1426,6 +1590,108 @@ mod tests {
         let (kind, text) = format_install_result(&Err(err));
         assert_eq!(kind, "danger");
         assert!(!text.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_update_replaces_gui_and_cli_together_offline() {
+        let dir = ui_temp_dir("install-multi");
+        let gui_name = update_apply::expected_exe_name();
+        let cli_name = update_apply::cli_exe_name();
+        let gui = dir.join(gui_name);
+        let cli = dir.join(cli_name);
+        std::fs::write(&gui, ui_fake_exe(b"OLD-GUI")).unwrap();
+        std::fs::write(&cli, ui_fake_exe(b"OLD-CLI")).unwrap();
+        let zip = ui_multi_package_zip(
+            &[
+                (gui_name, &ui_fake_exe(b"NEW-GUI")),
+                (cli_name, &ui_fake_exe(b"NEW-CLI")),
+            ],
+            "9.9.9.9",
+        );
+        let digest = drcom_core::checksum::sha256_hex(&zip);
+        let asset_name =
+            format!("stardust-flash-link-9.9.9.9-{}.zip", drcom_core::platform::target_label());
+        let body = release_body_with(&asset_name, zip.len() as u64, &digest);
+        let http = FakeUpdateHttp::with_download(&body, &zip);
+
+        let report = install_update_with(&http, &gui).expect("离线安装必须成功");
+        assert_eq!(report.version, "9.9.9.9");
+        assert_eq!(report.new_exe, gui, "重启目标必须优先 GUI ✓");
+        assert_eq!(std::fs::read(&gui).unwrap(), ui_fake_exe(b"NEW-GUI"));
+        assert_eq!(
+            std::fs::read(&cli).unwrap(),
+            ui_fake_exe(b"NEW-CLI"),
+            "同目录的 CLI 也要一起换（不许一旧一新 ✗）"
+        );
+        let backup = dir
+            .join(update_apply::BACKUP_DIR_NAME)
+            .join(drcom_core::app_version_string());
+        assert_eq!(std::fs::read(backup.join(gui_name)).unwrap(), ui_fake_exe(b"OLD-GUI"));
+        assert_eq!(std::fs::read(backup.join(cli_name)).unwrap(), ui_fake_exe(b"OLD-CLI"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_view_lists_backups_newest_first_with_program_labels() {
+        let dir = ui_temp_dir("rollback-view");
+        let backup_root = dir.join(update_apply::BACKUP_DIR_NAME);
+        let older = backup_root.join("3.0.0.0-preview.2");
+        std::fs::create_dir_all(&older).unwrap();
+        for name in [update_apply::expected_exe_name(), update_apply::cli_exe_name()] {
+            std::fs::write(older.join(name), ui_fake_exe(b"OLD")).unwrap();
+        }
+        let newer = backup_root.join("3.0.0.0-preview.3");
+        std::fs::create_dir_all(&newer).unwrap();
+        std::fs::write(newer.join(update_apply::expected_exe_name()), ui_fake_exe(b"NEW")).unwrap();
+
+        let view = rollback_view_of(&backup_root);
+        assert!(view.available);
+        assert_eq!(view.entries.len(), 2);
+        assert_eq!(view.entries[0].version, "3.0.0.0-preview.3", "新的必须在前 ✓");
+        assert!(view.entries[0].label.contains("界面"), "{}", view.entries[0].label);
+        assert!(
+            view.entries[1].label.contains("界面") && view.entries[1].label.contains("命令行"),
+            "两个程序都要在标签里: {}",
+            view.entries[1].label
+        );
+        // 空备份目录 → 不可用 + 一句说明（不给死按钮 ✓）
+        let empty = rollback_view_of(&dir.join("no-backup"));
+        assert!(!empty.available);
+        assert!(empty.entries.is_empty());
+        assert!(!empty.line.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_to_in_restores_gui_and_cli_offline() {
+        let dir = ui_temp_dir("rollback-run");
+        let gui_name = update_apply::expected_exe_name();
+        let cli_name = update_apply::cli_exe_name();
+        let gui = dir.join(gui_name);
+        let cli = dir.join(cli_name);
+        std::fs::write(&gui, ui_fake_exe(b"CURRENT-GUI")).unwrap();
+        std::fs::write(&cli, ui_fake_exe(b"CURRENT-CLI")).unwrap();
+        let backup_dir = dir
+            .join(update_apply::BACKUP_DIR_NAME)
+            .join("3.0.0.0-preview.2");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        std::fs::write(backup_dir.join(gui_name), ui_fake_exe(b"OLD-GUI")).unwrap();
+        std::fs::write(backup_dir.join(cli_name), ui_fake_exe(b"OLD-CLI")).unwrap();
+
+        let done = rollback_to_in(&dir, "3.0.0.0-preview.2").expect("离线回滚必须成功");
+        assert_eq!(done.restart, Some(gui.clone()), "回滚后要重启 GUI ✓");
+        assert!(done.line.contains("3.0.0.0-preview.2"), "{}", done.line);
+        assert_eq!(std::fs::read(&gui).unwrap(), ui_fake_exe(b"OLD-GUI"));
+        assert_eq!(
+            std::fs::read(&cli).unwrap(),
+            ui_fake_exe(b"OLD-CLI"),
+            "CLI 也要一起回滚（不许一旧一新 ✗）"
+        );
+        // 不存在的版本 → 可读错误（不动盘 ✓）
+        let err = rollback_to_in(&dir, "9.9.9.9").unwrap_err();
+        assert!(err.contains("没有找到") || err.contains("update backups"), "{}", err);
+        assert_eq!(std::fs::read(&gui).unwrap(), ui_fake_exe(b"OLD-GUI"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

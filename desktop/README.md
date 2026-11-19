@@ -100,17 +100,25 @@ stardust-flash-link update check                      # 通道取配置 update_c
 stardust-flash-link update check --channel preview    # 临时看预览通道
 stardust-flash-link update download out.zip           # 检查 + 下载 + SHA256 校验（只下载，不安装 ✓）
 stardust-flash-link update apply out.zip --dry-run    # 预演替换：只打印计划，**不动任何文件** ✓
-stardust-flash-link update apply out.zip              # 自我替换：备份 → 换 exe → 拉起新程序（不联网 ✓）
+stardust-flash-link update apply out.zip              # 自我替换：备份 → 换文件 → 拉起新程序（不联网 ✓）
 stardust-flash-link update apply out.zip --no-restart # 只换文件，提示「重启后生效」✓
-stardust-flash-link update rollback                   # 回滚到**最新**备份
+stardust-flash-link update rollback                   # 回滚到**最新**备份（备份里有几个程序就恢复几个 ✓）
 stardust-flash-link update rollback --version 3.0.0.0-preview.2   # 回滚到指定版本
-stardust-flash-link update backups                    # 列出所有备份（backup/<版本>/<exe>）
+stardust-flash-link update backups                    # 列出所有备份（backup/<版本>/<程序名>，含每个版本备份了哪些程序）
 ```
 
 - **GUI（M4 第二块）**：主窗口「更新」一行 →「检查更新」发现新版本后出现「**下载并安装**」按钮
   （没更新时按钮不存在 = 不留死按钮 ✓）。点击后后台线程完成 下载 → SHA256 → 解包 → 备份 → 换 exe，
   然后自动重启（**先放单实例端口 → 拉起新程序 → 旧进程退出** ✓，顺序反了新的自己会被当成第二个实例踢回来 ✗）；
   失败给可读中文错误、按钮可重试 ✓。启动时还会清一次上次更新留下的 `.old-*` / `.incoming-*` ✓。
+  「**回滚**」一行：安装目录里有 `backup/<版本>/` 时才出现（没有备份就不显示 = 不留死按钮 ✓），
+  列出最新 3 个版本（标签带「界面 / 命令行」清单）；点版本只进入确认态，再点「确认回滚」才动盘，
+  成功后同样自动重启 ✓。
+- **同目录的程序一起换（M4 收尾）**：CI 的 zip 里同时有 GUI（`stardust-flash-link-app`）与 CLI
+  （`stardust-flash-link`）；安装 / 回滚按**安装目录**工作 —— 目录里原本有几个本项目程序就一起换几个，
+  **不会留下「GUI 是新版、CLI 还是旧版」的混合状态** ✗；也不凭空添加文件（只解压了 GUI 就只换 GUI ✓）。
+  多个文件是**全有或全无**：先全部备份并校验 → 全部复制到临时名 → 逐个 rename；任一失败把已换的全部换回去 ✓。
+  安装包必须同时带齐安装目录里的每个本项目程序 —— 只带一半的包整包拒绝（只换一半更糟 ✗）。
 - **自我替换怎么做的（Windows 关键前提）**：运行中的 exe **不能被删除 / 覆盖**，但**可以被改名** →
   ① 备份当前 exe 到 `backup/<当前版本>/<exe 名>`（并做 SHA-256 校验）→ ② 新 exe 复制到同目录临时名
   → ③ 旧 exe 改名 `<exe>.old-<pid>-<序号>` → ④ 新 exe 改名成正式名 → ⑤ 拉起新进程 → ⑥ 旧进程退出。
@@ -136,7 +144,8 @@ stardust-flash-link update backups                    # 列出所有备份（bac
   （Windows 上若吊销检查服务器被校园网挡住，会自动重试一次 `--ssl-no-revoke`，证书链与域名仍然校验 ✓。）
 - **已知限制**：GitHub API 匿名限流 **60 次/小时**（403 会提示「过一会儿再试」）；
   2.x 的 `*.exe` 资产不会被 3.0 认（前缀 / 平台标签都对不上 ✓）；
-  **Linux / macOS 的自我替换只有单测 + 交叉编译覆盖**，GUI 就地升级尚未真机验证 ✗。
+  **Linux / macOS 的自我替换只有单测 + 交叉编译覆盖**，GUI 就地升级尚未真机验证 ✗
+  （多程序替换 / 回滚同样是单测覆盖，Windows 真机验证待做）。
 - **预览版 Release**：由 CI 手动发布（Actions →「3.0 预览构建」→ Run workflow → 勾选 `publish_release`），
   产物是 prerelease `v3.0.0.0-preview.N`，资产名与 `pick_asset` 的匹配规则逐字对应 ✓；
   发布前需先把 `APP_CHANNEL_SEQ` +1（步骤见 `docs/VERSIONING.md` §4.6）。
@@ -208,7 +217,7 @@ crates/drcom-core/     平台无关核心（无 UI、无平台框架）
   platform.rs          数据/配置/日志目录、服务方式、便携模式判定
   net.rs               自写 HTTP（明文，零依赖）+ 系统 curl 的 HTTPS（更新用，见 CurlHttp）
   update.rs            自动更新第一块：解析 /releases、挑平台资产、有界下载 + SHA256 校验
-  update_apply.rs      自动更新第二块：自我替换 / 回滚（备份、rename 舞步、stale 清理、拉起新进程）
+  update_apply.rs      自动更新第二块 + M4 收尾：自我替换 / 回滚（多程序一起换、全有或全无、rename 舞步、stale 清理、拉起新进程）
   zipread.rs           只读 ZIP（zipwriter 的对偶）：只收 store、逐条 CRC + 路径白名单
 crates/drcom-cli/      无界面可执行（headless 优先：Linux 服务器/树莓派要它 ✓）
   main.rs              CLI 子命令（version/status/login/update/…）

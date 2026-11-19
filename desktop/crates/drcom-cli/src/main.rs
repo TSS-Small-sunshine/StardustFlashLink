@@ -97,9 +97,9 @@ fn print_help() {
          checksum [文件]             算 SHA-256（不给文件就算自己 ✓）—— 打包校验 / 升级凭据 ✓\n  \
          update check [--channel C]  检查更新（只检查/下载/校验，**不自我替换** ✓）\n  \
          update download <路径> [--channel C]   检查 + 下载 + SHA256 校验（失败会清理半成品 ✓）\n  \
-         update apply <安装包.zip> [--dry-run] [--no-restart]   用本地安装包自我替换（默认重启，不联网）\n  \
+         update apply <安装包.zip> [--dry-run] [--no-restart]   用本地安装包自我替换（同目录 GUI+CLI 一起换，默认重启，不联网）\n  \
          update rollback [--version V] [--dry-run]   回滚到备份版本（备份在 安装目录/backup/<版本>/）\n  \
-         update backups              列出所有备份版本\n  \
+         update backups              列出所有备份版本（含每个版本备份了哪些程序）\n  \
          package-files --out DIR [--target T] [--exe E] [--arch A]   写出该平台随包分发的说明文件\n  \
          archive --out F.zip DIR...  打包目录成 ZIP（用自带实现 ✓，不需要外部 zip/tar ✓）\n  \
          serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
@@ -623,12 +623,12 @@ fn print_update_help() {
         "  update download <目标路径> [--channel snapshot|preview|rc|release]   检查 + 下载 + SHA256 校验（不安装）"
     );
     println!(
-        "  update apply <安装包.zip> [--dry-run] [--no-restart] [--install-dir <目录>]\n    用本地安装包**自我替换**（先备份，失败自动回滚；默认替换完拉起新程序；不联网）"
+        "  update apply <安装包.zip> [--dry-run] [--no-restart] [--install-dir <目录>]\n    用本地安装包**自我替换**（同目录 GUI+CLI 一起换；先备份，失败自动回滚；默认替换完拉起新程序；不联网）"
     );
     println!(
-        "  update rollback [--version V] [--dry-run] [--no-restart] [--install-dir <目录>]\n    回滚到 backup/<版本>/ 里的备份（不给 --version 就取最新的备份）"
+        "  update rollback [--version V] [--dry-run] [--no-restart] [--install-dir <目录>]\n    回滚到 backup/<版本>/ 里的备份（备份里有几个程序就恢复几个；不给 --version 就取最新）"
     );
-    println!("  update backups [--install-dir <目录>]                 列出所有备份版本");
+    println!("  update backups [--install-dir <目录>]                 列出所有备份版本（含每个版本备份了哪些程序）");
     println!("提示: 安装目录默认 = 本程序所在目录；备份目录 = <安装目录>/backup/<版本>/");
 }
 
@@ -767,50 +767,53 @@ fn first_positional(args: &[String], value_flags: &[&str]) -> Option<String> {
     None
 }
 
-/// 要替换的程序：`--install-dir` 覆盖时从那个目录里找（GUI 优先，其次 CLI ✓）；
-/// 不给就用默认规则（安装目录里的 GUI，没有就当前 exe 自己 ✓）。
-fn resolve_apply_target(install_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
-    let Some(raw) = install_dir else {
-        return update_apply::default_installed_exe();
-    };
-    let dir = std::path::PathBuf::from(raw);
-    let gui = dir.join(update_apply::expected_exe_name());
-    if gui.is_file() {
-        return Ok(gui);
-    }
-    let cli = dir.join(update_apply::cli_exe_name());
-    if cli.is_file() {
-        return Ok(cli);
-    }
-    Err(format!(
-        "安装目录里没有可执行程序（{} 或 {}）—— 用 --install-dir 指对目录",
-        update_apply::expected_exe_name(),
-        update_apply::cli_exe_name()
-    ))
-}
-
-/// 备份根目录：给了安装目录就是 `<它>/backup`，否则跟着默认安装程序走 ✓。
-fn resolve_backup_root(install_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
+/// 安装目录：--install-dir 给了就用它；否则 = **本程序所在目录** ✓（便携版口径）。
+///
+/// 3.0 的安装目录就是「exe 放哪儿」，不是注册表里的路径 —— 所以不用去猜 ✓。
+fn resolve_install_dir(install_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
     match install_dir {
         Some(raw) => {
             let dir = std::path::PathBuf::from(raw);
             if !dir.is_dir() {
                 return Err(format!("安装目录不存在：{}", dir.display()));
             }
-            Ok(dir.join(update_apply::BACKUP_DIR_NAME))
+            Ok(dir)
         }
         None => {
-            let installed = update_apply::default_installed_exe()?;
-            Ok(update_apply::default_backup_root(&installed))
+            let exe = std::env::current_exe()
+                .map_err(|error| format!("拿不到本程序路径：{}", error))?;
+            exe.parent()
+                .map(std::path::Path::to_path_buf)
+                .ok_or_else(|| "本程序没有所在目录 —— 用 --install-dir 指对目录".to_string())
         }
     }
 }
 
-/// `update apply <zip>`：**本地安装包 → 校验 → 备份 → 替换**（不联网 ✓）。
+/// 备份根目录 = <安装目录>/backup ✓。
+fn resolve_backup_root(install_dir: Option<&str>) -> Result<std::path::PathBuf, String> {
+    Ok(resolve_install_dir(install_dir)?.join(update_apply::BACKUP_DIR_NAME))
+}
+
+/// 安装目录里至少要有一个本项目程序，否则说明目录指错了 ✓。
+fn require_programs(dir: &std::path::Path) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+    let programs = update_apply::installed_programs(dir);
+    if programs.is_empty() {
+        return Err(format!(
+            "安装目录里没有本项目的程序（{} / {}）—— 用 --install-dir 指对目录",
+            update_apply::expected_exe_name(),
+            update_apply::cli_exe_name()
+        ));
+    }
+    Ok(programs)
+}
+
+/// update apply <zip>：**本地安装包 → 校验 → 备份 → 一起替换**（不联网）。
+///
+/// 安装目录里的 GUI 与 CLI **一起换**（只换正在运行的那个会留下「一旧一新」✗）。
 fn update_apply_cmd(args: &[String]) -> i32 {
     let dry_run = has_flag(args, "--dry-run");
     let no_restart = has_flag(args, "--no-restart");
-    let install_dir = take_opt(args, "--install-dir");
+    let install_dir_arg = take_opt(args, "--install-dir");
     let Some(raw_zip) = first_positional(args, &["--install-dir"]) else {
         eprintln!("用法: update apply <安装包.zip> [--dry-run] [--no-restart] [--install-dir <目录>]");
         eprintln!("（安装包 = update download 下来的那个 ZIP；apply **不联网** ✓）");
@@ -840,14 +843,21 @@ fn update_apply_cmd(args: &[String]) -> i32 {
         );
         return 1;
     }
-    let installed = match resolve_apply_target(install_dir.as_deref()) {
-        Ok(path) => path,
+    let install_dir = match resolve_install_dir(install_dir_arg.as_deref()) {
+        Ok(dir) => dir,
         Err(error) => {
             eprintln!("{}", error);
             return 1;
         }
     };
-    let backup_root = update_apply::default_backup_root(&installed);
+    let programs = match require_programs(&install_dir) {
+        Ok(programs) => programs,
+        Err(error) => {
+            eprintln!("{}", error);
+            return 1;
+        }
+    };
+    let backup_root = install_dir.join(update_apply::BACKUP_DIR_NAME);
     let zip_bytes = match std::fs::read(&zip_path) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -858,13 +868,15 @@ fn update_apply_cmd(args: &[String]) -> i32 {
 
     println!("{} 自我替换（本地安装包，**不联网** ✓）", drcom_core::APP_NAME);
     println!("当前版本: {}", drcom_core::app_version_string());
-    println!("当前程序: {}", installed.display());
+    println!("安装目录: {}", install_dir.display());
+    let names: Vec<&str> = programs.iter().map(|(name, _)| name.as_str()).collect();
+    println!("要更新的程序: {}（{} 个）", names.join(" / "), names.len());
     println!("安装包: {}（{} 字节）", zip_path.display(), metadata.len());
     println!("备份目录: {}", backup_root.display());
 
     let current_version = drcom_core::app_version_string();
-    let outcome = match update_apply::install_zip(
-        &installed,
+    let outcome = match update_apply::install_zip_into_dir(
+        &install_dir,
         &zip_bytes,
         &backup_root,
         &current_version,
@@ -878,9 +890,16 @@ fn update_apply_cmd(args: &[String]) -> i32 {
         }
     };
     println!();
-    println!("{}替换计划:", if dry_run { "dry-run：" } else { "" });
-    for step in &outcome.plan.steps {
-        println!("  {}", step);
+    println!(
+        "{}替换计划（{} 个程序）:",
+        if dry_run { "dry-run：" } else { "" },
+        outcome.plans.len()
+    );
+    for plan in &outcome.plans {
+        println!("  · {}", plan.installed_exe.display());
+        for step in &plan.steps {
+            println!("    {}", step);
+        }
     }
     if dry_run {
         println!();
@@ -888,9 +907,14 @@ fn update_apply_cmd(args: &[String]) -> i32 {
         return 0;
     }
     println!();
-    println!("已安装 {} ✓", outcome.target_version);
-    println!("新程序: {}", outcome.plan.installed_exe.display());
-    println!("备份: {}", outcome.plan.backup_exe.display());
+    println!("已安装 {} ✓（{} 个程序）", outcome.target_version, outcome.plans.len());
+    for plan in &outcome.plans {
+        println!(
+            "  {}（备份 {}）",
+            plan.installed_exe.display(),
+            plan.backup_exe.display()
+        );
+    }
     for warning in &outcome.warnings {
         println!("提示: {}", warning);
     }
@@ -898,7 +922,11 @@ fn update_apply_cmd(args: &[String]) -> i32 {
         println!("按 --no-restart：没有自动重启 —— **重启程序后生效** ✓");
         return 0;
     }
-    match update_apply::restart_detached(&outcome.plan.installed_exe) {
+    let Some(target) = outcome.restart_target() else {
+        eprintln!("内部错误：没有可重启的程序");
+        return 1;
+    };
+    match update_apply::restart_detached(&target) {
         Ok(()) => {
             println!("已拉起新程序 ✓（本进程即将退出）");
             0
@@ -910,11 +938,11 @@ fn update_apply_cmd(args: &[String]) -> i32 {
     }
 }
 
-/// `update rollback`：从备份把程序换回去（`--dry-run` 只打印计划 ✓）。
+/// update rollback：从备份把**全部程序**换回去（--dry-run 只打印计划）。
 fn update_rollback_cmd(args: &[String]) -> i32 {
     let dry_run = has_flag(args, "--dry-run");
     let no_restart = has_flag(args, "--no-restart");
-    let install_dir = take_opt(args, "--install-dir");
+    let install_dir_arg = take_opt(args, "--install-dir");
     let version = take_opt(args, "--version");
     if let Some(stray) = first_positional(args, &["--install-dir", "--version"]) {
         eprintln!(
@@ -923,16 +951,16 @@ fn update_rollback_cmd(args: &[String]) -> i32 {
         );
         return 2;
     }
-    let installed = match resolve_apply_target(install_dir.as_deref()) {
-        Ok(path) => path,
+    let install_dir = match resolve_install_dir(install_dir_arg.as_deref()) {
+        Ok(dir) => dir,
         Err(error) => {
             eprintln!("{}", error);
             return 1;
         }
     };
-    let backup_root = update_apply::default_backup_root(&installed);
-    let backups = update_apply::list_backups(&backup_root);
-    if backups.is_empty() {
+    let backup_root = install_dir.join(update_apply::BACKUP_DIR_NAME);
+    let versions = update_apply::backup_versions(&backup_root);
+    if versions.is_empty() {
         eprintln!(
             "还没有任何备份（{}）—— 只有做过一次 update apply 之后才有可回滚的版本",
             backup_root.display()
@@ -940,13 +968,19 @@ fn update_rollback_cmd(args: &[String]) -> i32 {
         return 1;
     }
     println!("{} 回滚", drcom_core::APP_NAME);
-    println!("当前程序: {}", installed.display());
+    println!("安装目录: {}", install_dir.display());
     println!("备份目录: {}", backup_root.display());
     println!("可用备份:");
-    for (backup_version, path) in &backups {
-        println!("  {}  {}", backup_version, path.display());
+    for (backup_version, files) in &versions {
+        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+        println!(
+            "  {}  （{} 个程序：{}）",
+            backup_version,
+            names.len(),
+            names.join(" / ")
+        );
     }
-    let plan = match update_apply::plan_rollback(&installed, &backup_root, version.as_deref()) {
+    let plan = match update_apply::plan_rollback_all(&install_dir, &backup_root, version.as_deref()) {
         Ok(plan) => plan,
         Err(error) => {
             eprintln!("{}", error);
@@ -954,16 +988,23 @@ fn update_rollback_cmd(args: &[String]) -> i32 {
         }
     };
     println!();
-    println!("{}回滚计划（目标版本 {}）:", if dry_run { "dry-run：" } else { "" }, plan.version);
+    println!(
+        "{}回滚计划（目标版本 {}）:",
+        if dry_run { "dry-run：" } else { "" },
+        plan.version
+    );
     for step in &plan.steps {
         println!("  {}", step);
+    }
+    for note in &plan.notes {
+        println!("  说明: {}", note);
     }
     if dry_run {
         println!();
         println!("dry-run：以上只是计划，**没有改动任何文件** ✓");
         return 0;
     }
-    let outcome = match update_apply::rollback_plan(&plan, false) {
+    let outcome = match update_apply::rollback_programs(&plan, false) {
         Ok(outcome) => outcome,
         Err(error) => {
             eprintln!("{}", error);
@@ -971,18 +1012,30 @@ fn update_rollback_cmd(args: &[String]) -> i32 {
         }
     };
     println!();
-    println!("已回滚到 {} ✓", plan.version);
-    println!("备份来源: {}", outcome.restored_from.display());
-    if let Some(dir) = installed.parent() {
-        for warning in update_apply::cleanup_stale_files(dir, &update_apply::expected_exe_name()) {
-            println!("提示: {}", warning);
+    println!("已回滚到 {} ✓（{} 个程序）", outcome.version, outcome.new_exes.len());
+    for (exe, from) in outcome.new_exes.iter().zip(outcome.restored_from.iter()) {
+        println!("  {}（来自 {}）", exe.display(), from.display());
+    }
+    for exe in &outcome.new_exes {
+        if let Some(dir) = exe.parent() {
+            let name = exe
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            for warning in update_apply::cleanup_stale_files(dir, &name) {
+                println!("提示: {}", warning);
+            }
         }
     }
     if no_restart {
         println!("按 --no-restart：没有自动重启 —— **重启程序后生效** ✓");
         return 0;
     }
-    match update_apply::restart_detached(&outcome.new_exe) {
+    let Some(target) = outcome.restart_target() else {
+        eprintln!("内部错误：没有可重启的程序");
+        return 1;
+    };
+    match update_apply::restart_detached(&target) {
         Ok(()) => {
             println!("已拉起回滚后的程序 ✓（本进程即将退出）");
             0
@@ -994,14 +1047,17 @@ fn update_rollback_cmd(args: &[String]) -> i32 {
     }
 }
 
-/// `update backups`：列出备份（只读 ✓）。
+/// update backups：列出备份（只读；每个版本带上备份了哪些程序）。
 fn update_backups_cmd(args: &[String]) -> i32 {
-    let install_dir = take_opt(args, "--install-dir");
+    let install_dir_arg = take_opt(args, "--install-dir");
     if let Some(stray) = first_positional(args, &["--install-dir"]) {
-        eprintln!("不认识的参数：{}（用法：update backups [--install-dir <目录>]）", stray);
+        eprintln!(
+            "不认识的参数：{}（用法：update backups [--install-dir <目录>]）",
+            stray
+        );
         return 2;
     }
-    let backup_root = match resolve_backup_root(install_dir.as_deref()) {
+    let backup_root = match resolve_backup_root(install_dir_arg.as_deref()) {
         Ok(root) => root,
         Err(error) => {
             eprintln!("{}", error);
@@ -1010,19 +1066,17 @@ fn update_backups_cmd(args: &[String]) -> i32 {
     };
     println!("{} 备份列表", drcom_core::APP_NAME);
     println!("备份目录: {}", backup_root.display());
-    let backups = update_apply::list_backups(&backup_root);
-    if backups.is_empty() {
+    let versions = update_apply::backup_versions(&backup_root);
+    if versions.is_empty() {
         println!("还没有备份 —— 每次 update apply 都会自动备份一份 ✓");
         return 0;
     }
-    for (version, path) in &backups {
-        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-        println!(
-            "  {}  {} 字节  {}",
-            version,
-            size,
-            path.display()
-        );
+    for (version, files) in &versions {
+        println!("  {}", version);
+        for (name, path) in files {
+            let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            println!("    {}  {} 字节  {}", name, size, path.display());
+        }
     }
     println!("回滚：update rollback --version <版本>（不给 --version 就取最新的 ✓）");
     0
@@ -1879,6 +1933,21 @@ mod tests {
         .unwrap()
     }
 
+    /// 造一个同时带 GUI 与 CLI 的安装包（每个文件都在 staging/ 下 ✓）。
+    fn cli_multi_package_zip(files: &[(&str, &[u8])], version: &str) -> Vec<u8> {
+        use drcom_core::zipwriter;
+        let readme = format!("星尘闪连 {} · 预览版（test-target）\n", version);
+        let names: Vec<String> = files.iter().map(|(name, _)| format!("staging/{}", name)).collect();
+        let mut entries: Vec<zipwriter::ZipEntry> = vec![zipwriter::ZipEntry {
+            name: "staging/README.txt",
+            data: readme.as_bytes(),
+        }];
+        for (index, (_, data)) in files.iter().enumerate() {
+            entries.push(zipwriter::ZipEntry { name: names[index].as_str(), data });
+        }
+        zipwriter::build(&entries, std::time::UNIX_EPOCH).unwrap()
+    }
+
     fn args_of(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -1994,6 +2063,63 @@ mod tests {
         // ④ 备份列表在空目录里也是 0（空列表不是错误 ✓）
         assert_eq!(update_backups_cmd(&args_of(&["--install-dir", &dir_arg])), 0);
         assert_eq!(std::fs::read(&installed).unwrap(), cli_fake_exe(b"OLD"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_apply_replaces_gui_and_cli_together_and_rolls_both_back() {
+        let dir = cli_temp_dir("apply-multi");
+        let gui_name = update_apply::expected_exe_name();
+        let cli_name = update_apply::cli_exe_name();
+        std::fs::write(dir.join(gui_name), cli_fake_exe(b"OLD-GUI")).unwrap();
+        std::fs::write(dir.join(cli_name), cli_fake_exe(b"OLD-CLI")).unwrap();
+        let zip_path = dir.join("pkg-multi.zip");
+        std::fs::write(
+            &zip_path,
+            cli_multi_package_zip(
+                &[
+                    (gui_name, &cli_fake_exe(b"NEW-GUI")),
+                    (cli_name, &cli_fake_exe(b"NEW-CLI")),
+                ],
+                "3.0.0.0-preview.99",
+            ),
+        )
+        .unwrap();
+        let dir_arg = dir.display().to_string();
+        let zip_arg = zip_path.display().to_string();
+
+        // ① dry-run 不许动盘 ✓
+        assert_eq!(
+            update_apply_cmd(&args_of(&[&zip_arg, "--dry-run", "--install-dir", &dir_arg])),
+            0
+        );
+        assert_eq!(std::fs::read(dir.join(gui_name)).unwrap(), cli_fake_exe(b"OLD-GUI"));
+        assert!(!dir.join("backup").exists());
+
+        // ② 真装：两个程序**一起**换（不许一旧一新 ✗）✓
+        assert_eq!(
+            update_apply_cmd(&args_of(&[&zip_arg, "--no-restart", "--install-dir", &dir_arg])),
+            0
+        );
+        assert_eq!(std::fs::read(dir.join(gui_name)).unwrap(), cli_fake_exe(b"NEW-GUI"));
+        assert_eq!(
+            std::fs::read(dir.join(cli_name)).unwrap(),
+            cli_fake_exe(b"NEW-CLI"),
+            "CLI 也要跟着换 ✓"
+        );
+        let backup = dir
+            .join(update_apply::BACKUP_DIR_NAME)
+            .join(drcom_core::app_version_string());
+        assert_eq!(std::fs::read(backup.join(gui_name)).unwrap(), cli_fake_exe(b"OLD-GUI"));
+        assert_eq!(std::fs::read(backup.join(cli_name)).unwrap(), cli_fake_exe(b"OLD-CLI"));
+
+        // ③ 回滚：两个程序一起回来 ✓
+        assert_eq!(
+            update_rollback_cmd(&args_of(&["--no-restart", "--install-dir", &dir_arg])),
+            0
+        );
+        assert_eq!(std::fs::read(dir.join(gui_name)).unwrap(), cli_fake_exe(b"OLD-GUI"));
+        assert_eq!(std::fs::read(dir.join(cli_name)).unwrap(), cli_fake_exe(b"OLD-CLI"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
