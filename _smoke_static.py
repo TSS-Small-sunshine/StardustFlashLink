@@ -4652,7 +4652,8 @@ check("维护 v2.1.3.11：门户参数字段形状不合法 → 一律丢弃（�
       repr(_bad_pp))
 check("维护 v2.1.3.11：run_once 在未认证时先 discover_portal_params 再登录（AC 参数来源）",
       "portal = discover_portal_params(host)" in _proto_src
-      and "wlan_ac_name=portal.get(\"ac_name\", \"\")" in _proto_src,
+      and "wlan_ac_ip=ac_ip, wlan_ac_name=ac_name" in _proto_src
+      and "login(host, account, suffix, pwd, wlan_ip, wlan_mac," in _proto_src,
       "protocol 源断言")
 
 
@@ -4738,6 +4739,92 @@ check("维护 v2.1.3.11：启动钩子按「刚升级 OR 用户点过重启」�
 check("维护 v2.1.3.11：web_api 调度重启时写托盘拉起标记（否则重启后托盘又不见了）",
       "RESTART_TRAY_MARKER_NAME" in src_web and ".tray_relaunch_requested" in src_web,
       "重启标记断言")
+
+
+# ============================================================
+# v2.1.3.12：门户 AC 参数的「自动分析」做得更可观测、更兜底
+#   学校里有多个版本的 AC，门户吐参数的方式不止一种：
+#     ① 302 Location 的 query；② 200 页面里的 JS 变量（var wlanacip='...'）；
+#     ③ 探针域名被拦（某个探测地址 302 不出来）——所以探测地址扩到 5 个；
+#   找不到时要能在日志里看出来（而不是只有一个「AC认证失败」），并支持 config.json 手动兜底。
+# ============================================================
+_js_portal = ("<script>var wlanacip='172.16.80.9';"
+              " wlanacname=\"AC-JS-Version\"; wlanuserip='10.1.2.3';"
+              " mac='98bd8006f234'; ssid='Dorm-WiFi';</script>")
+_pp_js = _pl._portal_param_from_text(_js_portal)
+check("维护 v2.1.3.12：门户把参数写进页面 JS 变量时也能解析（不同版本 AC 的形态之一）",
+      (_pp_js["ac_ip"], _pp_js["ac_name"], _pp_js["user_ip"], _pp_js["user_mac"], _pp_js["ssid"])
+      == ("172.16.80.9", "AC-JS-Version", "10.1.2.3", "98BD8006F234", "Dorm-WiFi"),
+      repr(_pp_js))
+check("维护 v2.1.3.12：门户探测地址扩到 5 个（macOS / Firefox / Apple / 9.9.9.9 都试一遍，防某域名被拦）",
+      len(_pl.PORTAL_PROBE_URLS) >= 5
+      and any("msftconnecttest" in u for u in _pl.PORTAL_PROBE_URLS)
+      and any("apple" in u for u in _pl.PORTAL_PROBE_URLS)
+      and any("firefox" in u for u in _pl.PORTAL_PROBE_URLS),
+      repr(_pl.PORTAL_PROBE_URLS))
+check("维护 v2.1.3.12：发现 / 未发现门户参数都写一行日志（排障时能区分「没发现参数」和「参数不对」）",
+      "门户参数发现（来源=" in _proto_src and "门户参数未发现" in _proto_src
+      and "wlanacip=%s wlanacname=%s" in _proto_src,
+      "日志断言")
+check("维护 v2.1.3.12：config.json 支持手动兜底 wlan_ac_ip / wlan_ac_name（探测不到时用）",
+      "wlan_ac_ip" in _proto_src and "wlan_ac_name" in _proto_src
+      and 'cfg.get("wlan_ac_ip")' in _proto_src,
+      "手动兜底断言")
+check("维护 v2.1.3.12：DEFAULT_CONFIG 带上两个可选键（默认空 = 自动发现；校验不因多键而失败）",
+      "wlan_ac_ip" in svc.DEFAULT_CONFIG and "wlan_ac_name" in svc.DEFAULT_CONFIG
+      and svc._validate_config(dict(svc.DEFAULT_CONFIG)) == [],
+      repr({k: svc.DEFAULT_CONFIG.get(k) for k in ("wlan_ac_ip", "wlan_ac_name")}))
+
+
+# ============================================================
+# v2.1.3.12：README 文档自检（用户反馈「README 的链接有点怪异」）
+#   根因：GitHub 生成标题锚点时会**去掉 emoji 但保留空格**，`## 📸 截图` 的锚点是
+#   `#-截图`（带前导减号），而目录里写的是 `#截图` → 5 个链接点了没反应 ✗。
+#   另外版本记录表格里有一处行内代码 `% ! ^ & | < >` 的裸 `|` 把表格撑多一列。
+# ============================================================
+def _readme_slug(heading):
+    """GitHub 风格的标题锚点（去 emoji/标点、空格转 '-'、小写）✓。"""
+    cleaned = "".join(ch for ch in heading.strip().lower()
+                      if ch.isalnum() or ch in " _-")
+    return re.sub(r"\s+", "-", cleaned)
+
+
+def _unescaped_pipe_count(line):
+    count = 0
+    for index, char in enumerate(line):
+        if char == "|" and (index == 0 or line[index - 1] != "\\"):
+            count += 1
+    return count
+
+
+_readme_lines = pathlib.Path("README.md").read_text(encoding="utf-8").splitlines()
+_readme_anchors = {}
+for _line in _readme_lines:
+    _hm = re.match(r"^(#{1,6})\s+(.*)$", _line)
+    if _hm:
+        _readme_anchors[_readme_slug(_hm.group(2))] = True
+_broken_readme_links = []
+for _idx, _line in enumerate(_readme_lines):
+    for _anchor in (re.findall(r"\]\(#([^)\s]+)\)", _line)
+                   + re.findall(r'href="#([^"]+)"', _line)):
+        if _anchor not in _readme_anchors:
+            _broken_readme_links.append((_idx + 1, _anchor))
+check("维护 v2.1.3.12：README 所有内部锚点链接都能落到标题上（emoji 标题会生成带 '-' 的锚点 ✗）",
+      not _broken_readme_links, repr(_broken_readme_links[:5]))
+_bad_readme_tables = []
+_idx = 0
+while _idx < len(_readme_lines):
+    if not _readme_lines[_idx].strip().startswith("|"):
+        _idx += 1
+        continue
+    _expected = _unescaped_pipe_count(_readme_lines[_idx])
+    while _idx < len(_readme_lines) and _readme_lines[_idx].strip().startswith("|"):
+        _got = _unescaped_pipe_count(_readme_lines[_idx])
+        if _got != _expected:
+            _bad_readme_tables.append((_idx + 1, _got, _expected))
+        _idx += 1
+check("维护 v2.1.3.12：README 表格每行的列数一致（行内代码里的裸 | 会把表格撑破 ✗）",
+      not _bad_readme_tables, repr(_bad_readme_tables[:5]))
 
 
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
@@ -4828,7 +4915,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.11", version.VERSION == "2.1.3.11", version.VERSION)
+check("版本 = 2.1.3.12", version.VERSION == "2.1.3.12", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

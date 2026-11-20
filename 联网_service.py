@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.11）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.12）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -78,6 +78,12 @@ DEFAULT_CONFIG = {
     "auto_update_enabled": False,
     "update_check_interval_hours": 6,
     "update_min_free_disk_mb": 200,
+    # —— 门户 AC 参数（v2.1.3.12：可选手动兜底）——
+    # 一般留空 = 登录前自动从门户跳转（302 的 Location / 页面 JS）里发现 wlanacip / wlanacname ✓；
+    # 万一某版本 AC 的门户探测被拦（日志「门户参数未发现」），可按门户跳转 URL 手动填这两个键
+    # （值分别抄 URL 里的 wlanacip= 与 wlanacname=；手改 config.json 即可，Web UI 保存不会清掉）✓
+    "wlan_ac_ip": "",
+    "wlan_ac_name": "",
 }
 
 ALLOWED_SUFFIXES = ("", "@yd", "@dx", "@lt")
