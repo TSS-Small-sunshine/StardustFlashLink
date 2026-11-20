@@ -256,6 +256,8 @@ def discover_network(host):
 PORTAL_PROBE_URLS = (
     "http://www.msftconnecttest.com/redirect",
     "http://connectivitycheck.gstatic.com/generate_204",
+    "http://captive.apple.com/hotspot-detect.html",
+    "http://detectportal.firefox.com/success.txt",
     "http://9.9.9.9/",
 )
 
@@ -265,9 +267,24 @@ _MAC_RE = re.compile(r"[0-9A-F]{12}")
 
 
 def _grab_query_value(text, name):
-    """从文本里的 query 串抓一个参数（前后都要求 & / ? 边界，避免子串误命中）。"""
-    m = re.search(r"(?i)[?&]" + re.escape(name) + r"=([^&\s\"'<>]+)", text or "")
-    return urllib.parse.unquote(m.group(1)) if m else ""
+    """从文本里的 query / JS 赋值 / JSON 片段抓一个参数（值形状由调用方再校验）✓。
+
+    v2.1.3.12：不同版本的 AC 门户吐参数的方式不一样 —— 有的放在 302 的 Location query 里，
+    有的只给 200 页面、把参数写进 JS 变量（`var wlanacip='...'` / `"wlanacname":"..."`）。
+    这里三种形态都认；抓到的值仍要过 _safe_ip / 白名单，误命中的脏串会被丢弃 ✓。
+    """
+    if not text:
+        return ""
+    patterns = (
+        r"(?i)[?&]" + re.escape(name) + r"=([^&\s\"'<>]+)",
+        r"(?i)\b" + re.escape(name) + r"\s*[=:]\s*[\"']([^\"'<>\s]{1,128})[\"']",
+        r"(?i)\b" + re.escape(name) + r"\s*=\s*([^&\s\"'<>;]{1,128})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return urllib.parse.unquote(match.group(1))
+    return ""
 
 
 def _safe_ip(value):
@@ -314,8 +331,13 @@ def discover_portal_params(host="", timeout=6):
     只在 is_online() **明确 False** 之后调用（在线时门户不跳转，探也白探 ✗）。
     任何异常都吞掉 —— 这是「尽量拿到更准参数」的增强路径；失败仍走老逻辑（AC 留空），
     绝不因为探不到门户而让本次登录失败 ✗。
+
+    返回 dict 额外带 `source`（location / body / 空）—— 排障时能看出参数从哪来的 ✓。
+    v2.1.3.12：① 探测地址扩到 5 个（不同 AC 的门户拦截策略不一样，有的只拦某个探针域名）；
+    ② 找到 / 找不到都写一行日志 —— 学校里有多个版本的 AC 时，**下次再有人报「AC认证失败」，
+    先看这行日志就知道是"没发现参数"还是"参数不对"** ✓。
     """
-    empty = {"ac_ip": "", "ac_name": "", "user_ip": "", "user_mac": "", "ssid": ""}
+    empty = {"ac_ip": "", "ac_name": "", "user_ip": "", "user_mac": "", "ssid": "", "source": ""}
     opener = urllib.request.build_opener(_NoRedirect)
     for url in PORTAL_PROBE_URLS:
         location = ""
@@ -334,11 +356,20 @@ def discover_portal_params(host="", timeout=6):
                     body = ""
         except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException):
             continue
-        found = _portal_param_from_text(location)
-        if not (found["ac_ip"] or found["ac_name"]):
-            found = _portal_param_from_text(body)
-        if found["ac_ip"] or found["ac_name"]:
+        for source, text in (("location", location), ("body", body)):
+            found = _portal_param_from_text(text)
+            if not (found["ac_ip"] or found["ac_name"]):
+                continue
+            found["source"] = source
+            _log("门户参数发现（来源=%s）：wlanacip=%s wlanacname=%s wlanuserip=%s mac=%s ssid=%s",
+                 source,
+                 found["ac_ip"] or "（空）", found["ac_name"] or "（空）",
+                 found["user_ip"] or "（空）", found["user_mac"] or "（空）",
+                 found["ssid"] or "（空）")
             return found
+    _log("门户参数未发现（%d 个探测地址都没拿到 wlanacip/wlanacname）—— 本次按旧行为（AC 参数留空）登录；"
+         "若该网络持续「AC认证失败」，可在 config.json 里手动补 wlan_ac_ip / wlan_ac_name（值抄门户跳转 URL）✓",
+         len(PORTAL_PROBE_URLS), level=logging.WARNING)
     return empty
 
 
@@ -739,9 +770,19 @@ def run_once(reason):
                 wlan_ip = portal["user_ip"]
             if portal.get("user_mac"):
                 wlan_mac = portal["user_mac"]
+            # v2.1.3.12：探测不到时的**手动兜底** —— config.json 可选键（值抄门户跳转 URL）。
+            # 学校有多个版本的 AC / 偶尔探测被拦时，能让用户不升级也能自救 ✓。
+            manual_ac_ip = _safe_ip(str(cfg.get("wlan_ac_ip") or "").strip())
+            manual_ac_name_raw = str(cfg.get("wlan_ac_name") or "").strip()
+            manual_ac_name = (manual_ac_name_raw
+                              if _AC_NAME_RE.fullmatch(manual_ac_name_raw or "") else "")
+            ac_ip = portal.get("ac_ip") or manual_ac_ip
+            ac_name = portal.get("ac_name") or manual_ac_name
+            if not portal.get("ac_ip") and not portal.get("ac_name") and (ac_ip or ac_name):
+                _log("使用 config.json 手动指定的 AC 参数：wlanacip=%s wlanacname=%s",
+                     ac_ip or "（空）", ac_name or "（空）")
             ok, msg = login(host, account, suffix, pwd, wlan_ip, wlan_mac,
-                            wlan_ac_ip=portal.get("ac_ip", ""),
-                            wlan_ac_name=portal.get("ac_name", ""))
+                            wlan_ac_ip=ac_ip, wlan_ac_name=ac_name)
             now_iso = _now_iso()
             if ok:
                 _log("登录成功: %s", msg)
