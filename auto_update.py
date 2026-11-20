@@ -2919,15 +2919,15 @@ def _post_upgrade_startup():
     # 产品行为红线：**只在 just_upgraded 为真时拉**。绝不放进 _auto_update_loop / 每次服务
     # 启动的路径 —— 用户从托盘菜单主动退出托盘是正常操作，服务不能把它「复活」。
     # 成功 / 失败都记一行中文 upgrade.log：失败也不影响其他自愈，下次登录仍由自启项启动。
-    if just_upgraded:
+    # v2.1.3.11：除了「刚升级」，**用户主动点过「重启服务」**也要拉（标记由 web_api 写）。
+    # 服务重启会连带结束托盘（C-16 拉起的托盘在服务的进程树里），只判断 just_upgraded
+    # 就会留下「重启后托盘又不见了」——真机 2026-11-20 复现 ✗。
+    restart_requested = _consume_restart_marker()
+    if just_upgraded or restart_requested:
+        trigger = ("静默升级会杀掉托盘（C-16）" if just_upgraded
+                   else "服务重启会连带结束托盘（v2.1.3.11）")
         try:
-            relaunch = _relaunch_tray_in_user_session()
-            if relaunch.get("ok"):
-                _log_upgrade("INFO", "托盘已在当前登录会话重新拉起（pid={}）；静默升级会杀掉托盘（C-16）".format(
-                    relaunch.get("pid")))
-            else:
-                _log_upgrade("WARN", "托盘未能在当前会话自动拉起（{}），下次登录会由自启项启动".format(
-                    relaunch.get("reason") or "未知原因"))
+            _relaunch_tray_if_needed(trigger)
         except Exception as exc:  # noqa: BLE001  拉托盘失败绝不能拖垮启动钩子
             _log_upgrade("WARN", "托盘未能在当前会话自动拉起（{}），下次登录会由自启项启动".format(exc))
 
@@ -2939,6 +2939,81 @@ def _post_upgrade_startup():
     except Exception as exc:  # noqa: BLE001
         logger.warning("启动升级结果延迟复核线程失败: %s", exc)
 
+
+# ============================================================
+# v2.1.3.11：服务「重启」后也要把托盘拉回来
+#
+# 用户从 Web UI 点「重启服务」→ 执行器 sc stop/sc start → NSSM 停服务时会把子进程树
+# 一起结束（托盘是 C-16 修复里由服务跨会话拉起的子进程）→ 托盘不见了 ✗。
+# 旧逻辑只在 just_upgraded（刚升级）时才拉，所以「重启服务」这条路径漏了。
+# 现在：web_api 调度重启时写标记文件，新进程启动钩子消费标记并把托盘拉回本会话；
+# 标记只在用户**主动点重启**时写，所以不会复活用户主动退出的托盘 ✓。
+# ============================================================
+RESTART_TRAY_MARKER_NAME = ".tray_relaunch_requested"
+TRAY_MUTEX_NAME = r"Local\DrcomAutoLoginTray"
+
+
+def _tray_relaunch_marker_path():
+    log_dir = globals().get("LOG_DIR") or ""
+    if not log_dir:
+        base = globals().get("BASE_DIR") or os.path.dirname(os.path.abspath(__file__))
+        log_dir = os.path.join(base, "logs")
+    return os.path.join(log_dir, RESTART_TRAY_MARKER_NAME)
+
+
+def _consume_restart_marker():
+    """消费「用户点过重启服务」标记：存在就删掉并返回 True ✓（启动钩子调一次）。"""
+    path = _tray_relaunch_marker_path()
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:  # noqa: BLE001 —— 删不掉也按「需要拉起」处理，托盘不能丢 ✗
+        logger.warning("清理托盘拉起标记失败: %s", exc)
+        return True
+
+
+def _tray_already_running():
+    """本登录会话里托盘是否已经在跑：CreateMutexW(Local\DrcomAutoLoginTray) 已存在即算 ✓。
+
+    为什么要它：重启时托盘**未必**真被杀掉（例如 NSSM 没杀进程树 / 用户自己开的托盘）。
+    这时再拉一个只会被单实例互斥体挡掉并立刻退出，日志却会误报「已拉起 pid=…」✗。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.SetLastError(0)
+        handle = k32.CreateMutexW(None, False, TRAY_MUTEX_NAME)
+        if not handle:
+            return False
+        try:
+            return k32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+        finally:
+            try:
+                k32.CloseHandle(handle)
+            except (OSError, AttributeError, TypeError, ValueError):
+                pass
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def _relaunch_tray_if_needed(trigger):
+    """托盘没在跑就跨会话拉起（trigger 只影响日志文案）✓；绝不抛异常。"""
+    if _tray_already_running():
+        _log_upgrade("INFO", "托盘已在运行，无需重新拉起（{}）".format(trigger))
+        return
+    relaunch = _relaunch_tray_in_user_session()
+    if relaunch.get("ok"):
+        _log_upgrade("INFO", "托盘已在当前登录会话重新拉起（pid={}）；{}（C-16 / v2.1.3.11）".format(
+            relaunch.get("pid"), trigger))
+    else:
+        _log_upgrade("WARN", "托盘未能在当前会话自动拉起（{}），下次登录会由自启项启动".format(
+            relaunch.get("reason") or "未知原因"))
 
 def _report_update_runner_result(wait_sec=0):
     """读升级执行器（任务计划程序里的 .cmd）落盘的结果，写进 upgrade.log。

@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.10）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.11）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -1117,7 +1117,7 @@ def main():
     # 都是文件与注册表操作，放后台线程即可；否则会拖慢 /api/health 的可达时间，
     # 让刚装好的新版被探针误判成「起不来」而回滚。
     def _post_upgrade_startup_safe():
-        # v2.1.3.10：清掉上一次「重启服务」遗留的一次性计划任务（运行时删不掉，启动兜底 ✓）
+        # v2.1.3.10 起：清掉上一次「重启服务」遗留的一次性计划任务（运行时删不掉，启动兜底 ✓）
         try:
             _web_api_mod.cleanup_restart_task()
         except Exception as exc:  # noqa: BLE001
