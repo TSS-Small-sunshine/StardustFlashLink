@@ -304,11 +304,15 @@ jobs:
           - 校验：下载 asset \`SHA256SUMS\` 后 \`sha256sum -c\`（Windows 用 \`Get-FileHash\` 对照）
 
           ### 怎么升级到 3.0 预览
-          - 命令行：\`stardust-flash-link update check --channel preview\` → \`update download <目录>\`（下载后手动替换/安装）；
-          - 3.0 目前**不做自我替换**，GUI 更新入口也在后续里程碑。
+          - 命令行：\`stardust-flash-link update check --channel preview\` → \`update download <目录>\`（现在可直接 update apply 自我替换）；
+          - 3.0 现在支持 **自我替换 / 回滚**：GUI「更新」→「检查更新」→「下载并安装」会把同目录的
+            GUI 与 CLI 一起换掉（失败自动回滚）；装过一次后「回滚」行可一键回退（两步确认 + 自动重启）。
+          - 命令行：update check --channel preview → update download <目录> → update apply <zip>
+            （先 --dry-run 看计划），另有 update rollback / update backups 三个子命令。
 
           ### 已知限制
-          - 3.0 仍处 DEV：没有托盘、没有 Windows 安装器、没有自动安装；
+          - 3.0 仍处 DEV：没有托盘、没有 Windows 安装器（只出便携 zip / deb / dmg）；预览版**无代码签名**，
+            只信 GitHub digest；.deb 装到 /usr/bin 后自我替换需要写权限（权限不足会明确失败、不动程序）；
           - 详细差异见仓库 \`docs/PLATFORMS.md\` 与 \`desktop/README.md\`。
 
           本发布由 CI 自动创建（\`.github/workflows/preview-3.0.yml\` 的 publish-preview job）。

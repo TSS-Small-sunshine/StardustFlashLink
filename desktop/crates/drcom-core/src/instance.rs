@@ -10,10 +10,15 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// 第二个实例用来「敲门」的路径。
 pub const FOCUS_PATH: &str = "/focus";
+
+/// 处理一次敲门时**读请求的总预算**：客户端 connect 与 write 之间可能被调度器推迟，
+/// 只给一次 200ms 读超时会偶发「包还没到就被丢掉」（macOS CI 在 preview.3 / preview.4
+/// 的流水线上各红过一次）→ 这里在预算内反复读，不空转、也不无限等 ✓。
+const PROBE_READ_BUDGET: Duration = Duration::from_secs(1);
 
 /// 拿端口的结果。
 #[derive(Debug)]
@@ -50,13 +55,44 @@ impl InstanceGuard {
 }
 
 /// 处理一次敲门：只认 `GET /focus` ✓。
+///
+/// 读用**有界重试**（总预算见 PROBE_READ_BUDGET）：客户端 connect 成功到 write 之间被调度器
+/// 推迟时，单次读超时会把「已经连上的敲门」丢掉 ✗ —— 生产里表现为「第二个实例偶尔拉不起窗口」，
+/// 测试里表现为偶发失败。这里在预算内反复读，直到拿到请求行 / 对方关闭 / 预算用完 ✓。
 fn handle_probe(stream: &mut TcpStream) -> bool {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-    let mut buffer = [0u8; 512];
-    let Ok(read) = stream.read(&mut buffer) else {
-        return false;
-    };
-    let text = String::from_utf8_lossy(&buffer[..read]);
+    let deadline = Instant::now() + PROBE_READ_BUDGET;
+    let mut buffer: Vec<u8> = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        // 每次最多等 250ms（剩下的时间不足时按剩下的等），超时就再来一轮 ✓
+        let _ = stream.set_read_timeout(Some(remaining.min(Duration::from_millis(250))));
+        match stream.read(&mut chunk) {
+            Ok(0) => break, // 对方已经把请求写完并关闭 ✓
+            Ok(read) => {
+                buffer.extend_from_slice(&chunk[..read]);
+                // 读到请求行结束就够了；再加一个体积上限，绝不无界读 ✗
+                if buffer.windows(2).any(|window| window == b"\r\n") || buffer.len() > 2048 {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue; // 数据还没到 → 在预算内再来一轮 ✓
+            }
+            Err(_) => return false,
+        }
+    }
+    let text = String::from_utf8_lossy(&buffer);
     let is_focus = text
         .lines()
         .next()
@@ -141,18 +177,19 @@ mod tests {
         assert!(!guard.poll_focus_request(), "没人敲门时不该误报 ✓");
         assert!(request_focus(port), "敲门应得到回复 ✓");
         // 敲门是「连上 + 写完就返回」，**不等对方收**（生产里对方 400ms 轮询一次 ✓）——
-        // 所以这里不能假设数据已经躺在 accept 队列里被读走。macOS CI 实测偶发（v3.0.0.0-preview.3
-        // 的 PR 上红过一次）：立刻 poll 时连接可能还在队列里 → 误判「没敲到」。给一个有界等待窗口，
-        // 语义仍是「这次敲门必须被识别」，只是不要求「同一个瞬间」✓。
+        // 所以这里不能假设数据已经躺在 accept 队列里被读走。macOS CI 实测偶发（preview.3 / preview.4
+        // 的流水线上各红过一次）：负载高时「连上 → 写」之间可能被调度器推迟，1 秒窗口不够。
+        // 现在服务端读改成有界重试（1 秒预算），测试窗口放宽到 3 秒 —— 语义仍是
+        // 「这次敲门必须在有限时间内被识别」，不要求同一个瞬间 ✓。
         let mut knocked = false;
-        for _ in 0..100 {
+        for _ in 0..300 {
             if guard.poll_focus_request() {
                 knocked = true;
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(knocked, "敲门必须被识别（1 秒窗口内）✓");
+        assert!(knocked, "敲门必须被识别（3 秒窗口内）✓");
         assert!(!guard.poll_focus_request(), "识别过一次就不再重复 ✓");
     }
 
