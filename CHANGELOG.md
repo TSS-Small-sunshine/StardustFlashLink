@@ -5,6 +5,37 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.9 (fix) — 2026-11-20 · 代号 `Vega`（织女星）
+
+> 主题：**「重启服务」不再让服务自己停自己** —— 2026-11-20 10:29 真机实测触发的 P0 级缺陷。
+> 接口路径 / 字段名、配置结构、服务名、安装路径、密码文件格式**都没动** ✓；仍零第三方依赖 ✓。
+
+### 🛠 ① 重启服务（真机事故 → 根因修复）
+- **真机现象**：Web UI「关于 → 重启服务」点下后页面消失，服务再也没回来（`sc query DrcomAutoLogin` = STOPPED）。
+- **真机日志**（`D:\Program Files\DrcomAutoLogin\logs\campus_login.log`）：
+  `[2026-11-20 10:29:45] [WARNING] nssm restart 返回码 3221225786，退回 os._exit(0)`，随后进程收到 SIGINT 退出；
+  3221225786 = 0xC000013A = **STATUS_CONTROL_C_EXIT**。
+- **根因**：旧实现让服务**同步**跑 `nssm restart DrcomAutoLogin` —— nssm restart 的 stop 半程会让 NSSM
+  结束当前的 Python 进程（以及这个进程拉起的 nssm.exe 子进程），`start` 半程永远跑不到；
+  NSSM 的 `AppExit` 策略是 Ignore，进程退出后不会再被拉起 → 服务永久 STOPPED ✗。
+- **修复**：把「等旧进程退出 → `sc stop` → `sc start`（有界重试）」交给**任务计划程序的一次性任务**
+  （`DrcomAutoLogin-Restart`，SYSTEM 身份）—— 它不在 NSSM 的 Job Object 里，不会被「服务停自己」连带杀死；
+  本进程只负责调度 + 正常退出。与自动升级执行器是**同一套已被真机验证**的机制 ✓。
+- **不再静默失败**：查不到服务状态 / 服务不是 RUNNING / 任务提不起来时，接口返回 **409 + 可读中文原因**，
+  并且**不退出进程**（不再「按钮一按页面没了、也不知道为什么」）；成功时明说「约 16 秒内重启、
+  页面会短暂不可用，之后自动恢复」。
+- 版本回滚（`/api/rollback`）复用同一条重启路径：调度失败会把 warning 带进响应，绝不吞掉 ✓。
+- 前端确认文案改为「服务会先停止再自动启动，本页面约 10~15 秒不可用，之后会自动恢复」——
+  不再承诺「NSSM 将自动重新拉起」（那正是这次失效的假设 ✗）。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **579 项**（基线 571，+8：执行器顺序 / `sc start` 有界重试 / 动作行不含 nssm /
+  「查不到状态、非 RUNNING、调度失败、成功」四种决策 + 执行器落盘 + 退出回调 + 前端确认文案）；
+- HTTP `_smoke_http.py` **63 项**（基线 61，+2：`POST /api/restart` 成功 200 与失败 409 两条分支；
+  调度逻辑本身在静态侧离线断言，冒烟里**绝不真建计划任务** ✓）；
+- 真机恢复：2026-11-20 10:35 用 `sc start DrcomAutoLogin` 把本机服务拉回 RUNNING
+  （`/api/health` 200，version 2.1.3.8），随后自动升级到本版 ✓。
+
 ## v2.1.3.8 (fix) — 2026-11-19 · 代号 `Vega`（织女星）
 
 > 主题：**Web 面板体验与健壮性** —— 清掉 web 审计（`_维护报告/audit/web.md` §四）里的 8 条 P3。
