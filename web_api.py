@@ -945,26 +945,35 @@ def api_get_changelog():
 
 
 # ============================================================
-# 「重启服务」（P0-7 / v2.1.3.9 重写：服务不能自己停自己）
+# 「重启服务」（P0-7 / v2.1.3.10 重写：服务不能自己停自己，也不能「静默没执行」）
 #
-# 真机根因（2026-11-20 10:29:45，用户在本机 Web UI 点「重启服务」）：
-#   旧实现让服务**同步**跑 `nssm restart DrcomAutoLogin`。nssm restart 的 stop 半程
-#   会让 NSSM 结束当前的 Python 进程 —— 而我们正卡在等这个 nssm 子进程返回；NSSM 结束
-#   进程时把子进程 nssm.exe 也一起收掉 → start 半程永远跑不到。
-#   真机日志：`nssm restart 返回码 3221225786（0xC000013A STATUS_CONTROL_C_EXIT），
-#   退回 os._exit(0)` → 服务永久 STOPPED（AppExit=Ignore，NSSM 不会自己拉起）✗。
+# 两轮真机根因（2026-11-20）：
+#   ① 旧实现让服务**同步**跑 `nssm restart DrcomAutoLogin`：nssm restart 的 stop 半程
+#      会让 NSSM 结束当前 Python 进程（以及它拉起的 nssm.exe 子进程），start 半程永远跑不到。
+#      真机日志：`nssm restart 返回码 3221225786（STATUS_CONTROL_C_EXIT），退回 os._exit(0)`
+#      → 服务永久 STOPPED（AppExit=Ignore，NSSM 不会自己拉起）✗。
+#   ② v2.1.3.9 改成「任务计划程序的一次性任务」但把 .cmd 放在**安装目录\logs**（路径含空格）：
+#      任务**创建成功、/run 成功、脚本却根本没执行** —— A/B 实测同样脚本放 C:\Windows\Temp
+#      1 秒就跑完、放 "D:\Program Files\..." 6 秒后毫无输出。于是本进程退出、服务留下
+#      「NSSM wrapper RUNNING 但里面的 Python 没了」的假运行状态 ✗。
 #
-# 修法：把「等旧进程退出 → sc stop → sc start」交给**任务计划程序**的一次性任务
-# （SYSTEM 身份、不在 NSSM 的 Job Object 里，所以服务停自己时不会被连带杀死）；
-# 本进程只负责调度 + 正常退出。与自动升级的「执行器」是同一套已被真机验证的机制 ✓。
+# v2.1.3.10 的修法（三条一起）：
+#   a) 执行器放到**不含空格**的临时目录（优先 %SystemRoot%\Temp，其次无空格的 %TEMP%）；
+#   b) **本进程不再主动退出**：由任务里的 sc stop 停它（SIGINT → 正常收尾）。这样即使任务
+#      没执行，服务也**保持原样**（fail-safe），不会出现「按钮一按服务没了」；
+#   c) 执行器里 stop 要**等真的 STOPPED** 再 start，start 有界重试；都不行就按 PID 杀掉本服务的
+#      nssm 进程再起一次；全过程写 `logs\restart_service.log` 方便排障。
 # ============================================================
 RESTART_TASK_NAME = "DrcomAutoLogin-Restart"
 RESTART_SERVICE_NAME = "DrcomAutoLogin"
+RESTART_SCRIPT_NAME = "drcom_restart_service.cmd"
 _SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
 SC_EXE = os.path.join(_SYSTEM32, "sc.exe")
 SCHTASKS_EXE = os.path.join(_SYSTEM32, "schtasks.exe")
 #: 一次性任务里「等一拍」的秒数（ping 当 sleep；旧进程退出 + SCM 收尾都要时间 ✓）
 RESTART_WAIT_TICKS = 8
+#: 调度后多久本进程还活着 → 认为任务没执行（只记日志，绝不杀自己 ✗）
+RESTART_WATCHDOG_SECS = 25
 
 
 class _ServiceCtlProbe:
@@ -1019,38 +1028,90 @@ class _ServiceCtlProbe:
         return False, detail
 
 
+def _restart_script_dir_candidates():
+    """执行器候选目录：**必须不含空格**（含空格的任务计划程序 /tr 会「成功但不执行」✗）。
+
+    真机 A/B（2026-11-20）：同一份 .cmd 放 `C:\Windows\Temp` → 1 秒内跑完；
+    放 `D:\Program Files\DrcomAutoLogin\logs` → `schtasks /create` 与 `/run` 都返回成功，
+    但脚本**根本没被执行**（等 6 秒也没有任何输出）。原因：任务计划程序执行 .cmd 时会用
+    `cmd /c <路径>` 之类包装，含空格的 /tr 被拆开就找不到文件 —— 却不会报错 ✗。
+    """
+    candidates = []
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    if root:
+        candidates.append(os.path.join(root, "Temp"))
+    try:
+        tmp = tempfile.gettempdir()
+    except Exception:  # noqa: BLE001  —— 拿不到就只看下一个候选
+        tmp = ""
+    if tmp and tmp not in candidates:
+        candidates.append(tmp)
+    # 空格会被任务计划程序拆开；& | < > ^ % ! 会被 cmd 解释 —— 都不行 ✓
+    return [directory for directory in candidates
+            if directory and not re.search(r"[\s&|<>^%!]", directory)]
+
+
 def _restart_service_script(svc_name=RESTART_SERVICE_NAME, sc_exe=SC_EXE,
                             schtasks_exe=SCHTASKS_EXE, task_name=RESTART_TASK_NAME,
-                            wait_ticks=RESTART_WAIT_TICKS):
+                            wait_ticks=RESTART_WAIT_TICKS, log_path=""):
     """**纯函数**：生成「重启服务」执行器 .cmd（CRLF）✓。
 
-    `sc stop` 必须在 `sc start` 之前；`sc start` 用有界重试（停还没收尾时先失败，
-    再过几秒重试）—— 与自动升级执行器的看门狗同一思路 ✓。
+    顺序：等旧进程 → `sc stop` 并**等真的 STOPPED** → `sc start`（有界重试）→
+    兜底按 PID 杀掉本服务的 nssm 再起一次 → 写日志、删任务、删自己 ✓。
+    `sc start` 必须等 stop 真正收尾（STOP_PENDING 时 start 一定失败，重试即可）。
     """
     wait = 'ping -n {} 127.0.0.1 >nul 2>&1'.format(int(wait_ticks) + 1)
+    quick = 'ping -n 4 127.0.0.1 >nul 2>&1'
     lines = [
         "@echo off",
         "rem === 星尘闪连「重启服务」执行器（由 web_api.py 生成；跑完自删）===",
-        "rem 由任务计划程序以 SYSTEM 拉起：**不在 NSSM 的 Job Object 里**，",
-        "rem 所以「服务停自己」不会把这个脚本连带杀掉（v2.1.3.9 真机根因）。",
+        "rem 由任务计划程序以 SYSTEM 拉起：不在 NSSM 的 Job Object 里，服务停自己不会连带杀掉它。",
+        "rem v2.1.3.10：脚本必须放在**不含空格**的临时目录 —— 含空格的 /tr 会「成功但不执行」✗。",
         "setlocal",
-        "rem ---- 1) 等旧进程退出（ping 当 sleep：SYSTEM 会话里没有能用的 timeout） ----",
+        'set "SVC=' + svc_name + '"',
+        'set "RLOG=' + log_path + '"',
+        "rem ---- 1) 等旧进程自己退出（ping 当 sleep；SYSTEM 会话里没有可用的 timeout） ----",
         wait,
-        "rem ---- 2) 停服务（FAILED 1062 = 本来就没在跑，忽略即可） ----",
-        '"' + sc_exe + '" stop ' + svc_name + ' >nul 2>&1',
-        "rem ---- 3) 等 SCM 收尾，再起服务（有界重试，停还在收尾时先失败很正常） ----",
+        "call :wlog start",
+        "rem ---- 2) 停服务，并等它真的停（STOP_PENDING 时不能急着 start） ----",
+        '"' + sc_exe + '" stop %SVC% >nul 2>&1',
+        "set /a _stop=0",
+        ":stop_wait",
+        quick,
+        '"' + sc_exe + '" query %SVC% | find /i "STOPPED" >nul 2>&1',
+        "if not errorlevel 1 goto start_phase",
+        "set /a _stop+=1",
+        "if %_stop% lss 8 goto stop_wait",
+        "call :wlog stop-timeout",
+        ":start_phase",
+        "rem ---- 3) 起服务（有界重试：停还在收尾时 start 会失败，几秒后重试即可） ----",
         "set /a _try=0",
-        ":restart_try",
-        'set /a _try+=1',
-        '"' + sc_exe + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
-        "if not errorlevel 1 goto restart_done",
-        '"' + sc_exe + '" start ' + svc_name + ' >nul 2>&1',
+        ":start_try",
+        "set /a _try+=1",
+        '"' + sc_exe + '" query %SVC% | find /i "RUNNING" >nul 2>&1',
+        "if not errorlevel 1 goto done_ok",
+        '"' + sc_exe + '" start %SVC% >nul 2>&1',
+        quick,
+        "if %_try% lss 6 goto start_try",
+        "rem ---- 4) 兜底：还是没起来 -> 按 PID 杀掉本服务的 nssm（不动别的服务）再起一次 ----",
+        "call :wlog kill-fallback",
+        "for /f \"tokens=3\" %%p in ('sc.exe queryex %SVC% ^| find /i \"PID\"') do taskkill /f /pid %%p >nul 2>&1",
+        quick,
+        '"' + sc_exe + '" start %SVC% >nul 2>&1',
         wait,
-        "if %_try% lss 6 goto restart_try",
-        ":restart_done",
-        "rem ---- 4) 收尾：删任务、删自己（删不掉不打扰用户；下次 /create /f 会覆盖 ✓） ----",
+        '"' + sc_exe + '" query %SVC% | find /i "RUNNING" >nul 2>&1',
+        "if errorlevel 1 (call :wlog FATAL-not-running) else (call :wlog OK-after-fallback)",
+        "goto cleanup",
+        ":done_ok",
+        "call :wlog OK",
+        ":cleanup",
+        "rem ---- 5) 收尾：删任务、删自己（删不掉不打扰用户；下次 /create /f 会覆盖 ✓） ----",
         '"' + schtasks_exe + '" /delete /tn "' + task_name + '" /f >nul 2>&1',
         'del /f /q "%~f0" >nul 2>&1',
+        "exit /b 0",
+        ":wlog",
+        'if defined RLOG >>"%RLOG%" echo [%DATE% %TIME%] restart=%~1',
+        "exit /b 0",
     ]
     return "\r\n".join(lines) + "\r\n"
 
@@ -1070,18 +1131,42 @@ def _write_restart_script(path, script):
             handle.write("@chcp 65001 >nul\r\n" + script)
 
 
-def _exit_for_restart():
-    """让服务进程正常退出 —— 服务会短暂 STOPPED，随后由一次性任务 `sc start` 拉回 ✓。"""
-    STOP_EVENT.set()
-    time.sleep(0.5)
-    os._exit(0)
+def cleanup_restart_task():
+    """清掉上一次「重启服务」遗留的一次性任务（**每次服务启动时调一次** ✓）。
+
+    为什么会有遗留：执行器在任务**还在运行**时调 `schtasks /delete`，任务计划程序可能拒绝；
+    遗留任务的 /sc once /st 00:00「下次运行时间」是 N/A，**不会自己再跑**（无害），
+    但会出现在任务计划程序里 —— 启动时顺手删掉，别让用户看到来路不明的任务 ✓。
+    失败不抛、不打扰用户（删除本来就需要管理员；服务跑在 SYSTEM 下没问题）。
+    """
+    try:
+        subprocess.run([SCHTASKS_EXE, "/delete", "/tn", RESTART_TASK_NAME, "/f"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
-def _restart_service_soon(probe=None, exit_fn=None):
+def _restart_service_watchdog():
+    """调度后 25 秒本进程还活着 → 一次性任务很可能没执行（例如被安全策略禁用）。
+
+    只记日志，**绝不接管去杀自己** —— 旧实现的 os._exit 正是「服务永久停死」的根因 ✗。
+    """
+    time.sleep(RESTART_WATCHDOG_SECS)
+    log = globals().get("logger") or logging.getLogger(__name__)
+    log.warning("重启服务：%d 秒后本进程仍在运行 —— 一次性任务可能没有执行"
+                "（请检查任务计划程序）；服务未受影响，可手动重启",
+                int(RESTART_WATCHDOG_SECS))
+
+
+def _restart_service_soon(probe=None, watchdog=None):
     """调度一次「重启服务」；成功返回 None，失败返回**可读原因**（绝不静默 ✗）。
 
-    只在「服务确实是 RUNNING」时才调度（否则说明本进程不是服务进程 / 服务没装，
-    杀掉自己只会让页面彻底消失，用户更懵 ✗）。调度成功后本进程退出，由任务把它拉回 ✓。
+    关键设计（v2.1.3.10）：
+      - 只在「服务确实是 RUNNING」时才调度；查不到 / 非 RUNNING 一律返回可读原因；
+      - 执行器写到**不含空格**的临时目录（含空格的 /tr 会「成功但不执行」✗）；
+      - **本进程不主动退出**：由执行器的 `sc stop` 停掉（SIGINT → 正常收尾）。
+        这样即使任务没执行，服务保持原样（fail-safe），不会「按钮一按服务没了」✗。
     """
     probe = probe or _ServiceCtlProbe()
     state = probe.query_state()
@@ -1091,22 +1176,30 @@ def _restart_service_soon(probe=None, exit_fn=None):
     if state != "RUNNING":
         return ("系统服务 {} 当前是 {}（不是运行中）—— 请先在「服务」里手动启动它，再点重启"
                 ).format(RESTART_SERVICE_NAME, state)
-    script_path = os.path.join(LOG_DIR, "restart_service.cmd")
-    if re.search(r'[&|<>^%!]', script_path):
-        return "安装路径含 cmd 特殊字符，无法自动重启；请手动重启服务"
-    try:
-        _write_restart_script(script_path, _restart_service_script())
-    except OSError as exc:
-        return "写重启执行器失败：{}".format(exc)
+    log_path = os.path.join(LOG_DIR, "restart_service.log") if "LOG_DIR" in globals() else ""
+    script_text = _restart_service_script(log_path=log_path)
+    script_path = ""
+    last_error = None
+    for directory in _restart_script_dir_candidates():
+        candidate = os.path.join(directory, RESTART_SCRIPT_NAME)
+        try:
+            _write_restart_script(candidate, script_text)
+        except OSError as exc:
+            last_error = exc
+            continue
+        script_path = candidate
+        break
+    if not script_path:
+        return "找不到可写的无空格临时目录（{}）—— 请手动重启服务".format(last_error)
     ok, detail = probe.schedule(RESTART_TASK_NAME, script_path)
     # 冒烟会在 _attach() 之前直接调本函数（离线决策断言）→ logger 可能还没注入 ✗
     log = globals().get("logger") or logging.getLogger(__name__)
     if not ok:
         log.warning("重启服务：调度一次性任务失败（%s）", detail)
         return "提不起重启任务（{}）—— 请到「服务」里手动重启 {}".format(detail, RESTART_SERVICE_NAME)
-    log.info("重启服务：已调度一次性任务 %s（约 %d 秒后 sc stop / sc start）",
-             RESTART_TASK_NAME, int(RESTART_WAIT_TICKS) + 2)
-    threading.Thread(target=exit_fn or _exit_for_restart, daemon=True).start()
+    log.info("重启服务：已调度一次性任务 %s（执行器 %s，约 %d 秒后 sc stop / sc start）",
+             RESTART_TASK_NAME, script_path, int(RESTART_WAIT_TICKS) + 2)
+    threading.Thread(target=watchdog or _restart_service_watchdog, daemon=True).start()
     return None
 
 

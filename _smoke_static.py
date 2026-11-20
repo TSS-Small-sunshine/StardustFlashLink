@@ -4495,17 +4495,36 @@ _r_wait = next((i for i, ln in enumerate(_r_actions) if ln.startswith("ping -n")
 _r_stop = next((i for i, ln in enumerate(_r_actions) if " stop " in ln), -1)
 _r_start = next((i for i, ln in enumerate(_r_actions) if " start " in ln), -1)
 
-check("维护 v2.1.3.9：重启执行器顺序 = 等旧进程退出 → sc stop → sc start",
+check("维护 v2.1.3.10：重启执行器顺序 = 等旧进程退出 → sc stop → sc start",
       _r_wait >= 0 and _r_stop > _r_wait and _r_start > _r_stop,
       "wait={} stop={} start={}".format(_r_wait, _r_stop, _r_start))
-check("维护 v2.1.3.9：sc start 有界重试（停还在收尾时先失败、几秒后重试）+ 收尾删任务/删自己",
-      "goto restart_try" in _r_script and "if %_try% lss" in _r_script
+check("维护 v2.1.3.10：停服务后要**等真的 STOPPED** 再起（STOP_PENDING 时 start 必然失败）",
+      ":stop_wait" in _r_script and "goto stop_wait" in _r_script
+      and ":start_phase" in _r_script and "goto start_phase" in _r_script
+      and _r_script.find(":stop_wait") < _r_script.find(":start_phase"),
+      "stop-wait 断言")
+check("维护 v2.1.3.10：sc start 有界重试 + 按 PID 杀掉本服务 nssm 的兜底 + 写日志 + 收尾删任务/删自己",
+      "goto start_try" in _r_script and "if %_try% lss" in _r_script
+      and "taskkill /f /pid" in _r_script and "restart=" in _r_script
       and "/delete /tn" in _r_script and 'del /f /q "%~f0"' in _r_script,
-      "重试/收尾断言")
-check("维护 v2.1.3.9：重启执行器的**动作行**不再调用 nssm（服务不能自己停自己 ✗）",
+      "重试/兜底/日志/收尾断言")
+check("维护 v2.1.3.10：重启执行器的**动作行**不再调用 nssm（服务不能自己停自己 ✗）",
       not any("nssm" in ln.lower() for ln in _r_actions),
       "执行器动作里出现 nssm = 旧坑复活: {}".format(
           [ln for ln in _r_actions if "nssm" in ln.lower()]))
+_r_dirs = _wa_restart._restart_script_dir_candidates()
+check("维护 v2.1.3.10：执行器目录必须**不含空格/特殊字符**（含空格的 /tr 会「成功但不执行」✗）",
+      bool(_r_dirs) and all(not re.search(r"[\s&|<>^%!]", d) for d in _r_dirs),
+      repr(_r_dirs))
+_r_script_logged = _wa_restart._restart_service_script(log_path="C:\\Temp\\x.log")
+check("维护 v2.1.3.10：执行器把结论写进 logs\\restart_service.log（排障面）",
+      'set "RLOG=C:\\Temp\\x.log"' in _r_script_logged
+      and '>>"%RLOG%" echo' in _r_script_logged,
+      repr(_r_script_logged[-160:]))
+check("维护 v2.1.3.10：服务启动时清理「重启服务」遗留的一次性任务（运行时删不掉 → 启动兜底）",
+      hasattr(_wa_restart, "cleanup_restart_task")
+      and "_web_api_mod.cleanup_restart_task()" in src_svc,
+      "启动清理断言")
 
 
 class _FakeServiceProbe:
@@ -4526,10 +4545,10 @@ class _FakeServiceProbe:
 
 
 def _run_restart_case(probe):
-    fled = threading.Event()
-    err = _wa_restart._restart_service_soon(probe=probe, exit_fn=fled.set)
-    fled.wait(2)
-    return err, fled.is_set()
+    fired = threading.Event()
+    err = _wa_restart._restart_service_soon(probe=probe, watchdog=fired.set)
+    fired.wait(2)
+    return err, fired.is_set()
 
 
 _r_had_log_dir = hasattr(_wa_restart, "LOG_DIR")
@@ -4545,27 +4564,28 @@ _wa_restart.logger = _r_logging.getLogger("drcom-restart-smoke")
 try:
     _p_none = _FakeServiceProbe(None)
     _err_none, _fired_none = _run_restart_case(_p_none)
-    check("维护 v2.1.3.9：查不到服务状态 → 可读原因、不调度、**不退出进程**（不把页面砸没）",
+    check("维护 v2.1.3.10：查不到服务状态 → 可读原因、不调度、**不退出进程**（不把页面砸没）",
           bool(_err_none) and not _fired_none and not _p_none.scheduled
           and "不是以服务方式" in _err_none,
           repr((_err_none, _fired_none, _p_none.scheduled)))
     _p_stop = _FakeServiceProbe("STOPPED")
     _err_stop, _fired_stop = _run_restart_case(_p_stop)
-    check("维护 v2.1.3.9：服务不是 RUNNING → 可读原因 + 不调度 + 不退出",
+    check("维护 v2.1.3.10：服务不是 RUNNING → 可读原因 + 不调度 + 不退出",
           bool(_err_stop) and not _fired_stop and not _p_stop.scheduled
           and "STOPPED" in _err_stop,
           repr(_err_stop))
     _p_bad = _FakeServiceProbe("RUNNING", ok=False, detail="schtasks /create 返回 1")
     _err_bad, _fired_bad = _run_restart_case(_p_bad)
-    check("维护 v2.1.3.9：调度失败 → 可读原因 + 不退出（页面不能直接消失）",
+    check("维护 v2.1.3.10：调度失败 → 可读原因 + 不退出（页面不能直接消失）",
           bool(_err_bad) and not _fired_bad and "schtasks" in _err_bad, repr(_err_bad))
     _p_ok = _FakeServiceProbe("RUNNING")
     _err_ok, _fired_ok = _run_restart_case(_p_ok)
     _r_script_path = _p_ok.scheduled[0][1] if _p_ok.scheduled else ""
-    check("维护 v2.1.3.9：服务 RUNNING → 调度一次性任务 + 执行器落盘 + 本进程退出",
+    check("维护 v2.1.3.10：服务 RUNNING → 调度一次性任务 + 执行器写到**无空格路径** + 看门狗已挂",
           _err_ok is None and _fired_ok and len(_p_ok.scheduled) == 1
           and _p_ok.scheduled[0][0] == _wa_restart.RESTART_TASK_NAME
-          and os.path.isfile(_r_script_path),
+          and os.path.isfile(_r_script_path)
+          and not re.search(r"\s", _r_script_path),
           repr((_err_ok, _fired_ok, _p_ok.scheduled)))
 finally:
     if _r_had_log_dir:
@@ -4677,7 +4697,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.9", version.VERSION == "2.1.3.9", version.VERSION)
+check("版本 = 2.1.3.10", version.VERSION == "2.1.3.10", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
