@@ -36,8 +36,10 @@ src_web = pathlib.Path("web_api.py").read_text(encoding="utf-8")
 src_upd = pathlib.Path("auto_update.py").read_text(encoding="utf-8")
 
 # ---- P0-1：6 个裸名不再出现 ----
-for bare in ("time.sleep(0.3)",):
-    check("P0-1 import time 可用", bare in src_web)
+# v2.1.3.9：原来拿 `time.sleep(0.3)` 当「import time 可用」的证据 —— 那行是旧的
+# 「重启服务」兜底代码，改成调度一次性任务后换成 time.sleep(0.5)。判据改为「确实
+# import 了 time 且仍在用 time.sleep」，否则这个断言会随实现细节漂移 ✗。
+check("P0-1 import time 可用", "import time" in src_web and "time.sleep(" in src_web)
 for name in ("_do_check_now", "_do_update_now", "_set_update_state", "_log_upgrade", "UPGRADE_HISTORY_MAX_LINES"):
     check("P0-1 %s 已加 _auto_update_mod. 前缀" % name,
           ("_auto_update_mod.%s" % name) in src_web)
@@ -4466,6 +4468,127 @@ check("维护 P3-4：错误提示在 catch 里消费抛出的 err.message（保�
       "err.message 出现 %d 次" % _page.count("err && err.message"))
 
 
+# ============================================================
+# v2.1.3.9（真机 2026-11-20）—— 「重启服务」不再让服务自己停自己
+#
+# 真机根因：旧实现让服务**同步**跑 `nssm restart DrcomAutoLogin` —— nssm restart 的
+# stop 半程会把当前 Python 进程（以及它拉起的 nssm.exe 子进程）一起结束，start 半程
+# 永远跑不到 → 服务永久 STOPPED（AppExit=Ignore，NSSM 不会自己拉起）。
+# 真机日志（D:\Program Files\DrcomAutoLogin\logs\campus_login.log）：
+#   [2026-11-20 10:29:45] [WARNING] nssm restart 返回码 3221225786，退回 os._exit(0)
+#   3221225786 = 0xC000013A = STATUS_CONTROL_C_EXIT（被控制台事件结束）。
+# 现在改成「任务计划程序的一次性任务」在服务进程之外做 sc stop → sc start。
+# ============================================================
+
+import web_api as _wa_restart
+
+
+def _restart_action_lines(script):
+    """执行器脚本里的「动作行」（去掉注释 / 空行，保留顺序 ✓）。"""
+    return [ln.strip() for ln in script.splitlines()
+            if ln.strip() and not ln.strip().lower().startswith("rem")]
+
+
+_r_script = _wa_restart._restart_service_script()
+_r_actions = _restart_action_lines(_r_script)
+_r_wait = next((i for i, ln in enumerate(_r_actions) if ln.startswith("ping -n")), -1)
+_r_stop = next((i for i, ln in enumerate(_r_actions) if " stop " in ln), -1)
+_r_start = next((i for i, ln in enumerate(_r_actions) if " start " in ln), -1)
+
+check("维护 v2.1.3.9：重启执行器顺序 = 等旧进程退出 → sc stop → sc start",
+      _r_wait >= 0 and _r_stop > _r_wait and _r_start > _r_stop,
+      "wait={} stop={} start={}".format(_r_wait, _r_stop, _r_start))
+check("维护 v2.1.3.9：sc start 有界重试（停还在收尾时先失败、几秒后重试）+ 收尾删任务/删自己",
+      "goto restart_try" in _r_script and "if %_try% lss" in _r_script
+      and "/delete /tn" in _r_script and 'del /f /q "%~f0"' in _r_script,
+      "重试/收尾断言")
+check("维护 v2.1.3.9：重启执行器的**动作行**不再调用 nssm（服务不能自己停自己 ✗）",
+      not any("nssm" in ln.lower() for ln in _r_actions),
+      "执行器动作里出现 nssm = 旧坑复活: {}".format(
+          [ln for ln in _r_actions if "nssm" in ln.lower()]))
+
+
+class _FakeServiceProbe:
+    """假的服务控制探针（离线跑决策逻辑，不碰本机服务 ✓）。"""
+
+    def __init__(self, state, ok=True, detail="ok"):
+        self.state = state
+        self.ok = ok
+        self.detail = detail
+        self.scheduled = []
+
+    def query_state(self):
+        return self.state
+
+    def schedule(self, task_name, script_path):
+        self.scheduled.append((task_name, script_path))
+        return self.ok, self.detail
+
+
+def _run_restart_case(probe):
+    fled = threading.Event()
+    err = _wa_restart._restart_service_soon(probe=probe, exit_fn=fled.set)
+    fled.wait(2)
+    return err, fled.is_set()
+
+
+_r_had_log_dir = hasattr(_wa_restart, "LOG_DIR")
+_r_saved_log_dir = getattr(_wa_restart, "LOG_DIR", None)
+_r_had_logger = hasattr(_wa_restart, "logger")
+_r_saved_logger = getattr(_wa_restart, "logger", None)
+_r_tmp = tempfile.mkdtemp(prefix="drcom-restart-")
+_wa_restart.LOG_DIR = _r_tmp
+# 本文件前面把 web_api.logger 换成了只实现 warning 的 _FakeLogger（C-16 测试用）→
+# 这里换回真 logger，免得「重启成功」分支的 log.info 掉进假对象 ✗
+import logging as _r_logging
+_wa_restart.logger = _r_logging.getLogger("drcom-restart-smoke")
+try:
+    _p_none = _FakeServiceProbe(None)
+    _err_none, _fired_none = _run_restart_case(_p_none)
+    check("维护 v2.1.3.9：查不到服务状态 → 可读原因、不调度、**不退出进程**（不把页面砸没）",
+          bool(_err_none) and not _fired_none and not _p_none.scheduled
+          and "不是以服务方式" in _err_none,
+          repr((_err_none, _fired_none, _p_none.scheduled)))
+    _p_stop = _FakeServiceProbe("STOPPED")
+    _err_stop, _fired_stop = _run_restart_case(_p_stop)
+    check("维护 v2.1.3.9：服务不是 RUNNING → 可读原因 + 不调度 + 不退出",
+          bool(_err_stop) and not _fired_stop and not _p_stop.scheduled
+          and "STOPPED" in _err_stop,
+          repr(_err_stop))
+    _p_bad = _FakeServiceProbe("RUNNING", ok=False, detail="schtasks /create 返回 1")
+    _err_bad, _fired_bad = _run_restart_case(_p_bad)
+    check("维护 v2.1.3.9：调度失败 → 可读原因 + 不退出（页面不能直接消失）",
+          bool(_err_bad) and not _fired_bad and "schtasks" in _err_bad, repr(_err_bad))
+    _p_ok = _FakeServiceProbe("RUNNING")
+    _err_ok, _fired_ok = _run_restart_case(_p_ok)
+    _r_script_path = _p_ok.scheduled[0][1] if _p_ok.scheduled else ""
+    check("维护 v2.1.3.9：服务 RUNNING → 调度一次性任务 + 执行器落盘 + 本进程退出",
+          _err_ok is None and _fired_ok and len(_p_ok.scheduled) == 1
+          and _p_ok.scheduled[0][0] == _wa_restart.RESTART_TASK_NAME
+          and os.path.isfile(_r_script_path),
+          repr((_err_ok, _fired_ok, _p_ok.scheduled)))
+finally:
+    if _r_had_log_dir:
+        _wa_restart.LOG_DIR = _r_saved_log_dir
+    else:
+        try:
+            del _wa_restart.LOG_DIR
+        except AttributeError:
+            pass
+    if _r_had_logger:
+        _wa_restart.logger = _r_saved_logger
+    else:
+        try:
+            del _wa_restart.logger
+        except AttributeError:
+            pass
+    shutil.rmtree(_r_tmp, ignore_errors=True)
+
+check("维护 v2.1.3.9：前端确认文案说明「会先停再启、页面短暂不可用」，不再承诺 NSSM 一定拉回",
+      "服务会先停止再自动启动" in _page and "NSSM 将自动重新拉起进程" not in _page,
+      "确认文案断言")
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -4554,7 +4677,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.8", version.VERSION == "2.1.3.8", version.VERSION)
+check("版本 = 2.1.3.9", version.VERSION == "2.1.3.9", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

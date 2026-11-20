@@ -586,6 +586,28 @@ try:
     _check("维护 P3-15：导入请求体过大 → 413 + 中文「请求体过大」（可读，不含内部异常）",
            (_st_big, "请求体过大" in _big_err, "internal" not in _big_err),
            (413, True, True), repr((_st_big, _big_err)))
+    # ============================================================
+    # v2.1.3.9（真机 2026-11-20）：「重启服务」路由 + 失败文案
+    # 真机上旧实现同步跑 nssm restart → 服务停自己 → 永久 STOPPED（AppExit=Ignore）。
+    # 这里只测 HTTP 层的成功 / 失败两条分支；具体调度逻辑在 _smoke_static.py 里离线断言
+    # （不能在这里真去建计划任务 ✗）。
+    # ============================================================
+    _rs_saved = web_api._restart_service_soon
+    web_api._restart_service_soon = lambda: None
+    _st_rs, _b_rs = _post_json("/api/restart", {})
+    web_api._restart_service_soon = lambda: "系统服务 DrcomAutoLogin 当前是 STOPPED（不是运行中）"
+    _st_rs2, _b_rs2 = _post_json("/api/restart", {})
+    web_api._restart_service_soon = _rs_saved
+    _b_rs = _b_rs or {}
+    _b_rs2 = _b_rs2 or {}
+    _check("维护 v2.1.3.9：POST /api/restart 调度成功 → 200 + 明说「约 N 秒内重启、页面短暂不可用」",
+           (_st_rs, _b_rs.get("ok"), "重启" in (_b_rs.get("message") or ""),
+            "不可用" in (_b_rs.get("message") or "")),
+           (200, True, True, True), repr((_st_rs, _b_rs)))
+    _check("维护 v2.1.3.9：重启提不起来 → 409 + 可读中文原因（不再假装成功）",
+           (_st_rs2, _b_rs2.get("ok"), "STOPPED" in (_b_rs2.get("error") or "")),
+           (409, False, True), repr((_st_rs2, _b_rs2)))
+
 finally:
     server.shutdown()
 

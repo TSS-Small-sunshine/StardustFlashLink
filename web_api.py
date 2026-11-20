@@ -944,36 +944,182 @@ def api_get_changelog():
     return _eula_mod.api_get_changelog()
 
 
-def _restart_service_soon():
-    """稍后重启服务：优先 `nssm restart DrcomAutoLogin`，否则退回 `os._exit(0)`。
+# ============================================================
+# 「重启服务」（P0-7 / v2.1.3.9 重写：服务不能自己停自己）
+#
+# 真机根因（2026-11-20 10:29:45，用户在本机 Web UI 点「重启服务」）：
+#   旧实现让服务**同步**跑 `nssm restart DrcomAutoLogin`。nssm restart 的 stop 半程
+#   会让 NSSM 结束当前的 Python 进程 —— 而我们正卡在等这个 nssm 子进程返回；NSSM 结束
+#   进程时把子进程 nssm.exe 也一起收掉 → start 半程永远跑不到。
+#   真机日志：`nssm restart 返回码 3221225786（0xC000013A STATUS_CONTROL_C_EXIT），
+#   退回 os._exit(0)` → 服务永久 STOPPED（AppExit=Ignore，NSSM 不会自己拉起）✗。
+#
+# 修法：把「等旧进程退出 → sc stop → sc start」交给**任务计划程序**的一次性任务
+# （SYSTEM 身份、不在 NSSM 的 Job Object 里，所以服务停自己时不会被连带杀死）；
+# 本进程只负责调度 + 正常退出。与自动升级的「执行器」是同一套已被真机验证的机制 ✓。
+# ============================================================
+RESTART_TASK_NAME = "DrcomAutoLogin-Restart"
+RESTART_SERVICE_NAME = "DrcomAutoLogin"
+_SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+SC_EXE = os.path.join(_SYSTEM32, "sc.exe")
+SCHTASKS_EXE = os.path.join(_SYSTEM32, "schtasks.exe")
+#: 一次性任务里「等一拍」的秒数（ping 当 sleep；旧进程退出 + SCM 收尾都要时间 ✓）
+RESTART_WAIT_TICKS = 8
 
-    P0-7：AppExit 策略是 `Ignore`（v2.0.2.3 起，防端口冲突时 NSSM 死循环重启），
-    因此 `os._exit(0)` 之后 NSSM **不会**再拉起 —— 点「重启服务」会变成永久停机。
-    v2.0.11.0 从 `api_post_restart` 里抽出来，让「回滚」也能复用同一条重启路径。
+
+class _ServiceCtlProbe:
+    """服务控制探针：只读查询 + 调度一次性任务（测试用替身注入，见 _restart_service_soon ✓）。"""
+
+    @staticmethod
+    def query_state(sc_exe=SC_EXE, service_name=RESTART_SERVICE_NAME):
+        """`sc query` 的 STATE 关键词（RUNNING / STOPPED / START_PENDING …）；查不到返回 None。
+
+        只读、**不需要管理员** ✓（服务本体是 LocalSystem，但查询谁都能做）。
+        """
+        try:
+            proc = subprocess.run([sc_exe, "query", service_name],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=10, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = (proc.stdout or b"").decode("mbcs", "replace")
+        match = re.search(r"STATE\s*:\s*\d+\s+([A-Z_]+)", text)
+        return match.group(1) if match else None
+
+    @staticmethod
+    def schedule(task_name, script_path, schtasks_exe=SCHTASKS_EXE):
+        """建一次性任务并立刻 /run；返回 (是否成功, 说明) ✓。
+
+        `/run` 失败时必须**先删任务**再报错 —— `/sc once /st 00:00` 会留在计划程序里，
+        否则次日 00:00 会莫名其妙把服务再重启一次（与审计 E1 同一类坑 ✗）。
+        """
+        try:
+            create = subprocess.run(
+                [schtasks_exe, "/create", "/tn", task_name, "/tr", script_path,
+                 "/sc", "once", "/st", "00:00", "/ru", "SYSTEM", "/rl", "HIGHEST", "/f"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, "schtasks /create 失败: {}".format(exc)
+        if create.returncode != 0:
+            return False, "schtasks /create 返回 {}".format(create.returncode)
+        try:
+            run = subprocess.run([schtasks_exe, "/run", "/tn", task_name],
+                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 timeout=20, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            run = None
+            detail = "schtasks /run 失败: {}".format(exc)
+        if run is not None and run.returncode == 0:
+            return True, "restart-task"
+        if run is not None:
+            detail = "schtasks /run 返回 {}".format(run.returncode)
+        subprocess.run([schtasks_exe, "/delete", "/tn", task_name, "/f"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=20, check=False)
+        return False, detail
+
+
+def _restart_service_script(svc_name=RESTART_SERVICE_NAME, sc_exe=SC_EXE,
+                            schtasks_exe=SCHTASKS_EXE, task_name=RESTART_TASK_NAME,
+                            wait_ticks=RESTART_WAIT_TICKS):
+    """**纯函数**：生成「重启服务」执行器 .cmd（CRLF）✓。
+
+    `sc stop` 必须在 `sc start` 之前；`sc start` 用有界重试（停还没收尾时先失败，
+    再过几秒重试）—— 与自动升级执行器的看门狗同一思路 ✓。
     """
-    def _delayed_restart():
-        nssm = os.path.join(BASE_DIR, "tools", "nssm.exe")
-        if os.path.isfile(nssm):
-            try:
-                proc = subprocess.run([nssm, "restart", "DrcomAutoLogin"], timeout=30, check=False)
-                if proc.returncode == 0:
-                    logger.info("已通过 nssm restart 重启服务")
-                    return
-                logger.warning("nssm restart 返回码 %s，退回 os._exit(0)", proc.returncode)
-            except (OSError, subprocess.SubprocessError) as exc:
-                logger.warning("nssm restart 失败: %s，退回 os._exit(0)", exc)
-        else:
-            logger.warning("找不到 %s，退回 os._exit(0)", nssm)
-        STOP_EVENT.set()
-        time.sleep(0.3)
-        os._exit(0)
-    threading.Thread(target=_delayed_restart, daemon=True).start()
+    wait = 'ping -n {} 127.0.0.1 >nul 2>&1'.format(int(wait_ticks) + 1)
+    lines = [
+        "@echo off",
+        "rem === 星尘闪连「重启服务」执行器（由 web_api.py 生成；跑完自删）===",
+        "rem 由任务计划程序以 SYSTEM 拉起：**不在 NSSM 的 Job Object 里**，",
+        "rem 所以「服务停自己」不会把这个脚本连带杀掉（v2.1.3.9 真机根因）。",
+        "setlocal",
+        "rem ---- 1) 等旧进程退出（ping 当 sleep：SYSTEM 会话里没有能用的 timeout） ----",
+        wait,
+        "rem ---- 2) 停服务（FAILED 1062 = 本来就没在跑，忽略即可） ----",
+        '"' + sc_exe + '" stop ' + svc_name + ' >nul 2>&1',
+        "rem ---- 3) 等 SCM 收尾，再起服务（有界重试，停还在收尾时先失败很正常） ----",
+        "set /a _try=0",
+        ":restart_try",
+        'set /a _try+=1',
+        '"' + sc_exe + '" query ' + svc_name + ' | find /i "RUNNING" >nul 2>&1',
+        "if not errorlevel 1 goto restart_done",
+        '"' + sc_exe + '" start ' + svc_name + ' >nul 2>&1',
+        wait,
+        "if %_try% lss 6 goto restart_try",
+        ":restart_done",
+        "rem ---- 4) 收尾：删任务、删自己（删不掉不打扰用户；下次 /create /f 会覆盖 ✓） ----",
+        '"' + schtasks_exe + '" /delete /tn "' + task_name + '" /f >nul 2>&1',
+        'del /f /q "%~f0" >nul 2>&1',
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _write_restart_script(path, script):
+    """落盘执行器（与自动升级执行器同一套编码策略）✓。
+
+    .cmd 由任务计划程序以 SYSTEM 拉起，cmd.exe 按**系统 ANSI 代码页**解析 ——
+    非 ASCII 安装目录下若按 UTF-8 写，`if exist` / 中文判断会全判错 ✗。
+    优先 mbcs；系统代码页表示不了中文时退回 UTF-8 + 首行 chcp 65001 ✓。
+    """
+    try:
+        with open(path, "w", encoding="mbcs", newline="") as handle:
+            handle.write(script)
+    except (LookupError, UnicodeEncodeError):
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write("@chcp 65001 >nul\r\n" + script)
+
+
+def _exit_for_restart():
+    """让服务进程正常退出 —— 服务会短暂 STOPPED，随后由一次性任务 `sc start` 拉回 ✓。"""
+    STOP_EVENT.set()
+    time.sleep(0.5)
+    os._exit(0)
+
+
+def _restart_service_soon(probe=None, exit_fn=None):
+    """调度一次「重启服务」；成功返回 None，失败返回**可读原因**（绝不静默 ✗）。
+
+    只在「服务确实是 RUNNING」时才调度（否则说明本进程不是服务进程 / 服务没装，
+    杀掉自己只会让页面彻底消失，用户更懵 ✗）。调度成功后本进程退出，由任务把它拉回 ✓。
+    """
+    probe = probe or _ServiceCtlProbe()
+    state = probe.query_state()
+    if state is None:
+        return ("查不到系统服务 {} 的状态 —— 本程序可能不是以服务方式安装的，无法自动重启；"
+                "请手动关闭并重新打开程序").format(RESTART_SERVICE_NAME)
+    if state != "RUNNING":
+        return ("系统服务 {} 当前是 {}（不是运行中）—— 请先在「服务」里手动启动它，再点重启"
+                ).format(RESTART_SERVICE_NAME, state)
+    script_path = os.path.join(LOG_DIR, "restart_service.cmd")
+    if re.search(r'[&|<>^%!]', script_path):
+        return "安装路径含 cmd 特殊字符，无法自动重启；请手动重启服务"
+    try:
+        _write_restart_script(script_path, _restart_service_script())
+    except OSError as exc:
+        return "写重启执行器失败：{}".format(exc)
+    ok, detail = probe.schedule(RESTART_TASK_NAME, script_path)
+    # 冒烟会在 _attach() 之前直接调本函数（离线决策断言）→ logger 可能还没注入 ✗
+    log = globals().get("logger") or logging.getLogger(__name__)
+    if not ok:
+        log.warning("重启服务：调度一次性任务失败（%s）", detail)
+        return "提不起重启任务（{}）—— 请到「服务」里手动重启 {}".format(detail, RESTART_SERVICE_NAME)
+    log.info("重启服务：已调度一次性任务 %s（约 %d 秒后 sc stop / sc start）",
+             RESTART_TASK_NAME, int(RESTART_WAIT_TICKS) + 2)
+    threading.Thread(target=exit_fn or _exit_for_restart, daemon=True).start()
+    return None
 
 
 def api_post_restart(handler):
-    """重启服务（P0-7）。"""
-    _restart_service_soon()
-    return 200, {"ok": True, "message": "服务正在重启"}
+    """重启服务（P0-7 / v2.1.3.9 重写：调度一次性任务，由它 sc stop → sc start）。"""
+    error = _restart_service_soon()
+    if error:
+        return 409, {"ok": False, "error": error}
+    return 200, {
+        "ok": True,
+        "message": "服务将在约 {} 秒内重启（页面会短暂不可用，之后自动恢复）".format(
+            int(RESTART_WAIT_TICKS) + 8),
+    }
 
 
 # ============================================================
@@ -995,7 +1141,11 @@ def api_post_rollback(payload):
     """
     status, body = _auto_update_mod.api_post_rollback(payload)
     if status == 200 and isinstance(body, dict) and body.get("ok"):
-        _restart_service_soon()
+        # v2.1.3.9：重启改成「调度一次性任务」，失败会返回可读原因 —— 不能吞掉 ✗
+        warn = _restart_service_soon()
+        if warn:
+            body = dict(body)
+            body["warning"] = "回滚已生效，但自动重启没提起来：{}".format(warn)
     return status, body
 
 
@@ -4460,7 +4610,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
        （用户原话：「关于的访问入口有存在的必要吗」），本页地址栏里就有。 */
     var btnRestart = $('btn-restart');
     if (btnRestart) btnRestart.addEventListener('click', function () {
-      if (!window.confirm('确认重启服务？NSSM 将自动重新拉起进程。')) return;
+      if (!window.confirm('确认重启服务？服务会先停止再自动启动，本页面约 10~15 秒不可用，之后会自动恢复。')) return;
       API.restart().then(function (r) {
         toast((r && r.message) || '服务正在重启，3 秒后请刷新页面', 'success');
       }).catch(function (err) { toast((err && err.message) || '重启请求失败', 'error'); });
