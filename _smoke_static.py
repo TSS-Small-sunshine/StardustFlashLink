@@ -4157,6 +4157,7 @@ _saved_f2 = {}
 for _k in ("_cleanup_update_leftovers", "_ensure_nssm_appexit_sane",
            "_ensure_tray_autostart_sane", "_start_deferred_runner_recheck",
            "_report_update_runner_result", "_relaunch_tray_in_user_session",
+           "_tray_already_running",
            "LOG_DIR", "UPGRADE_LOG_FILE", "BASE_DIR", "logger", "STATE", "STATE_LOCK"):
     _saved_f2[_k] = (_k in _au.__dict__, _au.__dict__.get(_k))
 _f2_dir = tempfile.mkdtemp(prefix="au_f2_")
@@ -4184,6 +4185,8 @@ try:
     _au._ensure_tray_autostart_sane = lambda: {"action": "keep", "want": True, "current": "x"}
     _au._start_deferred_runner_recheck = lambda *_a, **_k: None
     _au._report_update_runner_result = lambda *_a, **_k: False
+    # v2.1.3.11：拉之前会先查托盘单实例互斥体 —— 冒烟里断言「需要拉」，所以固定回 False
+    _au._tray_already_running = lambda: False
     _au._relaunch_tray_in_user_session = _f2_stub_ok
     _au._post_upgrade_startup()
     _f2_none = len(_f2_calls)
@@ -4195,6 +4198,15 @@ try:
     _au._write_update_attempt(_au.VERSION, count=1, state="attempted")
     _au._post_upgrade_startup()
     _f2_log_fail = pathlib.Path(_au.UPGRADE_LOG_FILE).read_text(encoding="utf-8")
+    # v2.1.3.11 行为级：**没升级**、只有「用户点过重启服务」的标记 → 也要拉一次托盘
+    _au._relaunch_tray_in_user_session = _f2_stub_ok
+    pathlib.Path(_au._tray_relaunch_marker_path()).write_text(
+        "restart-requested\n", encoding="utf-8")
+    _au._post_upgrade_startup()
+    _f2_restart = len(_f2_calls)
+    # 标记只消费一次：再跑一次启动钩子不应再拉
+    _au._post_upgrade_startup()
+    _f2_restart_again = len(_f2_calls)
 finally:
     for _k, (_had, _v) in _saved_f2.items():
         if _had:
@@ -4209,19 +4221,25 @@ check("维护 R7-C16（行为级）：没升级过 → 绝不拉托盘；刚升�
 check("维护 R7-C16（行为级）：拉起失败 → 日志带中文原因 + 「下次登录会由自启项启动」",
       "托盘未能在当前会话自动拉起（测试原因：拿不到 SeTcbPrivilege）" in _f2_log_fail
       and "下次登录会由自启项启动" in _f2_log_fail, repr(_f2_log_fail[-160:]))
+check("维护 v2.1.3.11（行为级）：没升级、只有「点过重启服务」标记 → 拉一次托盘，且标记只消费一次",
+      _f2_restart == _f2_one + 1 and _f2_restart_again == _f2_restart,
+      "restart=%d again=%d" % (_f2_restart, _f2_restart_again))
 
 _src_upd7 = pathlib.Path("auto_update.py").read_text(encoding="utf-8")
 _f7_post = _src_upd7.find("def _post_upgrade_startup")
 _f7_loop = _src_upd7.find("def _auto_update_loop")
 _f7_tray = _src_upd7.find("_ensure_tray_autostart_sane()")
-_f7_call = _src_upd7.find("_relaunch_tray_in_user_session()")
-_f7_guard = _src_upd7.rfind("if just_upgraded:", 0, _f7_call) if _f7_call >= 0 else -1
+# v2.1.3.11：调用点改成 _relaunch_tray_if_needed(trigger)（先查互斥体，避免重复拉），
+# 守卫也从「只 just_upgraded」扩成「just_upgraded **或** 用户点过重启服务」。
+# 注意：要从启动钩子**之后**找调用点 —— 助手函数定义里也有同样的函数名 ✗
+_f7_call = _src_upd7.find("_relaunch_tray_if_needed(trigger)", _f7_post)
+_f7_guard = _src_upd7.rfind("if just_upgraded or restart_requested:", 0, _f7_call) if _f7_call >= 0 else -1
 check("维护 R7-C16：触发点在启动钩子里「托盘自启」之后（不是另起一条路径）",
       -1 < _f7_loop < _f7_post < _f7_tray < _f7_call,
       "loop=%d post=%d tray=%d call=%d" % (_f7_loop, _f7_post, _f7_tray, _f7_call))
-check("维护 R7-C16：调用受 just_upgraded 守卫（不是每次服务启动都拉）",
+check("维护 R7-C16：调用受「刚升级 或 用户点过重启」守卫（不是每次服务启动都拉）",
       _f7_guard > _f7_post and 0 < _f7_call - _f7_guard < 400
-      and _src_upd7.count("if just_upgraded:") == 1,
+      and _src_upd7.count("if just_upgraded or restart_requested:") == 1,
       "guard=%d call=%d" % (_f7_guard, _f7_call))
 check("维护 R7-C16：just_upgraded 只由「目标版本 == 当前版本」的成功分支置真",
       _src_upd7.find("just_upgraded = False") > 0
@@ -4230,6 +4248,7 @@ check("维护 R7-C16：just_upgraded 只由「目标版本 == 当前版本」的
       and _src_upd7.find("just_upgraded = True") < _f7_call)
 check("维护 R7-C16：服务每次启动路径（_auto_update_loop）里没有拉托盘调用",
       _f7_loop >= 0 and "_relaunch_tray_in_user_session" not in _src_upd7[_f7_loop:_f7_post]
+      and "_relaunch_tray_if_needed" not in _src_upd7[_f7_loop:_f7_post]
       and "just_upgraded" not in _src_upd7[_f7_loop:_f7_post])
 _BS7 = chr(92)
 check("维护 R7-C16：ctypes 关键调用齐全（会话令牌 / 复制令牌 / 用户进程 / 桌面名 / 提权）",
@@ -4609,6 +4628,118 @@ check("维护 v2.1.3.9：前端确认文案说明「会先停再启、页面短�
       "确认文案断言")
 
 
+# ============================================================
+# v2.1.3.11（真机 2026-11-20 两条问题）
+#   ① 「登录失败: AC认证失败」—— 新 AC（Ruijie_Ac_cc73fa）要求登录请求带
+#      wlanacip / wlanacname（老 AC 留空也能过）→ 未认证时先探门户 302 再登录；
+#   ② 「重启服务后又没有托盘」—— 服务重启会连带结束托盘，旧逻辑只在「刚升级」时拉，
+#      现在用户主动点重启时写标记，新进程启动钩子消费标记并拉回托盘。
+# ============================================================
+_proto_src = pathlib.Path("protocol.py").read_text(encoding="utf-8")
+_REAL_PORTAL_URL = ("http://172.16.80.3/a79.htm?wlanuserip=10.12.14.24&mac=98bd8006f234"
+                    "&wlanacip=172.16.200.252&wlanacname=Ruijie_Ac_cc73fa"
+                    "&url=http%3A%2F%2F9.9.9.9%2F&ssid=FJNY")
+_pp = _pl._portal_param_from_text(_REAL_PORTAL_URL)
+check("维护 v2.1.3.11：能从门户 302 里解析出 wlanacip / wlanacname / wlanuserip / mac / ssid",
+      (_pp["ac_ip"], _pp["ac_name"], _pp["user_ip"], _pp["user_mac"], _pp["ssid"])
+      == ("172.16.200.252", "Ruijie_Ac_cc73fa", "10.12.14.24", "98BD8006F234", "FJNY"),
+      repr(_pp))
+_bad_pp = _pl._portal_param_from_text(
+    "?wlanacip=999.1.1.1&wlanacname=../x&wlanuserip=not-an-ip&mac=zzzz&ssid=")
+check("维护 v2.1.3.11：门户参数字段形状不合法 → 一律丢弃（不把脏数据拼进登录 URL）",
+      (_bad_pp["ac_ip"], _bad_pp["ac_name"], _bad_pp["user_ip"], _bad_pp["user_mac"])
+      == ("", "", "", ""),
+      repr(_bad_pp))
+check("维护 v2.1.3.11：run_once 在未认证时先 discover_portal_params 再登录（AC 参数来源）",
+      "portal = discover_portal_params(host)" in _proto_src
+      and "wlan_ac_name=portal.get(\"ac_name\", \"\")" in _proto_src,
+      "protocol 源断言")
+
+
+class _FakeLoginResp:
+    def __init__(self, body):
+        self._body = body
+
+    def read(self, *_args):
+        return self._body.encode("utf-8") if isinstance(self._body, str) else self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+_orig_urlopen = _pl.urllib.request.urlopen
+_captured_url = {}
+
+
+def _fake_urlopen(req, timeout=None):
+    _captured_url["url"] = getattr(req, "full_url", str(req))
+    return _FakeLoginResp('dr1234({"result":1,"msg":"Portal协议认证成功！"});')
+
+
+_pl.urllib.request.urlopen = _fake_urlopen
+try:
+    _ok_ac, _msg_ac = _pl.login(
+        "172.16.80.3", "26126303341", "", "pwd-x", "10.12.14.24", "98BD8006F234",
+        wlan_ac_ip="172.16.200.252", wlan_ac_name="Ruijie_Ac_cc73fa")
+finally:
+    _pl.urllib.request.urlopen = _orig_urlopen
+check("维护 v2.1.3.11：login() 把 wlan_ac_ip / wlan_ac_name 拼进请求（账号不带多余后缀）",
+      _ok_ac is True
+      and "wlan_ac_ip=172.16.200.252" in _captured_url.get("url", "")
+      and "wlan_ac_name=Ruijie_Ac_cc73fa" in _captured_url.get("url", "")
+      and "user_account=26126303341" in _captured_url.get("url", ""),
+      _captured_url.get("url", "").split("?", 1)[-1][:160])
+
+_orig_urlopen2 = _pl.urllib.request.urlopen
+_pl.urllib.request.urlopen = lambda req, timeout=None: _FakeLoginResp(
+    'dr1({"result":0,"msg":"IP: 10.12.14.24 已经在线！"});')
+try:
+    _ok_on, _msg_on = _pl.login("h", "a", "", "p", "10.1.1.1", "98BD8006F234")
+finally:
+    _pl.urllib.request.urlopen = _orig_urlopen2
+check("维护 v2.1.3.11：门户回「已经在线」（result=0）按成功处理 —— 不再重试/退避/误报未登录",
+      _ok_on is True and "已经在线" in _msg_on, repr((_ok_on, _msg_on)))
+
+import auto_update as _au_tray
+_marker_tmp = tempfile.mkdtemp(prefix="drcom-tray-marker-")
+_marker_had_log = hasattr(_au_tray, "LOG_DIR")
+_marker_saved_log = getattr(_au_tray, "LOG_DIR", None)
+_au_tray.LOG_DIR = _marker_tmp
+try:
+    _marker_path = _au_tray._tray_relaunch_marker_path()
+    check("维护 v2.1.3.11：重启标记放在 logs 目录（执行器/启动钩子同一份约定）",
+          _marker_path.endswith(_au_tray.RESTART_TRAY_MARKER_NAME)
+          and os.path.dirname(_marker_path) == _marker_tmp,
+          _marker_path)
+    check("维护 v2.1.3.11：没有标记 → 不额外拉托盘（用户主动退出托盘不会被复活）",
+          _au_tray._consume_restart_marker() is False, "")
+    with open(_marker_path, "w", encoding="utf-8") as _fh:
+        _fh.write("restart-requested\n")
+    check("维护 v2.1.3.11：有标记 → 消费一次返回 True 并删除标记（只拉一次）",
+          _au_tray._consume_restart_marker() is True and not os.path.exists(_marker_path), "")
+finally:
+    if _marker_had_log:
+        _au_tray.LOG_DIR = _marker_saved_log
+    else:
+        try:
+            del _au_tray.LOG_DIR
+        except AttributeError:
+            pass
+    shutil.rmtree(_marker_tmp, ignore_errors=True)
+
+check("维护 v2.1.3.11：启动钩子按「刚升级 OR 用户点过重启」拉托盘，且先查互斥体避免重复拉",
+      "just_upgraded or restart_requested" in src_upd
+      and "_relaunch_tray_if_needed" in src_upd
+      and "_tray_already_running" in src_upd,
+      "启动钩子断言")
+check("维护 v2.1.3.11：web_api 调度重启时写托盘拉起标记（否则重启后托盘又不见了）",
+      "RESTART_TRAY_MARKER_NAME" in src_web and ".tray_relaunch_requested" in src_web,
+      "重启标记断言")
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -4697,7 +4828,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.10", version.VERSION == "2.1.3.10", version.VERSION)
+check("版本 = 2.1.3.11", version.VERSION == "2.1.3.11", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

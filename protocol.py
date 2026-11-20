@@ -245,6 +245,103 @@ def discover_network(host):
     return ip, mac
 
 
+# ============================================================
+# 门户跳转参数发现（v2.1.3.11）
+#
+# 为什么要它：认证请求必须带上门户认识的 AC 参数（wlanacip / wlanacname）。
+# 老部署（SR8806-X-S）留空也能过，但 2026-11-20 真机实测新 AC（Ruijie_Ac_cc73fa）
+# 留空会直接被判「AC认证失败」—— 同一个账号密码，补上 AC 参数后门户立刻正常受理
+# （返回「已经在线」）。这些参数只在**未认证**时由门户 302 给出，所以登录前先探一次。
+# ============================================================
+PORTAL_PROBE_URLS = (
+    "http://www.msftconnecttest.com/redirect",
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://9.9.9.9/",
+)
+
+#: 门户跳转参数里各字段的形状白名单（与审计 C-21 同口径：拿到的值先验形状再拼进请求）
+_AC_NAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+_MAC_RE = re.compile(r"[0-9A-F]{12}")
+
+
+def _grab_query_value(text, name):
+    """从文本里的 query 串抓一个参数（前后都要求 & / ? 边界，避免子串误命中）。"""
+    m = re.search(r"(?i)[?&]" + re.escape(name) + r"=([^&\s\"'<>]+)", text or "")
+    return urllib.parse.unquote(m.group(1)) if m else ""
+
+
+def _safe_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except (ValueError, TypeError):
+        return ""
+
+
+def _safe_mac(value):
+    mac = (value or "").upper().replace(":", "").replace("-", "")
+    return mac if _MAC_RE.fullmatch(mac) else ""
+
+
+def _portal_param_from_text(text):
+    """**纯函数**：从 302 的 Location / 门户页面文本里抠出 AC 与网络参数 ✓。
+
+    只收形状合法的值（IP 过 ipaddress、AC 名走白名单、MAC 12 位十六进制、SSID 截 64）；
+    其余一律空串（拿不到就走老逻辑：AC 参数留空，至少不会把脏数据拼进 URL ✗）。
+    """
+    out = {"ac_ip": "", "ac_name": "", "user_ip": "", "user_mac": "", "ssid": ""}
+    if not text:
+        return out
+    out["ac_ip"] = _safe_ip(_grab_query_value(text, "wlanacip"))
+    ac_name = _grab_query_value(text, "wlanacname")
+    out["ac_name"] = ac_name if _AC_NAME_RE.fullmatch(ac_name or "") else ""
+    out["user_ip"] = _safe_ip(_grab_query_value(text, "wlanuserip"))
+    out["user_mac"] = _safe_mac(_grab_query_value(text, "mac"))
+    out["ssid"] = _grab_query_value(text, "ssid")[:64]
+    return out
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不让 urllib 自动跟随 302 —— 我们要读 Location 里的门户参数本身 ✓。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401, ARG002
+        return None
+
+
+def discover_portal_params(host="", timeout=6):
+    """未认证时探一次门户跳转，拿 AC / 本机 IP / MAC / SSID（拿不到就全空）✓。
+
+    只在 is_online() **明确 False** 之后调用（在线时门户不跳转，探也白探 ✗）。
+    任何异常都吞掉 —— 这是「尽量拿到更准参数」的增强路径；失败仍走老逻辑（AC 留空），
+    绝不因为探不到门户而让本次登录失败 ✗。
+    """
+    empty = {"ac_ip": "", "ac_name": "", "user_ip": "", "user_mac": "", "ssid": ""}
+    opener = urllib.request.build_opener(_NoRedirect)
+    for url in PORTAL_PROBE_URLS:
+        location = ""
+        body = ""
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "*/*"})
+            try:
+                with opener.open(req, timeout=timeout) as resp:
+                    location = resp.headers.get("Location") or ""
+                    body = resp.read(4096).decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                location = exc.headers.get("Location") or ""
+                try:
+                    body = exc.read(4096).decode("utf-8", errors="replace")
+                except (OSError, ValueError):
+                    body = ""
+        except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException):
+            continue
+        found = _portal_param_from_text(location)
+        if not (found["ac_ip"] or found["ac_name"]):
+            found = _portal_param_from_text(body)
+        if found["ac_ip"] or found["ac_name"]:
+            return found
+    return empty
+
+
 def is_online(host):
     """通过 chkstatus JSONP 查询在线状态（端口 80）。
 
@@ -322,15 +419,20 @@ def _safe_error_text(exc, limit=200):
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
+def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac,
+          wlan_ac_ip="", wlan_ac_name=""):
     """Dr.COM JSONP 登录（GET /eportal/portal/login，端口 801）。
 
     请求：GET http://host:801/eportal/portal/login?callback=dr1234&...
     响应：dr1234({"result":1,"msg":"...","ret_code":0})
 
     返回 (success, msg)：
-        success  True=成功（result == 1）/ False=失败
+        success  True=成功（result == 1；或门户说「已经在线」）
         msg      服务端 msg 字段或本地诊断信息（用于日志）
+
+    v2.1.3.11：新增 wlan_ac_ip / wlan_ac_name。**新 AC（Ruijie_Ac_cc73fa）留空会被判
+    「AC认证失败」**（真机 2026-11-20 实测：同一账号密码，补上 AC 参数后门户立刻受理）。
+    参数由调用方用 discover_portal_params() 在未认证时从门户 302 里取；取不到才留空（老行为）。
     """
     callback = "dr{}".format(random.randint(1000, 9999))
     params = {
@@ -341,8 +443,8 @@ def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
         "wlan_user_ip":   wlan_user_ip or "",
         "wlan_user_ipv6": "",
         "wlan_user_mac":  wlan_user_mac or "",
-        "wlan_ac_ip":     "",
-        "wlan_ac_name":   "",
+        "wlan_ac_ip":     wlan_ac_ip or "",
+        "wlan_ac_name":   wlan_ac_name or "",
         "terminal_type":  "1",
         "jsVersion":      "4.1.3",
         "lang":           "zh-cn",
@@ -378,6 +480,10 @@ def login(host, account, suffix, password, wlan_user_ip, wlan_user_mac):
     success = data.get("result") == 1
     # 审计 C-10：服务端 msg 会原样进日志 / 界面，同样先擦 URL 与 password=（I6）
     msg = _scrub_url(data.get("msg", "") or "")
+    # v2.1.3.11：门户对「这台机器/这个账号已经在线」回的是 result=0 + 「IP: … 已经在线！」——
+    # 这不是失败 ✗。不认出来会一直重试、越退越久，界面还一直显示「未登录」。
+    if not success and ("已经在线" in msg or "已在线" in msg):
+        success = True
     return success, msg
 
 
@@ -625,7 +731,17 @@ def run_once(reason):
                 return
 
             wlan_ip, wlan_mac = discover_network(host)
-            ok, msg = login(host, account, suffix, pwd, wlan_ip, wlan_mac)
+            # v2.1.3.11：未认证时先探门户 302 —— 新 AC（Ruijie_Ac_cc73fa）要求登录请求
+            # 带 wlanacip / wlanacname，留空会被判「AC认证失败」（真机 2026-11-20 实测）。
+            # 探不到就退回老行为（AC 留空），不会因此让本次登录失败 ✗。
+            portal = discover_portal_params(host)
+            if portal.get("user_ip"):
+                wlan_ip = portal["user_ip"]
+            if portal.get("user_mac"):
+                wlan_mac = portal["user_mac"]
+            ok, msg = login(host, account, suffix, pwd, wlan_ip, wlan_mac,
+                            wlan_ac_ip=portal.get("ac_ip", ""),
+                            wlan_ac_name=portal.get("ac_name", ""))
             now_iso = _now_iso()
             if ok:
                 _log("登录成功: %s", msg)

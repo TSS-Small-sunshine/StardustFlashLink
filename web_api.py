@@ -967,6 +967,8 @@ def api_get_changelog():
 RESTART_TASK_NAME = "DrcomAutoLogin-Restart"
 RESTART_SERVICE_NAME = "DrcomAutoLogin"
 RESTART_SCRIPT_NAME = "drcom_restart_service.cmd"
+#: 给启动钩子的标记：这次重启是用户主动点的 → 新进程启动时要把托盘拉回本会话 ✓
+RESTART_TRAY_MARKER_NAME = ".tray_relaunch_requested"
 _SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
 SC_EXE = os.path.join(_SYSTEM32, "sc.exe")
 SCHTASKS_EXE = os.path.join(_SYSTEM32, "schtasks.exe")
@@ -1199,6 +1201,16 @@ def _restart_service_soon(probe=None, watchdog=None):
         return "提不起重启任务（{}）—— 请到「服务」里手动重启 {}".format(detail, RESTART_SERVICE_NAME)
     log.info("重启服务：已调度一次性任务 %s（执行器 %s，约 %d 秒后 sc stop / sc start）",
              RESTART_TASK_NAME, script_path, int(RESTART_WAIT_TICKS) + 2)
+    # v2.1.3.11：服务重启会连带结束托盘（托盘由服务跨会话拉起、在它的进程树里；
+    # 真机 2026-11-20 复现「重启后托盘又不见了」）→ 留标记给新进程的启动钩子消费，
+    # 由它把托盘拉回本会话。只在用户**主动点重启**时写，绝不复活用户主动退出的托盘 ✓。
+    marker = os.path.join(LOG_DIR, RESTART_TRAY_MARKER_NAME) if "LOG_DIR" in globals() else ""
+    if marker:
+        try:
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write("restart-requested\n")
+        except OSError as exc:
+            log.warning("重启服务：写托盘拉起标记失败（%s）；重启后托盘可能需要手动打开", exc)
     threading.Thread(target=watchdog or _restart_service_watchdog, daemon=True).start()
     return None
 
