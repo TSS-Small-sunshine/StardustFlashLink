@@ -5,10 +5,53 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.10 (fix) — 2026-11-20 · 代号 `Vega`（织女星）
+
+> 主题：**继续修「重启服务」** —— v2.1.3.9 的做法在真机上「任务创建成功、/run 成功、脚本却根本没执行」，
+> 服务被留在「NSSM wrapper RUNNING、里面的 Python 没了」的假运行状态。本版三个修法一起上，并在真机端到端复验。
+> 接口路径 / 字段名、配置结构、服务名、安装路径、密码文件格式**都没动** ✓。
+
+### 🛠 ① 为什么 v2.1.3.9 还是没修好（真机 A/B 证据）
+- v2.1.3.9 把重启执行器写在 `安装目录\logs\restart_service.cmd`（**路径含空格**）交给任务计划程序：
+  `schtasks /create` 成功、`schtasks /run` 成功，**但脚本从未被执行**（等 6 秒没有任何输出）；
+  同一份脚本放 `C:\Windows\Temp`（无空格）→ **1 秒内跑完**。
+- 原因：任务计划程序执行 .cmd 时会用 `cmd /c <路径>` 之类包装，**含空格的 /tr 路径被拆开** → 找不到文件，
+  却**不返回错误** ✗。于是 v2.1.3.9 点重启后：本进程 `os._exit(0)` 退出，`AppExit=Ignore` 下 NSSM wrapper
+  保持 RUNNING（假运行）、里面的 Python 已经没了 → `/api/health` 连不上（SCM 还说 RUNNING）。
+- 真机验证：该状态下 `sc stop` 能停掉 wrapper、`sc start` 能恢复（本机已手工恢复 RUNNING）。
+
+### ✅ ② 三个修法（本版）
+- **执行器改放不含空格的临时目录**：优先 `%SystemRoot%\Temp`（服务跑在 SYSTEM 下可写），其次无空格的 `%TEMP%`；
+  路径含空格 / `& | < > ^ % !` 的候选一律跳过（`_restart_script_dir_candidates` 是纯函数 + 冒烟断言）。
+- **本进程不再主动退出**：由执行器里的 `sc stop` 停它（SIGINT → 正常收尾并退出）。即使任务没执行，
+  服务也**保持原样**（fail-safe），不会再出现「点一下服务就没了」✗；若 25 秒后本进程仍活着，只记一行警告
+  （明说「任务可能没执行，服务未受影响」），**绝不杀自己**。
+- **执行器更稳**：`sc stop` 后**等真的 STOPPED**（最多 ~30 秒；STOP_PENDING 时不急着 start）→ `sc start`
+  有界重试 6 次 → 还不行就按 `sc queryex` 的 PID **只杀本服务的 nssm** 再起一次；全过程写
+  `logs\restart_service.log`（`start / stop-timeout / kill-fallback / OK / FATAL-not-running`），排障有据可查。
+- **启动兜底清理**：执行器在「任务还在运行」时调 `schtasks /delete` 可能被拒；服务每次启动时顺手删掉
+  遗留任务（`/sc once` 的「下次运行时间」是 N/A，本就不会自己再跑，只是别让用户看到来路不明的任务）。
+- 版本回滚复用同一条重启路径：调度失败把 warning 带进响应，不吞掉 ✓。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **583 项**（基线 579，+9/−5：执行器顺序 / stop 等待 / start 重试 + PID 兜底 + 日志 /
+  动作行不含 nssm / 目录候选不含空格 / 日志路径注入 / 启动清理 / 四种决策 + 看门狗）；
+  HTTP `_smoke_http.py` **63 项** ✓；
+- **SYSTEM 预演**（发布前，真机）：用源码生成的真实执行器 + 假服务名 `SflNoSuchService` 建
+  `/ru SYSTEM` 一次性任务并 /run → 日志依次出现 `start → stop-timeout → kill-fallback → FATAL-not-running`，
+  脚本自删 ✓（证明「任务真的执行了、脚本走到收尾」）；
+- 发布后真机端到端：见维护报告 §17（点「重启服务」→ health 短暂不可用 → 自动恢复
+  `{"ok": true, "version": "2.1.3.10"}`，`restart_service.log` 落 `restart=OK`）。
+
 ## v2.1.3.9 (fix) — 2026-11-20 · 代号 `Vega`（织女星）
 
 > 主题：**「重启服务」不再让服务自己停自己** —— 2026-11-20 10:29 真机实测触发的 P0 级缺陷。
 > 接口路径 / 字段名、配置结构、服务名、安装路径、密码文件格式**都没动** ✓；仍零第三方依赖 ✓。
+>
+> ⚠️ **本版的重启修复不完整**：执行器放在安装目录（路径含空格），任务计划程序的 `/tr` 会「创建成功、
+> /run 成功、脚本根本不执行」→ 服务被留在「wrapper RUNNING、Python 没了」的假运行态。
+> 已在 **v2.1.3.10** 修复（执行器改放无空格临时目录 + 本进程不再主动退出 + stop/start 更稳）；
+> **请直接升级到 v2.1.3.10，不要停留在本版**。
 
 ### 🛠 ① 重启服务（真机事故 → 根因修复）
 - **真机现象**：Web UI「关于 → 重启服务」点下后页面消失，服务再也没回来（`sc query DrcomAutoLogin` = STOPPED）。

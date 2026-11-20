@@ -1,14 +1,14 @@
 ; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.1.3.9
+;   版本: v2.1.3.10
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.1.3.9.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.1.3.10.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.3.9"
+  #define MyAppVersion "2.1.3.10"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
