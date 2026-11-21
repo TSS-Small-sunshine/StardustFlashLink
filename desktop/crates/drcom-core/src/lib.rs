@@ -29,6 +29,7 @@ pub mod probe;
 pub mod proc;
 pub mod profiles;
 pub mod protocol;
+pub mod runtime;
 pub mod scheduler;
 pub mod secret;
 pub mod service;
