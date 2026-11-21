@@ -80,15 +80,20 @@ fn run(args: Vec<String>) -> i32 {
 }
 
 fn print_help() {
-    println!(
+    println!("{}", help_text());
+}
+
+/// 帮助文本（**纯函数**：单测能断言「帮助里不再宣传 --password」✓）。
+fn help_text() -> String {
+    format!(
         "{} {}（跨平台核心）\n\n\
          用法:\n  stardust-flash-link <命令> [选项]\n\n\
          命令:\n  \
          version                     显示版本 / 通道 / 平台\n  \
          status                      显示状态 JSON（与本地 API 同一份数据）\n  \
          selfcheck                   内置自检\n  \
-         login [--dry-run] [--host H] [--account A] [--suffix S] [--password P]\n  \
-         run [--once]                守护循环：按配置间隔检查、失败走退避（服务化在 M3）\n  \
+         login [--dry-run] [--host H] [--account A] [--suffix S]\n  \
+         run [--once]                守护循环：按配置间隔检查、失败走退避；--once 退出码：成功/跳过 0、失败 1\n  \
          profile list|save|activate|delete|auto   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）\n  \
          diagnostics [--out F] [--days N]        生成脱敏诊断包（ZIP，密码永不进包 ✓）\n  \
          portal [--url U] [--timeout N]         门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页）\n  \
@@ -101,14 +106,14 @@ fn print_help() {
          update rollback [--version V] [--dry-run]   回滚到备份版本（备份在 安装目录/backup/<版本>/）\n  \
          update backups              列出所有备份版本（含每个版本备份了哪些程序）\n  \
          package-files --out DIR [--target T] [--exe E] [--arch A]   写出该平台随包分发的说明文件\n  \
-         archive --out F.zip DIR...  打包目录成 ZIP（用自带实现 ✓，不需要外部 zip/tar ✓）\n  \
-         serve [--port N]            起本地控制 API（默认 {}，只绑 127.0.0.1）\n\n\
+         archive --out F.zip [--prefix 目录名] DIR...  打包目录成 ZIP（用自带实现 ✓；--prefix 固定包内顶层目录名）\n  \
+         serve [--port N]            起本地控制 API（默认取配置 ui_port = {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
         drcom_core::APP_NAME,
         drcom_core::app_version_string(),
         server::DEFAULT_UI_PORT,
         platform::config_dir().display()
-    );
+    )
 }
 
 /// 内置自检：与 2.x 的 `_smoke_*.py` 一个思路 —— 行为级、能一眼看出哪条挂了。
@@ -201,17 +206,38 @@ fn report(failures: &mut usize, name: &str, ok: bool, detail: String) {
     }
 }
 
-/// `serve --port 8848`：起本地控制 API（只绑回环 ✓）。
+/// **纯函数**：这次 serve 用哪个端口 ✓（审计 P3-6）。
+///
+/// 口径：`--port` 显式覆盖 > 配置里的 `ui_port`（默认 8848）> 内置默认值。
+/// 旧实现永远用 8848 ✗ —— 2.x 用户把 UI 端口改过之后，3.0 的 serve 会和 2.x 服务抢 8848。
+pub fn resolve_serve_port(override_value: Option<&str>, configured: u16) -> Result<u16, String> {
+    match override_value {
+        Some(raw) => raw
+            .parse::<u16>()
+            .map_err(|_| format!("端口不合法: {}", raw))
+            .and_then(|port| {
+                if port == 0 {
+                    // 端口 0 = 系统随机分配：CLI 场景里用户要的是「监听某个端口」，不是随便一个 ✓
+                    Err("端口不合法: 0（不能是 0，要 1–65535）".to_string())
+                } else {
+                    Ok(port)
+                }
+            }),
+        // 配置里的 ui_port 由 Config::validate 保证 ≥ 1024 ✓；这里再兜一层 0 ✓
+        None if configured == 0 => Ok(server::DEFAULT_UI_PORT),
+        None => Ok(configured),
+    }
+}
+
+/// `serve [--port N]`：起本地控制 API（只绑回环 ✓；默认端口取配置 `ui_port`）。
 fn serve(args: &[String]) -> i32 {
-    let port = match take_opt(args, "--port") {
-        Some(raw) => match raw.parse::<u16>() {
-            Ok(p) => p,
-            Err(_) => {
-                eprintln!("端口不合法: {}", raw);
-                return 2;
-            }
-        },
-        None => server::DEFAULT_UI_PORT,
+    let configured = drcom_core::legacy::load_config_or_default().config.ui_port;
+    let port = match resolve_serve_port(take_opt(args, "--port").as_deref(), configured) {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!("{}", error);
+            return 2;
+        }
     };
     match server::ApiServer::bind(port) {
         Ok(api) => {
@@ -229,8 +255,52 @@ fn serve(args: &[String]) -> i32 {
     }
 }
 
+/// **纯函数**：login 的参数校验 ✓（返回可读错误即退出码 2 = 用法错误）。
+///
+/// 审计 P2-11：**删掉 `--password`** ✗ —— 密码只从 `password.txt` 读（AGENTS.md I6 / §9.4），
+/// 写在命令行里会进 shell 历史与进程列表，同机其他用户/进程都能看到 ✗。
+/// 这里显式给出可读错误，而不是「当成普通参数忽略后继续登录」✗。
+fn login_args_error(args: &[String]) -> Option<String> {
+    const ALLOWED: [&str; 4] = ["--dry-run", "--host", "--account", "--suffix"];
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--password" || arg == "-p" {
+            return Some(
+                "不再支持 --password ✗ —— 密码只从 password.txt 读"
+                    .to_string()
+                    + "（别把密码放进命令行：shell 历史和进程列表里都看得到 ✗）",
+            );
+        }
+        if !arg.starts_with("--") {
+            return Some(format!("多余的位置参数：{}（login 只接受选项）", arg));
+        }
+        if !ALLOWED.contains(&arg.as_str()) {
+            return Some(format!(
+                "不认识的参数：{}（用法：login [--dry-run] [--host H] [--account A] [--suffix S]）",
+                arg
+            ));
+        }
+        // 与 take_opt 同口径（P3-3）：下一个参数是 **flag** 就不算值 → 不消费它，
+        // 让它继续参与校验（于是 `--host --dry-run` = host 缺值 + 正常 dry-run ✓）
+        if matches!(arg.as_str(), "--host" | "--account" | "--suffix")
+            && args.get(index + 1).is_some_and(|next| !next.starts_with("--"))
+        {
+            index += 1;
+        }
+        index += 1;
+    }
+    None
+}
+
 /// `login`：读配置（命令行可覆盖）→ 查在线 → 需要时登录。
 fn login(args: &[String]) -> i32 {
+    // 先校验参数（用法错误 → 2，且**不读配置/不联网** ✓）
+    if let Some(error) = login_args_error(args) {
+        eprintln!("{}", error);
+        eprintln!("用法：login [--dry-run] [--host H] [--account A] [--suffix S]");
+        return 2;
+    }
     // 读配置走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时，只读沿用 2.x 的账号/网关 ✓
     let mut cfg = match drcom_core::legacy::load_config() {
         Ok(read) => read.config,
@@ -248,11 +318,8 @@ fn login(args: &[String]) -> i32 {
     if let Some(suffix) = take_opt(args, "--suffix") {
         cfg.suffix = suffix;
     }
-    let password = match take_opt(args, "--password") {
-        Some(p) => p,
-        // 唯一实现：drcom_core::password（# 开头是密码原文、剥 BOM、剥提示行 ✓）
-        None => drcom_core::password::read(),
-    };
+    // 唯一来源：password.txt（# 开头是密码原文、剥 BOM、剥提示行 ✓）；命令行不再接受密码 ✗
+    let password = drcom_core::password::read();
 
     let errors = cfg.validate();
     if !errors.is_empty() {
@@ -360,17 +427,58 @@ fn collect_files(
     Ok(())
 }
 
-/// `archive --out <文件.zip> <目录>...`：用**自带的 ZIP 实现**打包 ✓
+/// **纯函数**：`--prefix` 的合法性 ✓（审计 P3-16）。
+///
+/// 包内顶层目录名必须是**单段**（不带路径分隔符、不是 `.` / `..`、没有控制字符），
+/// 否则会造出「路径穿越型」条目名，解压器行为不可控 ✗。
+pub fn validate_zip_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.trim().is_empty() {
+        return Err(
+            "--prefix 不能为空 ✗（例：--prefix stardust-flash-link-3.0.0.0-preview.5-linux-x86_64）"
+                .to_string(),
+        );
+    }
+    if prefix.trim() != prefix {
+        return Err(format!("--prefix 首尾不能有空白 ✗: {:?}", prefix));
+    }
+    if prefix.contains('/') || prefix.contains('\\') {
+        return Err(format!("--prefix 只能是单段目录名，不能带路径分隔符 ✗: {}", prefix));
+    }
+    if prefix == "." || prefix == ".." {
+        return Err(format!("--prefix 不能是 . 或 .. ✗: {}", prefix));
+    }
+    if prefix.chars().any(char::is_control) {
+        return Err(format!("--prefix 不能包含控制字符 ✗: {:?}", prefix));
+    }
+    Ok(())
+}
+
+/// `archive --out <文件.zip> [--prefix 目录名] <目录>...`：用**自带的 ZIP 实现**打包 ✓
 /// （CI 里因此不需要外部 `zip`/`tar` ✓，三平台行为一致 ✓；无压缩 = store ✓）。
+///
+/// 审计 P3-16：包内顶层目录**原来取输入目录名**（CI 传 `pkg/staging` → zip 里是 `staging/…`，
+/// 用户解压得到一个叫 staging 的目录；换个调用方式（绝对路径 / 尾斜杠）产物结构还会变 ✗）。
+/// 现在可以显式 `--prefix` 固定它；**不传时保持旧行为**（向后兼容 ✓）。
 fn archive_cmd(args: &[String]) -> i32 {
     let out_path = match take_opt(args, "--out") {
         Some(value) => std::path::PathBuf::from(value),
         None => {
-            eprintln!("用法: archive --out <文件.zip> <目录>...");
+            eprintln!("用法: archive --out <文件.zip> [--prefix 目录名] <目录>...");
             return 2;
         }
     };
-    // 目录 = 除 `--out` 及其取值以外的位置参数 ✓
+    // 显式顶层目录名（不给 = 旧行为：取输入目录名 ✓）
+    let explicit_prefix = match take_opt(args, "--prefix") {
+        Some(value) => {
+            if let Err(e) = validate_zip_prefix(&value) {
+                eprintln!("{}", e);
+                return 2;
+            }
+            Some(value)
+        }
+        None => None,
+    };
+    // 目录 = 除 `--out` / `--prefix` 及其取值以外的位置参数 ✓
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let mut skip_next = false;
     for arg in args {
@@ -378,7 +486,7 @@ fn archive_cmd(args: &[String]) -> i32 {
             skip_next = false;
             continue;
         }
-        if arg == "--out" {
+        if arg == "--out" || arg == "--prefix" {
             skip_next = true;
             continue;
         }
@@ -394,10 +502,13 @@ fn archive_cmd(args: &[String]) -> i32 {
 
     let mut collected: Vec<(String, std::path::PathBuf)> = Vec::new();
     for dir in &dirs {
-        let prefix = dir
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| "package".to_string());
+        let prefix = match &explicit_prefix {
+            Some(prefix) => prefix.clone(),
+            None => dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "package".to_string()),
+        };
         if let Err(e) = collect_files(dir, &prefix, dir, &mut collected) {
             eprintln!("{}", e);
             return 1;
@@ -1102,19 +1213,17 @@ fn service_cmd(args: &[String]) -> i32 {
     match action {
         "status" => {
             let available = service::manager_available();
+            // 平台分支收在 drcom-core 的纯函数里（R2 / 审计 P2-10）：这里只查一次 Os 再往下传 ✓
+            let os = platform::Os::current();
             println!("常驻方式: {}", service::flavor_name());
             println!("管理工具: {}（{}）", service::manager_program(), if available { "可用 ✓" } else { "没找到 ✗" });
             println!("状态: {}", service::status().label_cn());
-            if cfg!(target_os = "windows") {
+            if service::status_shows_shared_name_note(os) {
                 println!("{}", service::shared_name_note());
             }
             if !available {
                 println!();
-                if cfg!(target_os = "windows") {
-                    println!("{}", service::nssm_missing_hint());
-                } else {
-                    println!("装好 {} 之后再用 `service install` ✓", service::manager_program());
-                }
+                println!("{}", service::missing_manager_hint(os));
             }
             println!();
             println!("（也可以用 `autostart on`：登录时自动跑，免管理员、免额外工具 ✓）");
@@ -1436,11 +1545,24 @@ fn run_loop(args: &[String]) -> i32 {
             );
             first = false;
             if once {
-                return 0;
+                // 审计 P3-1：成功 / 跳过 = 0，失败 = 1（退出码语义表见 desktop/README.md ✓）
+                return once_exit_code(kind);
             }
         }
         // 5 秒醒一次看配置/到点没（很轻；不做网络请求 ✓）
         std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+/// `run --once` 的退出码语义 ✓（**纯函数**；desktop/README.md 的「退出码」表就是它 ✓）。
+///
+/// 审计 P3-1：旧实现不管结果都 `return 0` ✗ —— 作为 systemd 单元 / 计划任务 / CI 脚本入口时，
+/// 「这次登录失败了」根本传递不出去。口径与 `login` 一致：
+/// **成功 = 0、跳过 = 0（不算失败）、失败 = 1** ✓；用法错误另有 2（见 [`run`]）。
+fn once_exit_code(kind: drcom_core::metrics::Kind) -> i32 {
+    match kind {
+        drcom_core::metrics::Kind::Fail => 1,
+        _ => 0,
     }
 }
 
@@ -1638,9 +1760,15 @@ fn profile_cmd(args: &[String]) -> i32 {
     }
 }
 /// 取 `--key value` 形式的值（零依赖参数解析 ✓）。
+///
+/// 审计 P3-3：下一个参数如果是另一个 **flag**（`--` 开头）就不算值 ✓ ——
+/// 旧实现会把 `login --password --dry-run` 里的 `--dry-run` 当成密码 ✗。
+/// 缺值时返回 `None`，调用方按「没给」处理（与旧行为兼容 ✓）。
 fn take_opt(args: &[String], key: &str) -> Option<String> {
     let idx = args.iter().position(|a| a == key)?;
-    args.get(idx + 1).cloned()
+    args.get(idx + 1)
+        .filter(|value| !value.starts_with("--"))
+        .cloned()
 }
 
 /// 解析「后缀」参数（纯函数，好测 ✓）。
@@ -1710,6 +1838,36 @@ mod tests {
             "子目录要用 / 分隔 ✓: {:?}",
             names
         );
+
+        // 审计 P3-16：显式 --prefix 固定包内顶层目录名（不随调用方式变化 ✓）
+        let prefixed = root.join("out/pkg-prefixed.zip");
+        let args = vec![
+            "--out".to_string(),
+            prefixed.display().to_string(),
+            "--prefix".to_string(),
+            "stardust-flash-link-9.9.9.9-linux-x86_64".to_string(),
+            staging.display().to_string(),
+        ];
+        assert_eq!(archive_cmd(&args), 0, "带 --prefix 也要成功 ✓");
+        let raw = std::fs::read(&prefixed).unwrap();
+        let names = drcom_core::zipwriter::entry_names(&raw).expect("必须是合法 ZIP ✓");
+        assert!(!names.is_empty(), "{:?}", names);
+        for name in &names {
+            assert!(
+                name.starts_with("stardust-flash-link-9.9.9.9-linux-x86_64/"),
+                "所有条目都要在显式 prefix 下 ✓: {:?}",
+                names
+            );
+            assert!(!name.starts_with("staging/"), "不再出现输入目录名 ✗: {:?}", names);
+        }
+        assert!(names.contains(&"stardust-flash-link-9.9.9.9-linux-x86_64/README.txt".to_string()));
+        // 非法前缀 → 用法错误（2），不写文件 ✓
+        for bad in ["", "a/b", "a\\b", "..", " a", "a\nb"] {
+            assert!(validate_zip_prefix(bad).is_err(), "{:?} 必须被拒绝 ✗", bad);
+        }
+        for good in ["staging", "stardust-flash-link-3.0.0.0-preview.5-linux-x86_64", "a.b_c-1"] {
+            assert!(validate_zip_prefix(good).is_ok(), "{:?} 应当合法 ✓", good);
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1720,15 +1878,19 @@ mod tests {
         let args = vec!["--out".to_string(), dir.display().to_string()];
         assert_eq!(package_files_cmd(&args), 0, "写出成功 ✓");
         assert!(dir.join("README.txt").is_file(), "README 必须有 ✓");
-        if cfg!(target_os = "linux") {
-            assert!(dir.join("deb-control").is_file(), "Linux 要带 deb 元数据 ✓");
-            assert!(
-                dir.join(format!("{}.desktop", platform::APP_ID)).is_file(),
-                "Linux 要带桌面项 ✓"
-            );
-        }
-        if cfg!(target_os = "macos") {
-            assert!(dir.join("Info.plist").is_file(), "macOS 要带 Info.plist ✓");
+        // 用 platform::Os（不是 cfg!）—— 与业务代码同一套平台判定 ✓
+        match platform::Os::current() {
+            platform::Os::Linux => {
+                assert!(dir.join("deb-control").is_file(), "Linux 要带 deb 元数据 ✓");
+                assert!(
+                    dir.join(format!("{}.desktop", platform::APP_ID)).is_file(),
+                    "Linux 要带桌面项 ✓"
+                );
+            }
+            platform::Os::MacOs => {
+                assert!(dir.join("Info.plist").is_file(), "macOS 要带 Info.plist ✓");
+            }
+            platform::Os::Windows => {}
         }
         // 目录不存在时要能自己建出来 ✓（CI 里就是这么用的 ✓）
         let nested = dir.join("a/b/c");
@@ -1788,7 +1950,7 @@ mod tests {
     }
 
     #[test]
-    fn take_opt_finds_value_and_handles_missing() {
+    fn take_opt_finds_value_and_never_treats_a_flag_as_a_value() {
         let args: Vec<String> = ["login", "--host", "172.16.80.3", "--dry-run"]
             .iter()
             .map(|s| s.to_string())
@@ -1796,6 +1958,14 @@ mod tests {
         assert_eq!(take_opt(&args, "--host").as_deref(), Some("172.16.80.3"));
         assert_eq!(take_opt(&args, "--port"), None);
         assert_eq!(take_opt(&args, "--dry-run"), None, "布尔开关不吃下一个参数 ✓");
+        // 审计 P3-3 的回归点：`--host --dry-run` 是「host 没给值」，
+        // **不许**把 `--dry-run` 当成 host 的值 ✗
+        let missing = ["login", "--host", "--dry-run"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(take_opt(&missing, "--host"), None, "flag 不能当值 ✗");
+        assert_eq!(take_opt(&missing, "--dry-run"), None);
     }
 
     #[test]
@@ -1827,6 +1997,58 @@ mod tests {
         assert!(suffix_flag_without_value(&s(&["save", "校内", "--suffix"])));
         assert!(!suffix_flag_without_value(&s(&["save", "校内", "--suffix", "空"])));
         assert!(!suffix_flag_without_value(&s(&["save", "校内", "--no-suffix"])));
+    }
+
+    #[test]
+    fn login_rejects_password_on_the_command_line() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // 审计 P2-11：密码只从 password.txt 读（AGENTS.md I6 / §9.4）→ --password 必须被拒绝 ✗
+        let err = login_args_error(&s(&["--password", "#Demo-Pwd-0000#"])).expect("--password 必须被拒绝 ✗");
+        assert!(err.contains("password.txt"), "要告诉用户密码放哪 ✓: {}", err);
+        assert!(!err.contains("Demo-Pwd"), "错误信息绝不许回显密码 ✗: {}", err);
+        // 参数校验在读配置之前 → 直接拿到退出码 2（用法错误）✓
+        assert_eq!(login(&s(&["--password", "#Demo-Pwd-0000#"])), 2);
+        // 正常参数不受影响 ✓
+        assert!(login_args_error(&s(&["--dry-run", "--host", "172.16.80.3"])).is_none());
+        assert!(login_args_error(&s(&["--account", "2023001234", "--suffix", "@yd"])).is_none());
+        // 与 take_opt 同口径：`--host --dry-run` = host 缺值 + 正常 dry-run（不许吞掉 --dry-run ✗）
+        assert!(login_args_error(&s(&["--host", "--dry-run"])).is_none());
+        assert!(take_opt(&s(&["--host", "--dry-run"]), "--host").is_none());
+        assert!(login_args_error(&s(&["--dry-run", "--unknown"])).is_some(), "未知参数要报用法 ✗");
+        assert!(login_args_error(&s(&["stray-value"])).is_some(), "多余位置参数要报用法 ✗");
+        // 帮助里也不再宣传 --password ✓
+        assert!(!help_text().contains("--password"), "帮助里不许再出现 --password ✗");
+    }
+
+    #[test]
+    fn run_once_exit_codes_follow_the_documented_table() {
+        use drcom_core::metrics::Kind;
+        // 审计 P3-1：成功 / 跳过 = 0（跳过不算失败，与 2.x 同口径 ✓）；失败 = 1 ✓
+        assert_eq!(once_exit_code(Kind::Ok), 0);
+        assert_eq!(once_exit_code(Kind::Skip), 0, "跳过不是失败 ✓");
+        assert_eq!(once_exit_code(Kind::Fail), 1, "失败必须能传出去 ✓");
+        // --help 里也要写明（脚本作者看帮助就能查到 ✓）
+        let help = help_text();
+        assert!(help.contains("--once"), "{}", help);
+        assert!(help.contains("成功/跳过 0"), "帮助要写清退出码语义 ✓: {}", help);
+    }
+
+    #[test]
+    fn serve_port_comes_from_config_and_can_be_overridden() {
+        // 审计 P3-6：默认取配置里的 ui_port（不再永远 8848 ✗）
+        assert_eq!(
+            resolve_serve_port(None, 8848).unwrap(),
+            8848,
+            "默认配置的 ui_port 就是 8848 ✓"
+        );
+        assert_eq!(resolve_serve_port(None, 9001).unwrap(), 9001, "2.x 改过端口就跟随 ✓");
+        assert_eq!(resolve_serve_port(Some("9999"), 9001).unwrap(), 9999, "--port 优先 ✓");
+        assert_eq!(resolve_serve_port(None, 0).unwrap(), server::DEFAULT_UI_PORT, "坏配置兜底 ✓");
+        assert!(resolve_serve_port(Some("abc"), 8848).is_err(), "非数字要报错 ✓");
+        assert!(resolve_serve_port(Some("0"), 8848).is_err(), "0 不是可用端口 ✓");
+        assert!(resolve_serve_port(Some("70000"), 8848).is_err(), "超出 u16 ✓");
+        // 配置默认值与 server 常量必须对齐（否则「默认 8848」这句话就不成立 ✗）
+        assert_eq!(Config::default().ui_port, server::DEFAULT_UI_PORT);
     }
 
     #[test]
