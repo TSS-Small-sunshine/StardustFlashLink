@@ -79,7 +79,7 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | **M1** | 完整核心：登录/在线探测/**位置守卫**/方案/退避/日志轮转/指标/诊断包 | 与 2.x 行为对齐（`_smoke_*` 通过） |
 | **M2** | 桌面壳：托盘/窗口/单实例/自启/深色主题；UI 迁移 | 三平台可运行 App |
 | **M3** | 平台守护：Windows 服务(NSSM) / **systemd --user** / **launchd LaunchAgent**；打包矩阵 | 各平台安装包 + AppImage/dmg |
-| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 进行中（2026-11-18）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；便携版单文件 / 安装器 / 正式通道仍待做 |
+| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 自动更新已完成（2026-11-21，preview.5）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；**审计 P2/P3 收尾**（CI 外部互验、plist 版本规范、卸载/关自启幂等、退出码语义、`--prefix` 打包，见 CHANGELOG preview.5）✓；便携版单文件 / 正式安装器 / 正式通道仍待做 |
 
 ### M4 第二块：自我替换 / 回滚（2026-11-18 完成）
 
@@ -129,6 +129,9 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | **GUI release 体积** | **7.84 MB**（Windows x86_64，含 winit + 软件渲染器 + 全部界面） |
 | 启动验证 | 真机启动 GUI，5 秒后进程仍存活（说明 winit 后端 + 软件渲染器初始化成功 ✓） |
 | 真机行为验证 | 守卫按白名单拦下并写出日志：`2026-09-28 13:30:48Z 不在校园网（…）（Wi-Fi: 6#119）` ✓ |
+
+> **当前测试数（2026-11-21，preview.5）**：`cargo test --workspace` **326 项单元 + 1 项文档测试全绿**、0 warning ✓
+> （core 266 / cli 28 / ui 32；体积与耗时以 CI 每版的「体积报告」为准 ✓）。
 
 > **体积说明**：GUI 7.83 MB vs headless 0.32 MB —— 差在窗口系统（winit）与渲染器。
 > 仍远小于 Electron（≈150 MB）；M3 会再试：
@@ -221,7 +224,8 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
    重试由程序自己的退避负责 ✓（有单测断言这一点 ✓）。
 2. **同名服务是常态** ✓：3.0 查到「正在运行」时，跑的大概率是 **2.x 那个** ✓ ——
    `service status` 会直接点明 ✓；`service install` 发现同名服务**不硬装** ✗，而是给出**接管**的
-   三条 `nssm set …`（Application / AppDirectory / AppParameters）+ 另一条「先 uninstall 再 install」✓。
+   三条 `nssm set …`（Application / AppDirectory / AppParameters）+ 另一条「先 uninstall 再 install」✓；
+   路径**带双引号** ✓ —— 默认安装路径含空格，不带引号复制进 CMD 会被拆成多个 argv、把 2.x 服务写坏 ✗（审计 P2-6）。
 3. **不在 Windows 上自己写 SCM 调度器** ✗：那需要一大坨 `unsafe` FFI + 一个只在真机才能验的服务模型 ✓；
    `nssm.exe` 2.x 安装包里本来就随包分发 ✓ → 先复用 ✓。
 4. **状态查询免管理员** ✓：Windows 用 `sc query`（普通用户可查 ✓，`1060` = 服务不存在 ✓ 比认中英文文案可靠 ✓）；
@@ -229,6 +233,9 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 5. **没装管理工具时给两条可走的路** ✓：把 `nssm.exe` 放到程序目录旁 ✓，或先用 `autostart on` 顶上 ✓
    （登录时自动跑、免管理员 ✓，只是没有服务级「开机即起」✓）。
 6. Linux / macOS 的单元文件与 `autostart` **共用同一份生成函数** ✓ —— 两条命令永远不会写出两份不一样的配置 ✓。
+7. **幂等** ✓：`service uninstall` / `autostart off` 先查状态 —— 没装 / 没开时**直接成功、不跑删除命令** ✓
+   （`nssm remove` / `reg delete /f` 在目标不存在时会非零退出 ✗，旧实现会因此误报失败；审计 P2-4，
+   纯函数 `uninstall_plan` / `disable_plan` 有单测 ✓）。
 
 > 小坑记录：改完 UI 只跑 `cargo test` **不会刷新 GUI 二进制** ✗ ——
 > 启动前要先 `cargo build -p drcom-ui` ✓（第一次真机验证单实例就是被旧二进制骗了 ✗）。
@@ -254,7 +261,7 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 | --- | --- |
 | `.desktop` | Linux 桌面项（`Exec=… run`、`Terminal=false`、Network 分类 ✓） |
 | `deb-control` | Debian 元数据（**架构名换算** `x86_64→amd64` / `aarch64→arm64` / `armv7→armhf` ✓，体积换算成 KB ✓） |
-| `Info.plist` | macOS `.app`（BundleIdentifier / Executable / Version / `CFBundlePackageType=APPL` ✓） |
+| `Info.plist` | macOS `.app`（BundleIdentifier / Executable / `CFBundlePackageType=APPL` ✓；版本规范化为 **1–3 段纯数字** —— Apple 只认这个，四段 + 预发布后缀不合规 ✗，审计 P2-8 ✓） |
 | `README.txt` | 包里那封「怎么用」说明（**首句就写清是预览版** ✓，命令清单 + 配置兼容说明 ✓） |
 | 产物命名 | `stardust-flash-link-<版本>-<目标>.zip` ✓（无空格无斜杠 ✓ 有单测 ✓） |
 | `SHA256SUMS` 行 | coreutils 格式（**两个空格** ✓），自动升级对着它校验 ✓ |
@@ -265,14 +272,21 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 ```bash
 stardust-flash-link package-files --out pkg --target linux-aarch64 --exe stardust-flash-link
                  # ↑ 第一行输出产物基名；**交叉编译时必须显式 --target** ✗（宿主自报目标是错的 ✓）
-stardust-flash-link archive --out dist/<基名>.zip pkg
+stardust-flash-link archive --out dist/<基名>.zip --prefix <基名> pkg
+                 # ↑ --prefix 固定包内顶层目录名（不给 = 取输入目录名，旧行为兼容 ✓；审计 P3-16）
 stardust-flash-link checksum dist/<基名>.zip      # → "<hex>  <文件>" / sha256sum 兼容 ✓
 ```
 
 **CI 已接入** ✓（`preview-3.0.yml` 的 build 矩阵）：每个目标都产出 `dist/<基名>.zip` +
 `dist/SHA256SUMS`，与原始二进制一起挂 artifact ✓。交叉编译的行由**宿主编出的辅助程序**完成打包 ✓
 （目标二进制在 runner 上跑不了 ✗，所以生成包内文件与打 zip 都用宿主那份 ✓，靠 `--target` 纠正标签 ✓）。
+
 真机/CI 双重验证：Linux（含 aarch64/armv7 交叉）+ macOS（两架构）+ Windows 六行全绿 ✓；
 本地还用 **.NET `ZipFile`** 打开过我们写的包 ✓（条目名与字节数对得上 ✓，与 2.x 用 Python `zipfile` 互验同一路子 ✓）。
+
+**外部互验**（审计 P2-7 / AGENTS.md §9.3：自己实现的东西必须拿第三方结果对一遍 ✓）：CI 打包后
+Linux runner 跑 `sha256sum -c SHA256SUMS` + `unzip -t` 每个 zip + `dpkg-deb -I` 每个 deb；
+Windows runner 用 `Get-FileHash` 逐行对照 `SHA256SUMS` + `Expand-Archive` 解压测试 ✓
+（任一步失败 = 整行红 ✓；不引入新依赖，全是 runner 自带工具 ✓）。
 
 > ⏭ 下一步：`.app` 包体 / `.dmg` / `.deb` 正式安装器（现在先是 ZIP + 校验和，够预览用 ✓）。

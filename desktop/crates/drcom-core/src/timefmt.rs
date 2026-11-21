@@ -14,6 +14,15 @@ pub fn format_utc(time: SystemTime) -> String {
     )
 }
 
+/// 只要时分秒：`04:12:33Z`（UTC ✓）。
+///
+/// 界面后台检查的「最近一次」用它 —— **与业务日志同一个 UTC 口径**，排障时能直接对上 ✓
+/// （审计 P2-9：原先 worker 自己硬编码 UTC+8，与日志差 8 小时，非中国时区还全错 ✗）。
+pub fn clock_utc(time: SystemTime) -> String {
+    let (_, _, _, hour, minute, second) = parts_utc(time);
+    format!("{:02}:{:02}:{:02}Z", hour, minute, second)
+}
+
 /// 拆成 `(年, 月, 日, 时, 分, 秒)`（UTC ✓）—— ZIP 的 DOS 时间字段、按天分桶都要它 ✓。
 pub fn parts_utc(time: SystemTime) -> (i64, u32, u32, u32, u32, u32) {
     let secs = time.duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs();
@@ -137,6 +146,19 @@ mod tests {
         let t2 = UNIX_EPOCH + Duration::from_secs(1_709_164_800); // 2024-02-29
         assert_eq!(parts_utc(t2), (2024, 2, 29, 0, 0, 0));
         assert_eq!(date_utc(t2), "2024-02-29");
+    }
+
+    #[test]
+    fn clock_utc_is_hh_mm_ss_with_z_and_agrees_with_the_log_format() {
+        // 与 format_utc 同源：2026-03-28 21:20:00Z → 21:20:00Z ✓
+        assert_eq!(clock_utc(at(1_774_732_800)), "21:20:00Z");
+        assert_eq!(clock_utc(at(0)), "00:00:00Z");
+        // 审计 P2-9 的回归点：时钟必须带 Z（UTC 口径），**不是** UTC+8 的本地时间 ✗
+        let full = format_utc(at(1_774_732_800));
+        assert!(full.contains(&clock_utc(at(1_774_732_800))[..8]), "{}", full);
+        let now = clock_utc(SystemTime::now());
+        assert!(now.ends_with('Z'), "界面时钟必须标明 UTC ✓: {}", now);
+        assert_eq!(now.len(), 9, "{}", now);
     }
 
     #[test]

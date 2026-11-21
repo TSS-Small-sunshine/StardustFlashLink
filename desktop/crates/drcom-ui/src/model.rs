@@ -91,19 +91,30 @@ pub fn config_line_of(from: drcom_core::LoadedFrom, own_config_exists: bool, err
     }
 }
 
+/// 「打开数据目录」用哪个系统命令 ✓（**纯函数**：平台差异只在这里 —— R2 / 审计 P2-10；
+/// 三平台可以在任何一个 runner 上参数化单测 ✓）。
+///
+/// 返回 `(程序, 参数)`：Windows `explorer`、macOS `open`、Linux `xdg-open`。
+pub fn open_dir_command(os: platform::Os, path: &str) -> (String, Vec<String>) {
+    let program = match os {
+        platform::Os::Windows => "explorer",
+        platform::Os::MacOs => "open",
+        platform::Os::Linux => "xdg-open",
+    };
+    (program.to_string(), vec![path.to_string()])
+}
+
 /// 「打开数据目录」：三平台各用系统命令（不引第三方 crate ✓）。
 pub fn open_data_dir() -> Result<(), String> {
     let dir = platform::data_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("建不了目录 {}: {}", dir.display(), e))?;
     let path = dir.display().to_string();
-    let result = if cfg!(target_os = "windows") {
-        std::process::Command::new("explorer").arg(&path).spawn()
-    } else if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(&path).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(&path).spawn()
-    };
-    result.map(|_| ()).map_err(|e| format!("打不开文件管理器：{}", e))
+    let (program, args) = open_dir_command(platform::Os::current(), &path);
+    std::process::Command::new(&program)
+        .args(&args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打不开文件管理器：{}", e))
 }
 
 /// 账号在界面上的显示：脱敏 + 后缀（`2023******@yd` / `2023******（校内直连）`）✓
@@ -630,6 +641,18 @@ pub fn service_line(state: &drcom_core::service::ServiceState) -> String {
     }
 }
 
+/// 「与 2.x 同名服务」的提醒要不要显示 ✓（**纯函数**：三平台参数化单测 —— R2 / 审计 P2-10）。
+///
+/// 只有 Windows 且**已安装**时才显示：同名是 Windows 上 NSSM 与 2.x 共用服务名造成的，
+/// Linux / macOS 用的是各自的用户级单元文件，不存在这个问题 ✓。
+pub fn service_shared_name_note(os: platform::Os, installed: bool) -> Option<&'static str> {
+    if installed && matches!(os, platform::Os::Windows) {
+        Some("⚠ 服务名与 2.x 共用（DrcomAutoLogin）✓ —— 已存在时命令会给「接管」步骤，不会硬装 ✗")
+    } else {
+        None
+    }
+}
+
 /// 读一次（只读 ✓；点「重新读取」也走它 ✓）。
 pub fn service_view() -> ServiceView {
     let state = drcom_core::service::status();
@@ -645,8 +668,9 @@ pub fn service_view() -> ServiceView {
             drcom_core::service::manager_program()
         ));
     }
-    if installed && cfg!(target_os = "windows") {
-        hint.push_str("\n⚠ 服务名与 2.x 共用（DrcomAutoLogin）✓ —— 已存在时命令会给「接管」步骤，不会硬装 ✗");
+    if let Some(note) = service_shared_name_note(platform::Os::current(), installed) {
+        hint.push('\n');
+        hint.push_str(note);
     }
     ServiceView {
         installed,
@@ -1141,6 +1165,24 @@ mod tests {
         let mut with_password = input.clone();
         with_password.password = "pw".to_string();
         assert_eq!(with_password.to_form(&cfg).new_password(), Some("pw"));
+    }
+
+    #[test]
+    fn platform_commands_are_pure_and_parameterized() {
+        use drcom_core::platform::Os;
+        // 审计 P2-10：cfg!(target_os) 从界面业务代码里收走 → 三平台在本机都能断言 ✓
+        assert_eq!(open_dir_command(Os::Windows, r"C:\data\sfl").0, "explorer");
+        assert_eq!(open_dir_command(Os::MacOs, "/tmp/data").0, "open");
+        assert_eq!(open_dir_command(Os::Linux, "/tmp/data").0, "xdg-open");
+        for os in [Os::Windows, Os::MacOs, Os::Linux] {
+            let (_, args) = open_dir_command(os, "/some/data");
+            assert_eq!(args, vec!["/some/data".to_string()], "{:?}", os);
+        }
+        // 服务同名提示：只有「Windows + 已安装」才出现 ✓
+        assert!(service_shared_name_note(Os::Windows, true).unwrap().contains("2.x"));
+        assert!(service_shared_name_note(Os::Windows, false).is_none());
+        assert!(service_shared_name_note(Os::Linux, true).is_none());
+        assert!(service_shared_name_note(Os::MacOs, true).is_none());
     }
 
     #[test]

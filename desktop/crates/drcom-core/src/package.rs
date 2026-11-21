@@ -143,6 +143,27 @@ pub fn deb_control(info: &PackageInfo) -> String {
     )
 }
 
+/// Apple 只接受 **1–3 段点分 ASCII 整数** ✓（Apple 的 Info.plist 键参考：CFBundleVersion /
+/// CFBundleShortVersionString 都是「1–3 个整数用句点连起来」，**不许字母 / 后缀**）✗。
+///
+/// 我们的版本号沿用 2.x 的四段习惯（`3.0.0.0-preview.5`）✗ —— 直接写进 plist 既多了第 4 段、
+/// 又带预发布后缀。这里**规范化**成 3 段纯数字：取**前三个**数字段（`3.0.0`），
+/// 不足三段补 0；预发布后缀不参与（它不是 plist 的版本语义 ✓）。
+///
+/// 例：`3.0.0.0-preview.5` → `3.0.0`；`3.0` → `3.0.0`；`9.9.9.9` → `9.9.9`。
+pub fn macos_bundle_version(version: &str) -> String {
+    let mut parts: Vec<String> = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .take(3)
+        .map(str::to_string)
+        .collect();
+    while parts.len() < 3 {
+        parts.push("0".to_string());
+    }
+    parts.join(".")
+}
+
 /// macOS 的 `Info.plist` ✓（`.app/Contents/Info.plist` ✓）。
 pub fn macos_info_plist(info: &PackageInfo) -> String {
     format!(
@@ -159,9 +180,9 @@ pub fn macos_info_plist(info: &PackageInfo) -> String {
          \x20   <key>CFBundleExecutable</key>\n\
          \x20   <string>{exe}</string>\n\
          \x20   <key>CFBundleVersion</key>\n\
-         \x20   <string>{version}</string>\n\
+         \x20   <string>{bundle_version}</string>\n\
          \x20   <key>CFBundleShortVersionString</key>\n\
-         \x20   <string>{version}</string>\n\
+         \x20   <string>{bundle_version}</string>\n\
          \x20   <key>CFBundlePackageType</key>\n\
          \x20   <string>APPL</string>\n\
          \x20   <key>LSMinimumSystemVersion</key>\n\
@@ -172,7 +193,7 @@ pub fn macos_info_plist(info: &PackageInfo) -> String {
          </plist>\n",
         bundle = format!("com.stardust.{}", platform::APP_ID.replace('-', "")),
         exe = info.exe_name,
-        version = info.version
+        bundle_version = macos_bundle_version(&info.version)
     )
 }
 
@@ -318,6 +339,51 @@ mod tests {
             assert!(plist.contains(key), "缺 {} ✗\n{}", key, plist);
         }
         assert!(plist.contains("<string>APPL</string>"));
+    }
+
+    #[test]
+    fn macos_plist_versions_are_one_to_three_dot_separated_integers() {
+        // 审计 P2-8：Apple 的 CFBundleVersion / CFBundleShortVersionString 只接受
+        // **1–3 段点分 ASCII 整数** ✗ —— 四段 + 预发布后缀（3.0.0.0-preview.1）不合规。
+        let plist = macos_info_plist(&info());
+        for key in ["CFBundleVersion", "CFBundleShortVersionString"] {
+            let value = plist
+                .split(&format!("<key>{}</key>", key))
+                .nth(1)
+                .and_then(|rest| rest.split("<string>").nth(1))
+                .and_then(|rest| rest.split("</string>").next())
+                .unwrap_or_else(|| panic!("缺 {} ✗\n{}", key, plist));
+            let value = value.trim();
+            let parts: Vec<&str> = value.split('.').collect();
+            assert!(
+                (1..=3).contains(&parts.len()),
+                "{} = {:?}：段数必须 1–3 ✗",
+                key,
+                value
+            );
+            for part in &parts {
+                assert!(
+                    !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()),
+                    "{} = {:?}：每段必须全 ASCII 数字 ✗",
+                    key,
+                    value
+                );
+            }
+            assert_eq!(value, "3.0.0", "{} 应规范化为 3 段纯数字 ✓", key);
+        }
+
+        // 规范化函数本身（纯函数，边界都锁死 ✓）
+        assert_eq!(macos_bundle_version("3.0.0.0-preview.5"), "3.0.0");
+        assert_eq!(macos_bundle_version("3.0.0.0"), "3.0.0");
+        assert_eq!(macos_bundle_version("9.9.9.9"), "9.9.9", "preview.5 的下一个版本也 ≤3 段 ✓");
+        assert_eq!(macos_bundle_version("3.0"), "3.0.0", "不足三段补 0 ✓");
+        assert_eq!(macos_bundle_version("3"), "3.0.0");
+        assert_eq!(macos_bundle_version("preview"), "0.0.0", "没有数字也不许 panic ✓");
+        for sample in ["3.0.0.0-preview.5", "9.9.9.9", "3.0", "0.0.1-rc.2"] {
+            let normalized = macos_bundle_version(sample);
+            assert_eq!(normalized.split('.').count(), 3, "{} → {}", sample, normalized);
+            assert!(normalized.split('.').all(|p| p.chars().all(|c| c.is_ascii_digit())));
+        }
     }
 
     #[test]
