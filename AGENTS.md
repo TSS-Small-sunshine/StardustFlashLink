@@ -148,7 +148,7 @@ gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLin
 ```bash
 # 改完任何东西（哪怕只改注释）
 cd desktop
-cargo test --workspace          # 必须全绿 ✓（现在是 328 项单元 + 1 项文档测试）
+cargo test --workspace          # 必须全绿 ✓（现在是 338 项单元 + 1 项文档测试）
 
 # 改动过 .slint 或界面 Rust 代码 → 还必须重建 GUI 二进制 ✗
 cargo build -p drcom-ui         # 只跑 cargo test **不会**刷新 GUI 二进制 ✗（真踩过 ✓）
@@ -184,7 +184,7 @@ git status --short && git diff --cached
 - 这条线只由 [`.github/workflows/preview-3.0.yml`](.github/workflows/preview-3.0.yml) 管 ✓：
   三平台跑测试 → 六目标构建 → **打包**（自带 ZIP ＋ `SHA256SUMS` ✓，零外部工具 ✓）
 - **不许动 `build-installer.yml` 的触发面** ✗（那是 `main` 的 2.x 发版链路 ✓）
-- 打包命令：`package-files --out pkg --target <标签> --exe <名字>` →
+- 打包命令：`package-files --out pkg --target <标签> --exe <名字> --install-bytes <字节>` →
   `archive --out dist/<基名>.zip --prefix <基名> pkg` → `checksum` ✓（交叉编译**必须显式
   `--target`** ✗，宿主自报的目标是错的 ✓；`--prefix` 固定包内顶层目录名 ✗ 别让它随输入目录名变）
 - **外部互验**（§9.3）：CI 打包后必须用**第三方工具**反查自研实现 —— Linux `sha256sum -c` /
