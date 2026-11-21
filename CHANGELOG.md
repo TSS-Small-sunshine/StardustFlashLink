@@ -5,6 +5,62 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v3.0.0.0-preview.5 (fix) — 2026-11-21 · 代号 `Altair`（牛郎星）· **3.0 预览线**
+
+> 3.0「Altair」线 **preview.4 之后的审计收尾第二批**：只修 `_维护报告/audit/rust-3.0.md` 里
+> 审计出的 13 条（P2/P3），**不加新功能**。仍是**预览版**（R6）：正式用户的自动更新收不到它；
+> `main` 的 2.x 稳定线完全不受影响 ✓。
+
+### 🩹 ① 幂等 / 可用性（真机会咬人的那几条）
+- **`service uninstall` / `autostart off` 在 Windows 上真正幂等** ✓（P2-4）：先查状态（`sc query` / `reg query`，
+  都只读 ✓），**没装 / 没开 → 直接成功、不跑删除命令** ✓ —— `nssm remove` / `reg delete /f` 在目标不存在时
+  会非零退出，旧实现把「本来就没装/没开」误报成失败 ✗（与 README 的「幂等 ✓」承诺相反）。
+  决策做成纯函数 `uninstall_plan(&ServiceState)` / `disable_plan(&AutostartState)`，断言「未装/未开 → 空命令 + Ok」✓。
+- **接管 2.x 服务的提示里路径加双引号** ✓（P2-6）：`nssm set … Application "…exe"` / `AppDirectory "…"` ——
+  默认安装路径含空格，不带引号复制进 CMD 会被按空格拆成多个 argv、把 2.x 服务写坏 ✗；断言里带引号 ✓。
+- **`run --once` 的退出码可信了** ✓（P3-1）：成功 / 跳过 → **0**、失败 → **1**（旧实现无论结果都 `return 0` ✗）；
+  退出码语义表（0 成功 / 1 失败 / 2 用法）写进 `desktop/README.md`，`run --once` 与 `login` 口径一致 ✓。
+- **`serve` 读配置里的 `ui_port`** ✓（P3-6）：默认取 `config.ui_port`（默认 8848），`--port` 仍可临时覆盖 ——
+  2.x 用户改过端口的机器上，3.0 的 serve 不再和 2.x 抢 8848 ✓（纯函数 `resolve_serve_port` + 单测 ✓）。
+- **`archive` 支持显式 `--prefix`** ✓（P3-16）：包内顶层目录名不再随输入目录名变化（CI 原来产出 `staging/…`，
+  用户解压得到一个叫 staging 的目录 ✗）；不传 `--prefix` 保持旧行为（向后兼容 ✓）；CI 同步传 `--prefix <产物基名>` ✓。
+
+### 🔒 ② 隐私 / 口径 / 平台同源
+- **删掉 `login --password`** ✓（P2-11）：密码只从 `password.txt` 读（AGENTS.md I6 / §9.4）——
+  写在命令行里会进 shell 历史与进程列表；现在 `login --password x` 返回**用法错误（退出码 2）** 并提示密码文件路径，
+  帮助文本不再宣传它 ✓（测试夹具只用一眼假的合成值 ✓）。
+- **界面后台检查的时间改 UTC、与日志同源** ✓（P2-9）：删掉 worker 里硬编码的 `(secs + 8*3600)`（注释还写着
+  「与日志口径一致」✗）；统一走 `timefmt::clock_utc`（`HH:MM:SSZ`）—— 日志是 UTC，两者不再差 8 小时，
+  非中国时区的 Linux/macOS 用户也不会全错 ✓。
+- **`cfg!(target_os)` 从界面 / CLI 业务代码收进 `platform::Os`** ✓（P2-10 / R2）：`open_dir_command(Os)`、
+  `service_shared_name_note(Os, installed)`、`service::status_shows_shared_name_note` / `missing_manager_hint`、
+  `flavor_name_for` / `manager_program_for` 都是纯函数 → 三平台在任意 runner 上参数化单测 ✓（`probe` / `proc` /
+  `service` 等平台适配模块里的 `cfg!` 按 R2 的「各模块纯函数」保留 ✓）。
+- **外部命令输出按字节 lossy 解码** ✓（P3-12）：中文 Windows 上 `nssm` / `sc` 的本地化报错是 GBK，
+  `read_to_string().unwrap_or_default()` 会把它整段丢成空串（只剩退出码）✗ → 现在非法字节变 `�`、内容不丢 ✓。
+- **`take_opt` 不把 `--` 开头的 flag 当值** ✓（P3-3）：`--host --dry-run` 按「host 缺值」处理，
+  不再把 `--dry-run` 当值 ✗。
+- **设置保存顺序：先配置、后密码** ✓（P3-17）：配置写失败时密码文件**一个字节都不动** ✓（密码是破坏性的，
+  旧实现先改密码，一旦配置失败就留下「密码换了、配置还是旧的」的中间态 ✗）；临时目录 +「config 路径是目录」注入断言 ✓。
+- **macOS Info.plist 版本规范化** ✓（P2-8）：Apple 只接受 **1–3 段点分整数**，旧值 `3.0.0.0-preview.5` 是
+  4 段 + 预发布后缀 ✗ → 取前三个数字段（`3.0.0`），`CFBundleVersion` / `CFBundleShortVersionString` 都规范 ✓；
+  断言解析后 ≤3 段且全 ASCII 数字 ✓。
+
+### 🧪 ③ CI 外部互验（AGENTS.md §9.3）
+- `preview-3.0.yml` 打包后新增两道**第三方工具**互验（P2-7，失败即红 ✓）：
+  - **Linux runner**：`sha256sum -c SHA256SUMS` + `unzip -t` 每个 ZIP + `dpkg-deb -I` 每个 `.deb`；
+  - **Windows runner**：`Get-FileHash`（SHA256）逐行对照 `SHA256SUMS` + `Expand-Archive` 解压测试；
+  - 只跑在各自 runner 上、只用 runner 自带工具（不引入新依赖 ✓）—— 自研 SHA-256 / ZIP 不再「自洽地错」✓。
+
+### 🧪 ④ 自检
+- `cargo test --workspace` **326 项单元 + 1 项文档测试全绿**（本机基线 315 + 1，本轮 **+11**：
+  core +7、CLI +3、GUI +1）；0 warning ✓；
+- `cargo build -p drcom-ui` 通过（改过界面 Rust 代码必须重建 ✓）；
+- 版本号 `APP_CHANNEL_SEQ` 4 → 5（`v3.0.0.0-preview.5`）✓；
+- 文档同步：`desktop/README.md`（测试数 / 状态 / **退出码表** / 外部互验说明）、`docs/PLATFORMS.md`
+  （M4 状态 / 当前测试数 / 幂等 / `--prefix` / CI 外部互验）、`AGENTS.md` §9.2 测试数 + §9.5 打包命令 ✓；
+- 隐私：本轮测试夹具只用合成值（`#Demo-Pwd-0000#`、GBK 样本字节），未读取 / 写入任何真机 `config.json` /
+  `password.txt`，**未执行任何会动真机状态的** service / autostart / update apply 命令 ✓。
 ## v3.0.0.0-preview.4 (feature) — 2026-11-19 · 代号 `Altair`（牛郎星）· **3.0 预览线**
 
 > 3.0「Altair」线的 **M4 收尾**：同目录多个程序一起替换 / 一起回滚 + GUI「版本回滚」入口。
