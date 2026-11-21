@@ -75,7 +75,12 @@ impl Control {
 
 /// 这一平台用什么当「服务」✓。
 pub fn flavor_name() -> &'static str {
-    match Os::current() {
+    flavor_name_for(Os::current())
+}
+
+/// **纯函数**：平台 → 常驻方式的名称 ✓（三平台可参数化单测 —— R2：平台差异收在这里 ✓）。
+pub fn flavor_name_for(os: Os) -> &'static str {
+    match os {
         Os::Windows => "Windows 服务（NSSM 托管）",
         Os::MacOs => "launchd LaunchAgent（用户级）",
         Os::Linux => "systemd --user 单元",
@@ -84,7 +89,12 @@ pub fn flavor_name() -> &'static str {
 
 /// 这一平台需要的外部工具 ✓。
 pub fn manager_program() -> &'static str {
-    match Os::current() {
+    manager_program_for(Os::current())
+}
+
+/// **纯函数**：平台 → 外部工具名 ✓（供参数化单测与 CLI 展示用 ✓）。
+pub fn manager_program_for(os: Os) -> &'static str {
+    match os {
         Os::Windows => "nssm",
         Os::MacOs => "launchctl",
         Os::Linux => "systemctl",
@@ -252,8 +262,8 @@ pub fn existing_service_hint(exe: &Path) -> String {
         "服务「{name}」已经存在 ✓ —— 这个名字是我们**故意与 2.x 共用**的 ✓。\n\
          查到「正在运行」时，跑的大概率是 2.x 装的那个 ✓。两条路：\n\
          \x20 ① **接管它**（把指向换到 3.0 的程序 ✓）：\n     \
-         nssm set {name} Application {exe}\n     \
-         nssm set {name} AppDirectory {dir}\n     \
+         nssm set {name} Application \"{exe}\"\n     \
+         nssm set {name} AppDirectory \"{dir}\"\n     \
          nssm set {name} AppParameters run\n     \
          nssm restart {name}\n\
          \x20 ② 或先 `service uninstall`（会先停掉现在跑着的那个 ✓）再 `service install` ✓",
@@ -273,17 +283,40 @@ pub fn shared_name_note() -> String {
 
 /// NSSM 缺失时的中文说明 ✓（3.0 不自己实现 SCM 调度器 ✗ —— 那要写一堆 unsafe ✓）。
 pub fn nssm_missing_hint() -> String {
+    nssm_missing_hint_for(Os::Windows, &exe_dir_label())
+}
+
+/// **纯函数**版（程序目录标签由调用方给 → 单测不依赖本机安装路径 ✓）。
+pub fn nssm_missing_hint_for(os: Os, beside_dir: &str) -> String {
     format!(
         "没找到 nssm.exe ✗ —— {} 需要它托管（2.x 安装包里自带 ✓）。\n\
          两种办法：\n  \
          ① 把 nssm.exe 放到程序目录旁（{}）；\n  \
          ② 先用 `autostart on` 顶上（登录时自动跑 ✓，免管理员 ✓，只是没有服务级开机即起 ✓）",
-        flavor_name(),
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.display().to_string()))
-            .unwrap_or_else(|| "程序目录".to_string())
+        flavor_name_for(os),
+        beside_dir
     )
+}
+
+/// 程序目录（提示里「把 nssm.exe 放到哪」用 ✓）。
+fn exe_dir_label() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.display().to_string()))
+        .unwrap_or_else(|| "程序目录".to_string())
+}
+
+/// `service status` 要不要显示「与 2.x 同名」的提醒 ✓（**纯函数** → 三平台可参数化单测 ✓）。
+pub fn status_shows_shared_name_note(os: Os) -> bool {
+    matches!(os, Os::Windows)
+}
+
+/// 找不到管理工具时给哪条提示 ✓（**平台差异收在这里**，CLI 里不再写 `cfg!` —— R2 ✓）。
+pub fn missing_manager_hint(os: Os) -> String {
+    match os {
+        Os::Windows => nssm_missing_hint_for(Os::Windows, &exe_dir_label()),
+        _ => format!("装好 {} 之后再用 `service install` ✓", manager_program_for(os)),
+    }
 }
 
 // ---------------- Linux / macOS ----------------
@@ -468,11 +501,35 @@ pub fn install(exe: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// 停止并注销 ✓（幂等 ✓）。
+/// 「注销服务」要跑的命令 ✓（**纯函数**，审计 P2-4）。
+///
+/// **幂等**：`NotInstalled` → **空列表**，一个删除命令都不跑 ✓ ——
+/// `nssm remove DrcomAutoLogin confirm` 在服务不存在时会非零退出，靠「命令失败来兜底」
+/// 会把「本来就没装」误报成失败 ✗（正是文档承诺「uninstall 幂等 ✓」被打破的原因）。
+///
+/// 顺序 = 执行顺序：先尽力停（停不了不算注销失败 ✓），再删 ✓。
+pub fn uninstall_plan(state: &ServiceState) -> Vec<Vec<String>> {
+    if matches!(state, ServiceState::NotInstalled) {
+        // 没装 → 不跑任何命令（也不要求 nssm 在手边 ✓）
+        return Vec::new();
+    }
+    vec![nssm_control_command(Control::Stop), nssm_remove_command()]
+}
+
+/// 停止并注销 ✓（**幂等** ✓：本来就没装 = 成功、什么都不做 ✓）。
 pub fn uninstall() -> Result<String, String> {
     match Os::current() {
         Os::Windows => {
+            // 先查状态（只读 ✓，sc query 不要管理员 ✓）→ 没装就直接成功返回 ✓
+            let plan = uninstall_plan(&status());
+            if plan.is_empty() {
+                return Ok(format!(
+                    "本来就没装服务「{}」✓（什么都没做）",
+                    WINDOWS_SERVICE_NAME
+                ));
+            }
             let nssm = which("nssm").ok_or_else(nssm_missing_hint)?;
+            // 停：尽力而为 —— 已经停了 / 停不动都不影响「注销」这个目的 ✓
             let _ = run(&nssm, &nssm_control_command(Control::Stop));
             run(&nssm, &nssm_remove_command())?;
             Ok(format!("已注销服务「{}」✓", WINDOWS_SERVICE_NAME))
@@ -617,13 +674,76 @@ mod tests {
     }
 
     #[test]
-    fn existing_service_hint_offers_a_takeover_path() {
+    fn existing_service_hint_offers_a_quoted_takeover_path() {
         let text = existing_service_hint(&exe());
         assert!(text.contains("2.x"), "要说清为什么会有同名服务 ✓\n{}", text);
-        assert!(text.contains("nssm set DrcomAutoLogin Application"), "{}", text);
+        // 审计 P2-6 的回归点：**路径必须带双引号** ✗ —— 默认安装路径含空格，
+        // 不带引号时用户复制粘贴到 CMD 会被按空格拆成多个 argv，写坏 2.x 的服务 ✗
+        assert!(
+            text.contains(&format!("Application \"{}\"", exe().display())),
+            "Application 的路径必须带双引号 ✗\n{}",
+            text
+        );
+        assert!(
+            text.contains(&format!(
+                "AppDirectory \"{}\"",
+                exe().parent().unwrap().display()
+            )),
+            "AppDirectory 的路径必须带双引号 ✗\n{}",
+            text
+        );
         assert!(text.contains("AppParameters run"), "{}", text);
         assert!(text.contains("service uninstall"), "{}", text);
         assert!(shared_name_note().contains(WINDOWS_SERVICE_NAME));
+        // 带空格的路径**不许**以裸形式出现（否则就是又忘了加引号 ✗）
+        assert!(
+            !text.contains(&format!("Application {}", exe().display())),
+            "裸路径会把含空格的路径拆坏 ✗\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn uninstall_is_idempotent_when_the_service_is_not_installed() {
+        // 审计 P2-4 的回归点：没装时**一条命令都不跑**（不是跑 remove 再指望它成功 ✗）
+        assert!(
+            uninstall_plan(&ServiceState::NotInstalled).is_empty(),
+            "没装 → 空命令列表（uninstall 直接 Ok ✓）"
+        );
+        // 装了（不管在跑还是停了）→ 先停再删，逐元素断言 ✓
+        for state in [ServiceState::Running, ServiceState::Stopped] {
+            assert_eq!(
+                uninstall_plan(&state),
+                vec![nssm_control_command(Control::Stop), nssm_remove_command()],
+                "{:?} 的注销计划不对 ✗",
+                state
+            );
+        }
+        // 查不出来时保持旧行为：尽力删一次（不能因为一次 sc 探测失败就假装「没装」✓）
+        assert!(!uninstall_plan(&ServiceState::Unknown("sc 调用失败".into())).is_empty());
+    }
+
+    #[test]
+    fn platform_names_are_pure_and_parameterized() {
+        // R2 / 审计 P2-10：平台分支用 Os 参数化 → 三个平台在任何一个 runner 上都能断言 ✓
+        assert_eq!(manager_program_for(Os::Windows), "nssm");
+        assert_eq!(manager_program_for(Os::MacOs), "launchctl");
+        assert_eq!(manager_program_for(Os::Linux), "systemctl");
+        assert!(flavor_name_for(Os::Windows).contains("NSSM"));
+        assert!(flavor_name_for(Os::MacOs).contains("launchd"));
+        assert!(flavor_name_for(Os::Linux).contains("systemd"));
+        assert_eq!(manager_program(), manager_program_for(Os::current()));
+        assert_eq!(flavor_name(), flavor_name_for(Os::current()));
+
+        // service status 的提示：只有 Windows 才有「与 2.x 同名」那条 ✓
+        assert!(status_shows_shared_name_note(Os::Windows));
+        assert!(!status_shows_shared_name_note(Os::Linux));
+        assert!(!status_shows_shared_name_note(Os::MacOs));
+
+        // 找不到管理工具的提示：Windows 指向 nssm.exe，Linux/macOS 指向自己的工具 ✓
+        assert!(missing_manager_hint(Os::Windows).contains("nssm.exe"));
+        assert!(missing_manager_hint(Os::Linux).contains("systemctl"));
+        assert!(missing_manager_hint(Os::MacOs).contains("launchctl"));
     }
 
     #[test]

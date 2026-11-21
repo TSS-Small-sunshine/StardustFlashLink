@@ -238,11 +238,34 @@ pub fn enable(exe: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// 「关自启」的 Windows 删除计划 ✓（**纯函数**，审计 P2-4）。
+///
+/// **幂等**：`Disabled` → **空列表**，一个 `reg delete` 都不跑 ✓ ——
+/// `reg delete … /f` 在值不存在时会返回非零，靠「失败也当成功」兜底是自欺欺人 ✗
+/// （文档承诺「off 幂等 ✓」，但旧实现会以非零退出失败 ✗）。
+///
+/// Linux / macOS 不需要这个判断：它们「关」的本质是删文件 + 停服务，
+/// 文件不存在本来就不报错（见 [`disable`] ✓）。
+pub fn disable_plan(state: &AutostartState) -> Vec<Vec<String>> {
+    match state {
+        AutostartState::Disabled => Vec::new(),
+        // 已开启 → 删；查不出来（reg 调不通）也照旧尝试删一次 ✓
+        AutostartState::Enabled | AutostartState::Unknown(_) => vec![windows_delete_args()],
+    }
+}
+
 /// 关掉自启（**幂等** ✓：本来就没开也算成功 ✓）。
 pub fn disable() -> Result<String, String> {
     match Os::current() {
         Os::Windows => {
-            run_reg(&windows_delete_args())?;
+            // 先查状态（只读 ✓）→ 没开就直接成功返回，不跑 reg delete ✓
+            let plan = disable_plan(&status());
+            if plan.is_empty() {
+                return Ok("本来就没开自启 ✓（什么都没做）".to_string());
+            }
+            for argv in plan {
+                run_reg(&argv)?;
+            }
             Ok("已删除启动项 ✓".to_string())
         }
         Os::Linux => {
@@ -362,6 +385,19 @@ mod tests {
         assert!(reg_output_has_entry("    StardustFlashLink    REG_SZ    \"C:\\x.exe\" run"));
         assert!(!reg_output_has_entry("错误: 系统找不到指定的注册表项或值。"));
         assert!(windows_delete_args().contains(&"/f".to_string()));
+    }
+
+    #[test]
+    fn disable_is_idempotent_when_autostart_is_already_off() {
+        // 审计 P2-4 的回归点：没开 → **空命令**（disable 直接 Ok ✓），不跑 reg delete ✗
+        assert!(
+            disable_plan(&AutostartState::Disabled).is_empty(),
+            "本来就没开 → 空命令列表 ✓"
+        );
+        // 已开启 → 就是那条带 /f 的 reg delete，逐元素断言 ✓
+        assert_eq!(disable_plan(&AutostartState::Enabled), vec![windows_delete_args()]);
+        // 查不出来时保持旧行为：尽力删一次 ✓
+        assert!(!disable_plan(&AutostartState::Unknown("reg 调不通".into())).is_empty());
     }
 
     #[test]
