@@ -99,7 +99,11 @@ impl SettingsForm {
             .filter(|value| !value.is_empty())
     }
 
-    /// 保存：**先校验**（不过就一个字节都不写 ✗）→ 先写密码 → 再写配置 ✓
+    /// 保存：**先校验**（不过就一个字节都不写 ✗）→ **先写配置、成功后再写密码** ✓
+    ///
+    /// 顺序为什么重要（审计 P3-17）：配置写失败时密码**必须原样不动** ✗ ——
+    /// 密码是破坏性的（旧密码一覆盖就找不回来），而配置写失败是可以重试的普通错误。
+    /// 反过来的顺序会留下「配置还是旧的、密码已经换了」的中间态，用户下次检查直接登录失败 ✗。
     pub fn save_to(
         &self,
         base: &Config,
@@ -111,10 +115,13 @@ impl SettingsForm {
         if !errors.is_empty() {
             return Err(format!("配置有问题：{}", errors.join("；")));
         }
+        // ① 先写配置（可能失败、但可重试，而且不覆盖任何凭据 ✓）
+        cfg.save(config_path)?;
+        // ② 配置确实落盘之后，才动密码文件 ✓
         if let Some(new_password) = self.new_password() {
             password::write_to(password_path, new_password)?;
         }
-        cfg.save(config_path)
+        Ok(())
     }
 
     /// 保存到默认位置 ✓
@@ -236,6 +243,35 @@ mod tests {
         assert_eq!(crate::password::read_from(&password_path), "新密码");
         let saved = Config::load(&config_path).unwrap();
         assert_eq!(saved.host, "10.9.9.10");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_config_write_leaves_the_password_file_untouched() {
+        let (dir, _config_path, password_path) = temp("order");
+        let cfg = base();
+        // 配置路径故意指到一个**目录**上 → 写配置必然失败 ✓（不碰任何真实文件 ✓）
+        let bad_config = dir.join("config-is-a-dir");
+        fs::create_dir_all(&bad_config).unwrap();
+        crate::password::write_to(&password_path, "旧密码").unwrap();
+
+        let mut form = SettingsForm::from_config(&cfg);
+        form.host = "10.9.9.9".to_string();
+        form.password = Some("新密码".to_string());
+        let err = form.save_to(&cfg, &bad_config, &password_path).unwrap_err();
+        assert!(!err.is_empty(), "配置写失败要有可读错误 ✓");
+        // 审计 P3-17 的回归点：配置写失败时密码**一个字节都不许动** ✗
+        assert_eq!(
+            crate::password::read_from(&password_path),
+            "旧密码",
+            "配置写失败时绝不许先改密码 ✗"
+        );
+
+        // 密码文件本来不存在时也不能凭空创建（不能留下「半套保存」✗）
+        let fresh_path = dir.join("password-2.txt");
+        let err = form.save_to(&cfg, &bad_config, &fresh_path).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(!fresh_path.exists(), "配置失败时不许创建密码文件 ✗");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -106,8 +106,11 @@ pub fn run_with_timeout(
         }
     };
 
-    let stdout = std::fs::read_to_string(&out_path).unwrap_or_default();
-    let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+    // 按**字节**读、再做损失解码 ✓：中文 Windows 上 nssm / sc 的本地化报错是 GBK，
+    // 不是合法 UTF-8 —— 旧的 `read_to_string().unwrap_or_default()` 会把它整段丢成空串 ✗，
+    // 最后只剩一个退出码，排障时完全看不出原因（审计 P3-12）。
+    let stdout = read_lossy(&out_path);
+    let stderr = read_lossy(&err_path);
     cleanup(&out_path, &err_path);
 
     if timed_out {
@@ -142,6 +145,20 @@ fn temp_paths() -> (PathBuf, PathBuf) {
 fn cleanup(out_path: &Path, err_path: &Path) {
     let _ = std::fs::remove_file(out_path);
     let _ = std::fs::remove_file(err_path);
+}
+
+/// 读一个输出文件并**损失解码** ✓（非法字节变成 `�`，但内容不丢 ✓）。
+fn read_lossy(path: &Path) -> String {
+    match std::fs::read(path) {
+        Ok(bytes) => decode_lossy(&bytes),
+        // 文件读不回来（被别的进程删掉之类）：空就行，不影响退出码 ✓
+        Err(_) => String::new(),
+    }
+}
+
+/// 字节 → 文本（损失解码 ✓）。**单独拆出来**，非法 UTF-8 样本可以直接单测 ✓。
+fn decode_lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 #[cfg(test)]
@@ -189,6 +206,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("执行"), "错误信息要能看懂: {}", err);
+    }
+
+    #[test]
+    fn non_utf8_output_is_kept_as_lossy_text_instead_of_dropped() {
+        // 中文 Windows 的 nssm / sc 本地化报错是 GBK（不是合法 UTF-8）✗ ——
+        // 旧实现 read_to_string().unwrap_or_default() 会把它丢成空串（审计 P3-12）。
+        // 固定样本：「你好」的 GBK 字节（一眼假的合成值，不涉及任何真机数据 ✓）。
+        let gbk = [0xC4u8, 0xE3, 0xBA, 0xC3];
+        let text = decode_lossy(&gbk);
+        assert!(!text.is_empty(), "非法 UTF-8 绝不许被丢掉 ✗");
+        assert!(
+            text.contains('\u{FFFD}'),
+            "非法字节要变成替换符，肉眼能看出是编码问题 ✓: {:?}",
+            text
+        );
+        // 具体替换符个数由 UTF-8 解码器对非法序列的切分决定（这里 4 个字节 → 3 个替换符 ✓）
+        assert!(
+            text.chars().count() >= 2,
+            "GBK 两个汉字至少要留下两个替换符（不能整段丢）✓: {:?}",
+            text
+        );
+
+        // 真·读文件那条路也要覆盖（不是只测一个纯函数 ✓）
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!(
+            "drcom-proc-lossy-{}-{}.bin",
+            std::process::id(),
+            stamp
+        ));
+        std::fs::write(&path, gbk).unwrap();
+        let from_file = read_lossy(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(from_file, text, "文件读取路径必须与纯函数一致 ✓");
+
+        // 合法内容原样保留 ✓（不许因为「怕坏字节」就把正常输出也改坏 ✗）
+        assert_eq!(decode_lossy(b"get DrcomAutoLogin failed"), "get DrcomAutoLogin failed");
+        assert_eq!(decode_lossy(b""), "");
     }
 
     #[test]
