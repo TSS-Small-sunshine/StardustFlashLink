@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.14)
+REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.15)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
 REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
 REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
@@ -36,7 +36,7 @@ set "LOG_DIR=!SCRIPT_DIR!\logs"
 
 echo.
 echo ============================================================
-echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.14)
+echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.15)
 echo ============================================================
 echo   脚本目录: !SCRIPT_DIR!
 echo ============================================================
@@ -53,21 +53,31 @@ if exist "!SCRIPT_DIR!\python\python.exe" (
 )
 
 REM 1. 其次：PATH 中的 python
+REM    审计 J3（v2.1.3.15）：where python 可能第一个命中的是 Microsoft Store 的
+REM    App Execution Alias（路径带 \WindowsApps\，如 %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe）——
+REM    那是个占位存根，运行只会弹微软商店，不是真解释器 → 候选路径带 \WindowsApps\ 的一律跳过。
 if not defined PYTHON (
     where python >nul 2>&1
     if not errorlevel 1 (
         for /f "delims=" %%i in ('where python') do (
-            if not defined PYTHON set "PYTHON=%%i"
+            if not defined PYTHON (
+                set "PYTHON_CAND=%%i"
+                if "!PYTHON_CAND:\WindowsApps\=!"=="!PYTHON_CAND!" set "PYTHON=%%i"
+            )
         )
     )
 )
 if "!PYTHON!"=="" (
     rem v2.1.0.0（P7-3）：别硬编码 C:\Python314 —— 小版本一升就漂移 ✗。
     rem 先问官方启动器 `py -3`，再退到 %LOCALAPPDATA%\Programs\Python\Python3* 这一常见位置。
+    rem 审计 J3（v2.1.3.15）：`py -3` 返回的 sys.executable 同样可能指向商店别名，按同一策略过滤。
     where py >nul 2>&1
     if not errorlevel 1 (
         for /f "delims=" %%i in ('py -3 -c "import sys;print(sys.executable)" 2^>nul') do (
-            if not defined PYTHON if exist "%%i" set "PYTHON=%%i"
+            if not defined PYTHON (
+                set "PYTHON_CAND=%%i"
+                if "!PYTHON_CAND:\WindowsApps\=!"=="!PYTHON_CAND!" if exist "%%i" set "PYTHON=%%i"
+            )
         )
     )
 )
@@ -77,7 +87,10 @@ if "!PYTHON!"=="" (
     )
 )
 if "!PYTHON!"=="" (
-    echo [ERROR] 未找到 python.exe。请把 Python 加入 PATH（或用 py 启动器），或改用自带内嵌 Python 的安装包（推荐）
+    echo [ERROR] 未找到可用的 python.exe。
+    echo         注意：Microsoft Store 的 App Execution Alias（...\WindowsApps\python.exe）不是真解释器，
+    echo         本脚本会跳过它；请安装 Python 3 并勾选「Add python.exe to PATH」，或用 py 启动器，
+    echo         或改用自带内嵌 Python 的安装包（推荐）。
     pause
     exit /b 1
 )
@@ -184,7 +197,7 @@ if errorlevel 1 (
 
 "!NSSM!" set DrcomAutoLogin AppDirectory "!SCRIPT_DIR!"
 "!NSSM!" set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"
-"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.14）"
+"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.15）"
 "!NSSM!" set DrcomAutoLogin Start SERVICE_AUTO_START
 "!NSSM!" set DrcomAutoLogin AppStdout "!LOG_DIR!\service_stdout.log"
 "!NSSM!" set DrcomAutoLogin AppStderr "!LOG_DIR!\service_stderr.log"
