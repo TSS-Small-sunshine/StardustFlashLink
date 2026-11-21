@@ -5,6 +5,57 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.15 (hotfix) — 2026-11-21 · 代号 `Vega`（织女星）
+
+> 主题：**卸载 / 安装器卫生** —— 修掉「一并删除用户数据」漏删升级备份里的 `config.json` 副本、
+> 安装脚本可能把 Microsoft Store 的 `python.exe` 假别名当解释器、安装器里一条没人创建的
+> `AppMutex` 死配置、以及卸载后残留的 `启动UI.bat`；同时把「日志接口返回未脱敏原始日志是
+> 有意设计」写进 README / AGENTS.md。
+> 接口路径 / 字段名、配置结构、服务名、安装路径**都没动** ✓；仍零第三方依赖 ✓。
+
+### 🧹 ① 卸载「一并删除用户数据」补上 backup\（审计 J2，隐私）
+- **问题**：自动升级每次都会把旧代码备份到 `{app}\backup\` 下按版本号分的子目录，里面**固定放一份
+  `config.json` 副本**（供人工比对 / 回滚用）。`uninstall.bat` 的 Y 分支只删根目录
+  `config.json` / `password.txt` / `logs\`，备份目录整个留着 → 用户以为「数据已删除」，
+  配置副本还躺在 `backup\` 里 ✗。
+- **修复**：Y 分支加 `rd /s /q "!SCRIPT_DIR!\backup"`；「保留数据」分支明确提示
+  「备份目录里也有 config.json 副本」，要彻底清需手动删。
+- **说明**：安装包卸载（Inno `[UninstallDelete]`）本来就会清 `{app}\backup`，缺口只在源码方式的
+  `uninstall.bat`。
+- **防回归**：`_smoke_static.py` +2 条结构断言（Y 分支含备份删除 / 保留分支含提示）。
+
+### 🐍 ② install.bat 跳过 Microsoft Store 的 python.exe 假别名（审计 J3）
+- **问题**：`where python` 可能第一个命中 `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe` ——
+  那是 Microsoft Store 的 **App Execution Alias** 存根，运行只会弹商店，不是解释器；
+  装服务时却会被当成 Python 路径，服务反复启动失败 ✗。
+- **修复**：候选路径凡含 `\WindowsApps\` 一律跳过（`where python` 的循环与 `py -3` 返回的
+  `sys.executable` 两条都按同一策略过滤）；全部落空时给可读中文提示（说明跳过了商店别名、
+  怎么安装 Python / 用 `py` / 改用自带内嵌运行时的安装包）。
+- **防回归**：`_smoke_static.py` +2 条结构断言（两处过滤都在 / 落空提示可读）。
+
+### 🧯 ③ setup.iss 删掉死 AppMutex（审计 J4）
+- `AppMutex=DrcomAutoLogin-mutex-v2` 是**死配置**：全仓库没有任何进程创建这个互斥体
+  （服务单实例用的是 `Local\DrcomAutoLoginService`），Inno 的「安装器已在运行」检查永远查不到它。
+  删除并就地注释说明（避免后人以为还有第二道单实例保护）。
+- **防回归**：`_smoke_static.py` +2 条断言（无活动 `AppMutex` 配置行 / 注释写清原因）。
+
+### 🗑 ④ 卸载不再残留 {app}\启动UI.bat（审计 J5）
+- `启动UI.bat` 是安装器 `[Code]` 在安装时生成的，不在 `[Files]` 清单里 → Inno 卸载默认不删；
+  源码方式 `uninstall.bat` 也不管它。卸载后安装目录里留下一个指向「已删文件」的死启动器 ✗。
+- 修复：`setup.iss` 的 `[UninstallDelete]` 显式登记 `{app}\启动UI.bat`；`uninstall.bat` 也删它。
+- **防回归**：`_smoke_static.py` +2 条断言（Inno 段含该文件 / bat 含删除）。
+
+### 📝 ⑤ 文档边界：日志接口不脱敏是有意设计（审计 web §四）
+- `/api/log_tail` 与 `/api/log_download` 返回**未脱敏原始日志**：只监听 `127.0.0.1`、
+  `/api/*` 过 Host / Origin / `X-Requested-With` 三道校验、能读到的就是本机日志所有者本人；
+  诊断包（`/api/diagnostics`）才脱敏。README「安全说明」与 AGENTS.md §5 写清，
+  免得后人当缺口去「修」（反而破坏排障能力）。
+- **防回归**：`_smoke_static.py` +2 条断言（README / AGENTS 都写明）。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **640 项**（基线 629，+11）；HTTP `_smoke_http.py` **63 项** ✓；
+- 渲染器 `--self-test`、PR 机器人自测、发布说明 dry-run（预演 2.1.3.15，无残留占位符）全绿 ✓。
+
 ## v2.1.3.14 (hotfix) — 2026-11-21 · 代号 `Vega`（织女星）
 
 > 主题：**补上 v2.1.3.13 没盖住的那半个「客户端断开」** —— 请求读取阶段的连接重置
