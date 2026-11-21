@@ -141,7 +141,57 @@ pub fn shorten(text: &str, limit: usize) -> String {
     format!("{}…{}", head, tail)
 }
 
+/// 「立即检查」真正的执行层：**一次真检查 + 一行业务日志**（可注入 → 单测 hermetic ✓）。
+///
+/// 审计 P2-5 的收尾：后台检查 preview.6 起已经写业务日志了，但**用户手点「立即检查」**
+/// 原先只把结果画在窗口里、从不落盘 ✗ —— 只用界面（偶尔手点一下）的用户，诊断包里
+/// 同样看不到这次检查、`metrics` 也统计不到。
+/// 现在这里与后台检查 / CLI 走**同一个** `drcom_core::runtime::append_business_log`
+/// （格式逐字一致：`2026-11-22 03:12:00Z [ok] 已在线，无需登录` ✓）。
+///
+/// 「测试连接」**不走这里、也不写日志** ✗：它只是拿设置表单里的值试一次
+/// （form 里的白名单 / 密码可能还没保存），不是一次周期检查 —— 写进
+/// `campus_login.log` 会把成功率统计搅浑（见 `settings_test` 的注释 ✓）。
+///
+/// 参数全部注入（配置 / 密码 / HTTP 客户端 / 日志目录 / 时间）→ 单测不碰真机目录、不联网 ✓。
+pub(crate) fn run_check_with(
+    cfg: &Config,
+    password: &str,
+    http: &dyn HttpGet,
+    log_dir: &std::path::Path,
+    finished: std::time::SystemTime,
+    note: &str,
+) -> (String, String) {
+    let report = session::check_once(cfg, password, http, TIMEOUT);
+    let summary = report.outcome.summary_cn();
+    // 与后台检查同一条落盘路径、同一个等级口径（runtime::kind_of ✓）；
+    // 写失败只在 stderr 提示 —— 检查已经做完了，不该因为日志写不进去就丢掉结果 ✗
+    if let Err(e) = drcom_core::runtime::append_business_log(
+        log_dir,
+        finished,
+        drcom_core::runtime::kind_of(&report.outcome),
+        &summary,
+    ) {
+        eprintln!("[立即检查] {}", e);
+    }
+    let kind = if report.outcome.is_ok() { "ok" } else { "danger" };
+    (
+        kind.to_string(),
+        format!(
+            "{}{}\n（在线探测: {:?} · 回调: {}）\n—— 3.0 预览版目前只做「一次检查」，常驻后台在 M3 ✓",
+            note,
+            summary,
+            report.online,
+            report.callback
+        ),
+    )
+}
+
 /// 「立即检查」：读配置 + 密码 → 跑一次 [`session::check_once`] → （颜色, 文本）✓
+///
+/// 只有走到**真检查**这一步才写业务日志（`run_check_with` ✓）；前面那些 early-return
+/// （没配置 / 配置有错 / 账号没填 / 密码空 / 守卫拦下）都是「还没到检查这一步」的准备提示，
+/// 不写日志 —— 与后台线程「只有真正检查才落一行」的口径一致，免得手点一次先刷一行噪音 ✗。
 pub fn run_check() -> (String, String) {
     let cfg_path = platform::config_path();
     // 读配置走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时**只读**沿用 2.x 的 ✓
@@ -229,18 +279,16 @@ pub fn run_check() -> (String, String) {
         );
     }
 
-    let report = session::check_once(&cfg, &password, &PlainHttp, TIMEOUT);
-    let kind = if report.outcome.is_ok() { "ok" } else { "danger" };
-    (
-        kind.to_string(),
-        format!(
-            "{}{}{}\n（在线探测: {:?} · 回调: {}）\n—— 3.0 预览版目前只做「一次检查」，常驻后台在 M3 ✓",
-            legacy_note,
-            adapt_note,
-            report.outcome.summary_cn(),
-            report.online,
-            report.callback
-        ),
+    // 一次真检查 + 一行业务日志（审计 P2-5 收尾）：落点 / 格式与后台检查、CLI 完全同源 ✓
+    let log_dir = platform::log_dir();
+    let note = format!("{}{}", legacy_note, adapt_note);
+    run_check_with(
+        &cfg,
+        &password,
+        &PlainHttp,
+        &log_dir,
+        std::time::SystemTime::now(),
+        &note,
     )
 }
 
@@ -794,6 +842,11 @@ pub struct SettingsView {
 }
 
 /// 「测试连接」：用**表单里的值**跑一次检查（**不保存** ✓）。
+///
+/// **注意：这里不写业务日志、不进 metrics** ✗（审计 P2-5 收尾时明确的口径）——
+/// 它不是一次周期检查：用的是**还没保存**的表单值（密码 / 白名单都可能是临时试的），
+/// 写进 `campus_login.log` 会让「成功率」把调试点击也统计进去。
+/// 手点的「立即检查」才写（`run_check` → `run_check_with` ✓）。
 pub fn settings_test(input: &FormInput) -> (String, String) {
     // 基线走 legacy 兼容层：3.0 还没配置、2.x 有时，表单里显示 2.x 的值（只读，不改 2.x ✓）
     let base = drcom_core::legacy::load_config_or_default().config;
@@ -1157,6 +1210,55 @@ mod tests {
             "提示要能指导用户: {}",
             text
         );
+    }
+
+    #[test]
+    fn a_manual_check_writes_exactly_one_business_log_line_that_metrics_can_count() {
+        // 审计 P2-5 收尾：手点「立即检查」也要写一行业务日志（与后台检查 / CLI 同格式 ✓）
+        let root = std::env::temp_dir().join(format!("sfl-manual-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let log_dir = root.join("logs"); // **故意不建** —— append 必须自己把目录建出来 ✓
+        let mut cfg = Config::default();
+        cfg.account = "2023001234".to_string(); // 一眼假的合成账号 ✓（§9.4）
+        cfg.suffix = "@yd".to_string();
+        cfg.network_guard_enabled = false;
+        let password = "#Demo-Pwd-0000#"; // 一眼假的合成密码 ✓
+        let http = FakeCheckHttp { body: "dr1({\"result\":1})".to_string() };
+        let finished = std::time::SystemTime::now();
+
+        let (kind, text) = run_check_with(&cfg, password, &http, &log_dir, finished, "");
+        assert_eq!(kind, "ok", "已在线 → ok ✓: {}", text);
+
+        let path = log_dir.join(drcom_core::runtime::BUSINESS_LOG_NAME);
+        assert!(path.is_file(), "手动检查也必须落盘: {}", path.display());
+        let lines: Vec<String> =
+            std::fs::read_to_string(&path).unwrap().lines().map(str::to_string).collect();
+        assert_eq!(lines.len(), 1, "一次手动检查只写一行 ✓: {:?}", lines);
+        assert!(lines[0].contains("Z [ok] "), "与后台检查 / CLI 逐字同格式 ✓: {:?}", lines);
+        assert!(!lines[0].contains(password), "日志里绝不许有密码 ✗: {:?}", lines);
+        assert!(!text.contains(password), "界面文案也不许回显密码 ✗: {}", text);
+
+        // 诊断包 / 统计读的就是这份日志 → 立刻能统计到这次手动检查 ✓
+        let metrics = drcom_core::metrics::collect(&lines, 7, finished);
+        assert_eq!((metrics.ok, metrics.fail, metrics.skip), (1, 0, 0), "{}", metrics.summary_cn());
+        assert_eq!(metrics.success_rate, Some(10_000), "1/1 = 100% ✓");
+        assert!(
+            metrics.last_summary.as_deref().unwrap_or("").contains("已在线"),
+            "{:?}",
+            metrics.last_summary
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 假 HTTP 客户端：只在内存里回一段 JSONP，**不联网** ✓（与 runtime 测试同一套做法）。
+    struct FakeCheckHttp {
+        body: String,
+    }
+
+    impl HttpGet for FakeCheckHttp {
+        fn get(&self, _url: &str, _timeout: Duration) -> Result<HttpReply, String> {
+            Ok(HttpReply { status: 200, location: None, body: self.body.clone() })
+        }
     }
 
     #[test]

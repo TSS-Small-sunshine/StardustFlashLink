@@ -331,6 +331,50 @@ pub fn apply_replace(
     apply_plan(&plan, dry_run)
 }
 
+// ── 自我替换的「安装目录不可写」提示（纯函数；审计 D）────────────────────────────
+
+/// 安装目录不可写时给**可操作**的权限提示（**纯函数**：平台 × 是否权限错误 → 一句中文 ✓）。
+///
+/// 为什么需要它：自我替换要往**安装目录**里写（备份 + 换 exe）。装在 `Program Files` /
+/// `/usr/bin` 这类系统目录时，普通权限下 `create_dir` / `copy` / `rename` 会直接报
+/// 「拒绝访问（os error 5）」，用户不知道下一步该干嘛 ✗。现在按平台给两条出路：
+///   - Windows：用「以管理员身份运行」重开程序，或换到可写目录（如 `%LOCALAPPDATA%\StardustFlashLink`）；
+///   - Linux / macOS：用 `sudo` 运行，或装到用户可写目录（如 `~/.local/bin`）。
+///
+/// 只有**权限错误**才提示（传 `false` → `None`）：杀毒软件占用、磁盘写满、文件不存在这些错误
+/// 给「用管理员 / sudo」是误导 ✗（审计 D 的「权限 vs 其它错误」口径）。
+pub fn permission_hint(os: Os, is_permission_error: bool) -> Option<&'static str> {
+    if !is_permission_error {
+        return None;
+    }
+    Some(match os {
+        Os::Windows => {
+            "安装目录没有写入权限：请用「以管理员身份运行」重开本程序再试，\
+             或把程序换到可写的目录（如 %LOCALAPPDATA%\\StardustFlashLink）——\
+             装进 Program Files 后原地升级本来就需要管理员权限"
+        }
+        Os::Linux | Os::MacOs => {
+            "安装目录没有写入权限：请用 sudo 运行，\
+             或把程序装到用户可写的目录（如 ~/.local/bin）再试 ——\
+             装进 /usr/bin 后原地升级本来就需要 root"
+        }
+    })
+}
+
+/// 一个 io 错误是不是**权限问题** ✓（Windows `ERROR_ACCESS_DENIED` / Unix `EACCES`
+/// 都由标准库映射成 `ErrorKind::PermissionDenied` —— 不自己解析错误码，跨平台同口径 ✓）。
+fn is_permission_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+/// 错误文案后面追加的权限提示（不是权限错误 → 空串，别多嘴 ✗）。
+fn permission_suffix(error: &std::io::Error) -> String {
+    match permission_hint(Os::current(), is_permission_error(error)) {
+        Some(hint) => format!(" —— {}", hint),
+        None => String::new(),
+    }
+}
+
 /// 默认的「要更新的程序」：**安装目录里的桌面程序**；没有它时退回当前 exe 自己 ✓。
 ///
 /// 这样两种用法都成立：
@@ -1191,25 +1235,29 @@ fn swap_incoming_into_place(
 ) -> Result<(), String> {
     if let Err(error) = std::fs::rename(installed, old) {
         return Err(format!(
-            "把当前程序改名为「{}」失败：{}（可能被杀毒软件 / 权限挡住）—— 已中止，程序没有被改动",
+            "把当前程序改名为「{}」失败：{}（可能被杀毒软件 / 权限挡住）{}—— 已中止，程序没有被改动",
             file_name_lossy(old),
-            error
+            error,
+            permission_suffix(&error)
         ));
     }
     if let Err(error) = std::fs::rename(incoming, installed) {
+        let hint = permission_suffix(&error);
         return match std::fs::rename(old, installed) {
             Ok(()) => Err(format!(
-                "把新程序放到「{}」失败：{} —— 已回滚，当前程序完好无损",
+                "把新程序放到「{}」失败：{}{} —— 已回滚，当前程序完好无损",
                 file_name_lossy(installed),
-                error
+                error,
+                hint
             )),
             Err(restore_error) => Err(format!(
-                "把新程序放到「{}」失败：{}；而且把旧程序改回原名也失败：{} —— 旧程序现在在「{}」，请手动把它改回「{}」",
+                "把新程序放到「{}」失败：{}；而且把旧程序改回原名也失败：{} —— 旧程序现在在「{}」，请手动把它改回「{}」{}",
                 file_name_lossy(installed),
                 error,
                 restore_error,
                 old.display(),
-                file_name_lossy(installed)
+                file_name_lossy(installed),
+                hint
             )),
         };
     }
@@ -1286,9 +1334,10 @@ fn execute_swaps(items: &[SwapItem], dry_run: bool) -> Result<Vec<SwapDone>, Str
         if let Some(parent) = backup.parent() {
             std::fs::create_dir_all(parent).map_err(|error| {
                 format!(
-                    "建备份目录 {} 失败：{}（安装目录没有写入权限？）—— 已中止，程序没有被改动",
+                    "建备份目录 {} 失败：{}{} —— 已中止，程序没有被改动",
                     parent.display(),
-                    error
+                    error,
+                    permission_suffix(&error)
                 )
             })?;
         }
@@ -1360,10 +1409,11 @@ fn copy_atomic(source: &Path, target: &Path) -> Result<(), String> {
     if let Err(error) = std::fs::copy(source, &tmp) {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!(
-            "复制 {} → {} 失败：{}",
+            "复制 {} → {} 失败：{}{}",
             source.display(),
             target.display(),
-            error
+            error,
+            permission_suffix(&error)
         ));
     }
     atomicfile::commit(&tmp, target)
@@ -2242,5 +2292,37 @@ mod tests {
         let err = plan_rollback_all(&dir, &backup_root, Some("9.9.9.9")).unwrap_err();
         assert!(err.contains("没有找到") && err.contains("update backups"), "{}", err);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn permission_hint_is_actionable_and_only_for_permission_errors() {
+        // 审计 D：装在 Program Files / /usr/bin 这类目录时，自我替换会因文件权限失败 ——
+        // 错误文案必须给「下一步怎么做」，而不是只甩一个 os error 5 ✗
+        for os in [Os::Windows, Os::Linux, Os::MacOs] {
+            assert!(permission_hint(os, false).is_none(), "{:?}: 其它错误不许提示权限 ✗", os);
+        }
+        let win = permission_hint(Os::Windows, true).expect("Windows 权限错误必须给提示 ✓");
+        assert!(win.contains("管理员"), "Windows 要给「以管理员身份运行」✓: {}", win);
+        assert!(win.contains("Program Files"), "要点名典型安装目录 ✓: {}", win);
+        assert!(win.contains("可写"), "或者换到可写目录 ✓: {}", win);
+        for os in [Os::Linux, Os::MacOs] {
+            let hint = permission_hint(os, true).unwrap();
+            assert!(hint.contains("sudo"), "{:?} 要给 sudo 出路 ✓: {}", os, hint);
+            assert!(hint.contains("/usr/bin"), "要点名典型安装目录 ✓: {}", hint);
+            assert!(!hint.contains("管理员"), "{:?} 不该说 Windows 的话 ✗: {}", os, hint);
+        }
+
+        // 权限错误 vs 其它错误：只有前者才追加提示（后者多半是杀毒软件占用 / 磁盘满 ✗）
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(is_permission_error(&denied));
+        let suffix = permission_suffix(&denied);
+        assert!(suffix.starts_with(" —— "), "{}", suffix);
+        let action = if Os::current() == Os::Windows { "管理员" } else { "sudo" };
+        assert!(suffix.contains(action), "本平台的出路要出现在文案里 ✓: {}", suffix);
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(!is_permission_error(&not_found), "文件不存在不是权限问题 ✗");
+        assert_eq!(permission_suffix(&not_found), "", "其它错误不许乱加 sudo 提示 ✗");
+        let disk_full = std::io::Error::from_raw_os_error(28); // ENOSPC（Unix）
+        assert!(!permission_suffix(&disk_full).contains("sudo"), "磁盘满不是权限问题 ✗");
     }
 }

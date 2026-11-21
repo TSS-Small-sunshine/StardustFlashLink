@@ -68,7 +68,10 @@ pub struct Record {
 ///   - `登录失败:` → fail（**带冒号才算一次结局** —— 紧跟在后面的
 ///     `登录失败，进入退避：…` 不会被重复计成第二次失败 ✓）
 ///   - `网络位置不在白名单` / `密码未设置，跳过登录` / `账号未设置，跳过登录` → skip
-///   - 其它（`开始检查 (reason=…)` / `等待 Ns 后 … 仍不可达` / 自动切方案 …）→ `Other`
+///   - `等待 Ns 后 … 仍不可达` → **fail**（审计 E：2.x `metrics.py` 的 `EV_UNREACHABLE`
+///     把这一行算成不健康 —— 周期结局是 `unreachable`，`series.fail` 把它并进失败、
+///     uptime 的分母也照算；3.0 再当 unmarked 就会**漏掉「网一直不通」**，成功率虚高 ✗）
+///   - 其它（`开始检查 (reason=…)` / `等待中 (N): …` / 自动切方案 …）→ `Other`
 ///     （不计入成功率 —— 宁可少算，不算错 ✓）
 pub fn parse_line(line: &str) -> Option<Record> {
     let line = line.trim_end();
@@ -149,12 +152,17 @@ fn is_plain_stamp(stamp: &str) -> bool {
 
 /// 2.x 正文 → 等级（与 2.x `metrics.py` 的 `EV_*` 常量逐字对齐 ✓）。
 fn classify_v2(text: &str) -> Kind {
+    /// 2.x `metrics.py` 的 `EV_UNREACHABLE`：「等待 Ns 后 … 仍不可达」→ 不健康 ✓
+    /// （2.x `protocol.py` 里是 `_log("等待 %ss 后 %s:%s 仍不可达", …, level=logging.ERROR)`）
+    const UNREACHABLE: &str = "仍不可达";
     /// 2.x `metrics.py` 的 `EV_SKIP` 三条（守卫跳过 / 密码未设置 / 账号未设置）✓
     const SKIP_PREFIXES: [&str; 3] =
         ["网络位置不在白名单", "密码未设置，跳过登录", "账号未设置，跳过登录"];
     if text.starts_with("已在线，无需登录") || text.starts_with("登录成功:") {
         Kind::Ok
-    } else if text.starts_with("登录失败:") {
+    } else if text.starts_with("登录失败:") || text.contains(UNREACHABLE) {
+        // 审计 E：2.x 把「仍不可达」算成不健康（unreachable 进 series.fail / uptime 分母），
+        // 3.0 的 2.x 兼容解析必须同口径，不能当 unmarked 漏掉 ✗
         Kind::Fail
     } else if SKIP_PREFIXES.iter().any(|prefix| text.starts_with(prefix)) {
         Kind::Skip
@@ -366,14 +374,22 @@ mod tests {
             Kind::Skip
         );
 
-        // 周期开始 / 可达探测 / 等待不可达：都不是结局 → Other（不计入成功率 ✓）
+        // 周期开始 / 可达探测 / 等待过程中的重试行：都不是结局 → Other（不计入成功率 ✓）
         for line in [
             "[2026-09-28 07:28:05] [INFO] 开始检查 (reason=periodic)",
             "[2026-09-28 07:30:00] [INFO] 网络已可达（第 1 次尝试，耗时 0.02s）",
-            "[2026-09-28 07:31:00] [WARNING] 等待 60s 后 172.16.80.3:80 仍不可达",
+            "[2026-09-28 07:30:58] [INFO] 等待中 (1): timed out",
         ] {
             assert_eq!(parse_line(line).unwrap().kind, Kind::Other, "{}", line);
         }
+
+        // 审计 E：2.x 的「仍不可达」是**结局**（`EV_UNREACHABLE`）→ fail，不是 unmarked ✓
+        assert_eq!(
+            parse_line("[2026-09-28 07:31:00] [ERROR] 等待 60s 后 172.16.80.3:80 仍不可达")
+                .unwrap()
+                .kind,
+            Kind::Fail
+        );
 
         // 空正文的 2.x 行也是合法日志（logging.info("")）→ Other，不是坏行 ✓
         let empty_body = parse_line("[2026-09-28 07:00:00] [INFO]").unwrap();
@@ -390,6 +406,28 @@ mod tests {
     }
 
     #[test]
+    fn two_x_unreachable_counts_as_a_failure_like_two_x_metrics_does() {
+        // 审计 E 的真实夹具：2.x `protocol.py:148` 的
+        // `_log("等待 %ss 后 %s:%s 仍不可达", timeout, host, port, level=logging.ERROR)`
+        // 对应 `metrics.py` 的 `EV_UNREACHABLE` —— 2.x 在 `summarize()` 里把它算成
+        // 不健康（周期结局 unreachable，series.fail 并进失败，uptime 分母照算）。
+        let line = "[2026-09-28 07:31:00] [ERROR] 等待 60s 后 172.16.80.3:80 仍不可达";
+        let record = parse_line(line).expect("2.x 行必须能解析 ✓");
+        assert_eq!(record.kind, Kind::Fail, "2.x 口径：仍不可达 = 不健康 ✗: {:?}", record);
+        assert_eq!(record.stamp, "2026-09-28 07:31:00", "2.x 时间戳原样保留（不带 Z）✓");
+        assert!(record.text.contains("仍不可达"));
+
+        // 与一次成功混在一起：成功率 = 1/(1+1) = 50%（unreachable 进分母，不是被漏掉 ✓）
+        let report = collect(
+            &lines(&["[2026-09-28 07:00:00] [INFO] 已在线，无需登录", line]),
+            7,
+            at(1_790_630_400),
+        );
+        assert_eq!((report.ok, report.fail, report.skip, report.unmarked), (1, 1, 0, 0));
+        assert_eq!(report.rate_text(), "50.0%", "2.x 把仍不可达算进不健康 ✓");
+    }
+
+    #[test]
     fn a_copied_two_x_log_shows_real_numbers_instead_of_an_empty_panel() {
         // 审计 P3-13 的目的：把 2.x 的旧 logs 拷过来 → 统计不再全 0 ✓
         let report = collect(
@@ -401,12 +439,18 @@ mod tests {
                 "[2026-09-28 07:30:00] [ERROR] 登录失败: 账号不存在或账号未绑定宽带",
                 "[2026-09-28 07:30:00] [WARNING] 登录失败，进入退避：连续 1 次，下次重试 5 分钟后（…）",
                 "[2026-09-28 07:40:00] [WARNING] 密码未设置，跳过登录。请通过 Web UI 设置密码。",
+                // 审计 E：2.x 的「仍不可达」是结局（EV_UNREACHABLE）→ 2.x 自己算不健康 ✓
+                "[2026-09-28 07:50:00] [ERROR] 等待 60s 后 172.16.80.3:80 仍不可达",
             ]),
             7,
             at(1_790_630_400), // 2026-09-28 21:20 UTC ✓（这些行都在窗口内）
         );
-        assert_eq!((report.ok, report.fail, report.skip, report.unmarked), (2, 1, 2, 2));
-        assert_eq!(report.rate_text(), "66.7%", "2/(2+1)，skip 与 unmarked 不进成功率 ✓");
+        assert_eq!((report.ok, report.fail, report.skip, report.unmarked), (2, 2, 2, 2));
+        assert_eq!(
+            report.rate_text(),
+            "50.0%",
+            "2/(2+2)：skip 与 unmarked 不进成功率；「仍不可达」按 2.x 口径进失败 ✓"
+        );
         assert_eq!(report.first_at.as_deref(), Some("2026-09-28 07:00:00"));
         assert_eq!(report.days.len(), 1);
         assert_eq!(report.days[0].date, "2026-09-28");
