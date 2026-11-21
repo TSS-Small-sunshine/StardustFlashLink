@@ -5352,7 +5352,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.14", version.VERSION == "2.1.3.14", version.VERSION)
+check("版本 = 2.1.3.15", version.VERSION == "2.1.3.15", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
@@ -5371,6 +5371,78 @@ check("v2.1.2.0 uninstall.bat 的 banner 也同步版本号",
 check("v2.1.2.0 setup.iss 的 NSSM 服务描述改用 {#MyAppVersion}（不再写死版本号）",
       "DrcomAutoLogin Description \"星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v{#MyAppVersion}）\""
       in _iss_src)
+
+# ============================================================
+# v2.1.3.15：卸载 / 安装器卫生（审计 J2 / J3 / J4 / J5）+ 日志接口边界文档
+#   断言全部做成结构级：先从 .bat / .iss 里把对应分支切出来再判，
+#   而不是全文件 grep 一个词 —— 把删除命令写进错误分支也该红 ✗。
+# ============================================================
+_iss_v215 = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
+_inst_v215 = pathlib.Path("install.bat").read_text(encoding="utf-8", errors="replace")
+_uinst_v215 = pathlib.Path("uninstall.bat").read_text(encoding="utf-8", errors="replace")
+_readme_v215 = pathlib.Path("README.md").read_text(encoding="utf-8", errors="replace")
+_agents_v215 = pathlib.Path("AGENTS.md").read_text(encoding="utf-8", errors="replace")
+
+# —— J2：Y 分支必须删 backup\，保留分支必须提示 backup 里也有 config.json 副本 ——
+_uinst_data = _uinst_v215.split('if "!REMOVE_DATA!"=="1" (', 1)
+_uinst_y_branch = ""
+_uinst_keep_branch = ""
+if len(_uinst_data) == 2:
+    _uinst_y_branch, _uinst_keep_branch = _uinst_data[1].split(") else (", 1)
+    _uinst_keep_branch = _uinst_keep_branch.split("\n)", 1)[0]
+check("v2.1.3.15 J2：uninstall.bat 的 Y 分支删除升级备份目录 backup\\（里面有 config.json 副本）",
+      'if exist "!SCRIPT_DIR!\\backup" rd /s /q "!SCRIPT_DIR!\\backup"' in _uinst_y_branch,
+      _uinst_y_branch[-120:])
+check("v2.1.3.15 J2：保留数据分支提示「备份目录里也有 config.json 副本」",
+      "backup" in _uinst_keep_branch and "config.json" in _uinst_keep_branch
+      and "副本" in _uinst_keep_branch,
+      _uinst_keep_branch[-120:])
+
+# —— J3：where python 与 py -3 两条候选都过滤 \WindowsApps\，落空提示可读 ——
+_inst_j3_parts = _inst_v215.split("where py >nul 2>&1", 1)
+_j3_where_block = _inst_j3_parts[0]
+_j3_py_block = _inst_j3_parts[1] if len(_inst_j3_parts) == 2 else ""
+_j3_filter = '!PYTHON_CAND:\\WindowsApps\\=!'
+check("v2.1.3.15 J3：install.bat 的 where python 与 py -3 返回都跳过 \\WindowsApps\\ 假别名",
+      _j3_filter in _j3_where_block and _j3_filter in _j3_py_block
+      and 'set "PYTHON_CAND=%%i"' in _j3_where_block
+      and 'set "PYTHON_CAND=%%i"' in _j3_py_block,
+      "where_block=%s py_block=%s" % (_j3_filter in _j3_where_block, _j3_filter in _j3_py_block))
+check("v2.1.3.15 J3：Python 全部落空时给出可读中文提示（点明跳过商店别名 / 怎么装）",
+      "未找到可用的 python.exe" in _inst_v215 and "WindowsApps" in _inst_v215
+      and "App Execution Alias" in _inst_v215 and "py 启动器" in _inst_v215)
+
+# —— J4：setup.iss 不许再有活动 AppMutex；注释必须写清它为什么是死的 ——
+check("v2.1.3.15 J4：setup.iss 不再有活动 AppMutex 配置（死互斥体已删）",
+      re.search(r"(?m)^\s*AppMutex\s*=", _iss_v215) is None)
+check("v2.1.3.15 J4：删除处注释写明原因（没有进程创建 / 服务用 Local\\DrcomAutoLoginService）",
+      "DrcomAutoLogin-mutex-v2" in _iss_v215 and "没有任何进程创建" in _iss_v215
+      and "Local\\DrcomAutoLoginService" in _iss_v215)
+
+# —— J5：安装器 [UninstallDelete] 登记 启动UI.bat；uninstall.bat 也删它 ——
+_iss_ud = _iss_v215.split("[UninstallDelete]", 1)
+_iss_ud = _iss_ud[1].split("[UninstallRun]", 1)[0] if len(_iss_ud) == 2 else ""
+check("v2.1.3.15 J5：setup.iss 的 [UninstallDelete] 登记了 {app}\\启动UI.bat",
+      'Type: files; Name: "{app}\\启动UI.bat"' in _iss_ud, _iss_ud[-120:])
+check("v2.1.3.15 J5：uninstall.bat 也删除 启动UI.bat（源码方式同样不残留）",
+      'if exist "!SCRIPT_DIR!\\启动UI.bat"' in _uinst_v215
+      and 'del /F /Q "!SCRIPT_DIR!\\启动UI.bat"' in _uinst_v215)
+
+# —— 文档边界：日志接口返回未脱敏原始日志是「有意设计」，README 与 AGENTS 都要写明 ——
+check("v2.1.3.15 文档：README 写清日志接口不脱敏是有意设计（127.0.0.1 + 三道校验 + 诊断包才脱敏）",
+      "/api/log_tail" in _readme_v215 and "/api/log_download" in _readme_v215
+      and "日志接口不脱敏" in _readme_v215 and "有意设计" in _readme_v215
+      and "诊断包" in _readme_v215)
+check("v2.1.3.15 文档：AGENTS.md 写清同一条边界（后人别当漏洞去修）",
+      "/api/log_tail" in _agents_v215 and "/api/log_download" in _agents_v215
+      and "有意设计" in _agents_v215 and "别当漏洞" in _agents_v215
+      and "诊断包" in _agents_v215)
+
+# —— 版本字面量同步：setup.iss 文件头 / 目标产物名不许只改 MyAppVersion ——
+check("v2.1.3.15 版本：setup.iss 文件头与目标产物名同步（版本字面量不漂移）",
+      (";   版本: v%s" % version.VERSION) in _iss_v215
+      and (";   目标: 生成 StardustFlashLink-Setup-v%s.exe" % version.VERSION) in _iss_v215,
+      "MyAppVersion=%s" % version.VERSION)
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))
 sys.exit(1 if FAILS else 0)
