@@ -5,6 +5,49 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.16 (hotfix) — 2026-11-22 · 代号 `Vega`（织女星）
+
+> 主题：**卸载脚本的只读预览 + 编码注释与事实对齐** —— 以前想确认「卸载会删什么」只能真跑一遍，
+> 现在 `uninstall.bat --check` 只读打印清单（服务 / NSSM / 注册表自启项 / 快捷方式 / 用户数据），
+> 不要求管理员、不弹 UAC、不改任何东西；同时把三个文件里写错的「UTF-8 BOM」注释改成事实
+> （三个文件实际都是 UTF-8 无 BOM；给 .bat 加 BOM 反而会让首行 `@echo off` 变成乱码命令）。
+> 接口路径 / 字段名、配置结构、服务名、安装路径**都没动** ✓；仍零第三方依赖 ✓。
+
+### 🔍 ① `uninstall.bat --check`：只读预览（本轮重点）
+- **问题**：卸载脚本只有「真卸」一条路 —— 想确认服务状态 / 会删哪些文件 / 注册表有没有残留，
+  只能真跑一遍（不可逆），或者自己去翻源码、敲一堆 `sc query` / `reg query`。
+- **修复**：新增 `--check`（兼容 `/check`）分支，**在「自提升管理员」之前**识别参数：
+  - 先打印「如果现在卸载，会做 / 会删什么」清单（停服务、清自启项与偏好键、删快捷方式、
+    删 `启动UI.bat`、询问是否删用户数据、提示手动删目录）；
+  - 再只读查询：`sc query DrcomAutoLogin` 当前状态、`tools\nssm.exe` 是否存在与大小、
+    托盘 Run 值 / 托盘偏好键（`reg query`）、桌面 / 开始菜单快捷方式（PowerShell `Test-Path`）、
+    `启动UI.bat` / `config.json` / `password.txt` / `logs\` / `backup\` 是否存在与大小 /
+    文件数与占用；
+  - 结尾明确「只读预览结束：没有修改任何东西」，并提示真卸载要跑不带参数的本脚本；
+  - 不要求管理员、不弹 UAC；分支内不执行任何停止 / 删除 / 注册表写入命令；
+    **不带参数时的行为与文案逐字不变**（只改版本号）。
+- **防回归**：`_smoke_static.py` +20 条 —— 从 `uninstall.bat` 切出 `--check` 分支文本，
+  断言分支在 elevation 之前、含 `sc query` / `reg query` / `Test-Path` / 只读提示，
+  且**不含**任何破坏性命令（`sc stop/delete`、`nssm stop/remove`、`reg add/delete`、
+  `del` / `rd` / `Remove-Item`）。
+
+### 🧾 ② 编码注释与事实对齐（只改注释，不动字节）
+- `install.bat` / `uninstall.bat` 头注释原写「修复: UTF-8 BOM + chcp 65001」，实际文件**无 BOM**；
+- `packaging/setup.iss` 头注释原写「编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）」，实际**无 BOM**，
+  ISCC 6.7.1 实测能正确读取（安装后注册表 `DisplayName` 中文正常）。
+- 现在都按事实写：`.bat` 用「UTF-8（无 BOM）+ 首行 `chcp 65001`」才正确，**加 BOM 会让首行
+  `@echo off` 变成乱码命令，不要加**；`.iss` 若将来要加 BOM，必须先确认 ISCC 行为与 CRLF 规则。
+- 字节未动：`.bat` / `.iss` 仍全部 **CRLF、无 BOM**（本次新增字节级断言，见 ③）。
+
+### 🧪 ③ 版本同步与自检
+- 版本字面量同步：`version.py` / `setup.iss`（3 处）/ `联网_service.py` 文件头 / `install.bat` /
+  `uninstall.bat` / `README`（版本表 + 构建产物 + 版本记录）/ `packaging/README.md` /
+  `_smoke_static.py` 版本断言 / `CHANGELOG` / `packaging/RELEASE-NOTES.md` 模板头部。
+- 静态 `_smoke_static.py` **660 项**（基线 640，+20）；HTTP `_smoke_http.py` **63 项** ✓；
+- 渲染器 `--self-test`、PR 机器人自测、发布说明 dry-run（预演 2.1.3.16，无残留占位符）全绿 ✓；
+- `cmd /c uninstall.bat --check` 实测：退出码 0、服务前后均 `RUNNING`、`git status` 只有预期改动
+  （只读预览真的没动手）✓。
+
 ## v2.1.3.15 (hotfix) — 2026-11-22 · 代号 `Vega`（织女星）
 
 > 主题：**卸载 / 安装器卫生** —— 修掉「一并删除用户数据」漏删升级备份里的 `config.json` 副本、

@@ -1,40 +1,34 @@
 Windows 安装程序 **v{{VERSION}} "{{CODENAME}}"（{{CODENAME_CN}}）** · {{DATE}} · Inno Setup 自动构建（内嵌 Python，目标机无需预装）
-<!-- RELEASE-TITLE: v{{VERSION}} — 卸载与安装器卫生：补删备份配置、跳过商店假 python、清掉启动器残留 -->
+<!-- RELEASE-TITLE: v{{VERSION}} — 卸载可预览：uninstall.bat --check 先看清单再决定卸不卸 -->
 
-> **一句话**：一次把「卸载 / 安装器」上的四个卫生问题收干净 ——
-> 源码方式的「一并删除用户数据」漏删升级备份里的 `config.json` 副本（J2）；
-> `install.bat` 可能把 Microsoft Store 的 `WindowsApps\python.exe` 假别名当解释器（J3）；
-> 安装器里有一条没有任何进程创建的 `AppMutex` 死配置（J4）；卸载后 `{app}\启动UI.bat` 残留（J5）。
+> **一句话**：卸载前终于可以「先看后删」—— `uninstall.bat --check`（兼容 `/check`）
+> 只读打印「如果现在卸载会做 / 会删什么」：服务状态、NSSM、托盘自启项与偏好键、快捷方式、
+> `config.json` / `password.txt` / `logs\` / `backup\`，不要求管理员、不弹 UAC、一个字都不改；
+> 顺手把三个文件里写错的「UTF-8 BOM」编码注释改成事实。
 > 接口、配置结构、服务名与 `AppId`、安装路径**都没动** ✓。
 
-## 🛠 本版修复
+## 🛠 本版更新
 
-### ① 卸载「一并删除用户数据」补上 `backup\`（审计 J2）
-- 自动升级每次把旧代码备份到 `{app}\backup\<旧版本>\`，里面固定放一份 `config.json` 副本；
-  `uninstall.bat` 的 Y 分支只删根目录的 `config.json` / `password.txt` / `logs\`，
-  备份目录整个留着 → 用户以为数据已删干净，配置副本还在 ✗。
-- 现在 Y 分支一并 `rd /s /q` 掉 `backup\`；选「保留数据」时明确提示「备份目录里也有 config.json 副本」。
-- 安装包卸载（Inno）本来就会清 `{app}\backup`，这条缺口只在源码方式的卸载脚本。
+### ① 卸载脚本新增只读预览（`uninstall.bat --check`，本轮重点）
+- 以前想确认「卸载会删什么」，只能真跑一遍（不可逆），或者自己去敲 `sc query` / `reg query`。
+- 现在在「自提升管理员」之前识别 `--check`（兼容 `/check`），打印清单后 `exit /b 0`：
+  - 服务 `DrcomAutoLogin` 当前状态（`sc query` 只读）；
+  - `tools\nssm.exe` 是否存在与大小；
+  - 托盘自启值 / 托盘偏好键是否存在（`reg query` 只读）；
+  - 桌面 / 开始菜单快捷方式是否存在（PowerShell `Test-Path` 只读）；
+  - `启动UI.bat` / `config.json` / `password.txt` / `logs\` / `backup\` 是否存在与大小
+    （目录还给出文件数与占用）；
+  - 结尾明确「只读预览，没有修改任何东西」，并提示真卸载要跑不带参数的本脚本。
+- 预览分支不要求管理员、不弹 UAC，不执行任何停止 / 删除 / 注册表写入命令；
+  **不带参数运行时的行为与文案逐字不变**（只改版本号）。
 
-### ② `install.bat` 跳过 Microsoft Store 的假 `python.exe`（审计 J3）
-- `where python` 可能第一个命中 `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe`
-  （App Execution Alias 占位存根，运行只会弹商店）→ 被当成解释器后服务反复启动失败 ✗。
-- 候选路径带 `\WindowsApps\` 的一律跳过（`where python` 与 `py -3` 返回的 `sys.executable`
-  两条路径同一策略）；全部落空时给可读中文提示（怎么装 Python / 用 `py` / 改用内嵌运行时安装包）。
-
-### ③ 删掉 `setup.iss` 里的死 `AppMutex`（审计 J4）
-- `AppMutex=DrcomAutoLogin-mutex-v2` 没有任何进程创建（服务用的是 `Local\DrcomAutoLoginService`），
-  Inno 的「安装器已在运行」检查永远查不到它 → 删掉并就地注释说明原因。
-
-### ④ 卸载不再残留 `{app}\启动UI.bat`（审计 J5）
-- `启动UI.bat` 由安装器 `[Code]` 在安装时生成，不在 `[Files]` 清单 → Inno 默认不删；
-  源码方式的 `uninstall.bat` 也不管它，卸载后会留下一个死启动器。
-- 现在 `[UninstallDelete]` 显式登记该文件，`uninstall.bat` 也一并删除。
-
-### ⑤ 文档：日志接口不脱敏是**有意设计**（审计 web §四）
-- `/api/log_tail` 与 `/api/log_download` 返回未脱敏原始日志：只监听 `127.0.0.1` +
-  三道请求校验，能读到的就是本机日志所有者本人；诊断包才脱敏。README 与 AGENTS.md 都写清，
-  免得后人把这条当缺口去「修」。
+### ② 编码注释与事实对齐（只改注释，不动字节）
+- `install.bat` / `uninstall.bat` / `packaging/setup.iss` 的头注释此前写「UTF-8 BOM」，
+  但三个文件**实际都没有 BOM**。
+- 事实是：`.bat` 用「UTF-8（无 BOM）+ 首行 `chcp 65001`」才正确；给 bat 加 BOM 会让首行
+  `@echo off` 变成乱码命令。`.iss` 无 BOM 时 ISCC 6.7.1 实测读取正常（安装后注册表
+  `DisplayName` 中文正常）；将来若要加 BOM，必须先确认 ISCC 行为与 CRLF 规则。
+- `.bat` / `.iss` 仍全部 **CRLF、无 BOM**（冒烟测试新增字节级断言）。
 
 ## ⚠️ 升级前须知
 
