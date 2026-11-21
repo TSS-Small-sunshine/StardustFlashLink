@@ -4874,6 +4874,7 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       var p = $('panel-' + n);
       if (p) p.classList.toggle('active', n === name);
     });
+    currentTab = name;   /* v2.1.3.13（P3-13）：记住当前页，visibilitychange 靠它判断是否补拉日志 */
     /* v2.1.3.13（P3-13）：日志轮询跟着「日志」页走 —— 进入就开（顺手首拉），
        离开就停；其它页（状态 / 配置 / 关于）不再白白每 2 秒拉一次日志。 */
     if (name === 'log') startLogPolling();

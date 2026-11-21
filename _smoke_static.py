@@ -5192,8 +5192,9 @@ check("维护 v2.1.3.13（E）：activateTab 进入「日志」页开轮询、�
       _v13_stop.replace("\n", " ")[:160])
 check("维护 v2.1.3.13（E）：回到前台只有「日志」页才补拉日志（不再任何页都拉）",
       "if (currentTab === 'log') fetchLog(false);" in _page
-      and "var currentTab = 'status';" in _page,
-      "前台补拉断言")
+      and "var currentTab = 'status';" in _page
+      and "currentTab = name;" in _v13_activate,   # 切页必须真的更新 currentTab，否则前台补拉永远不触发
+      "前台补拉断言（activateTab 更新 currentTab=%s）" % ("currentTab = name;" in _v13_activate))
 
 
 # —— F：P3-14 切配置页只发一次 /api/config ——
