@@ -1837,6 +1837,26 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def handle_one_request(self):
+        """v2.1.3.14：客户端在「读请求行 / 请求头」阶段提前断开也别把 traceback 打进 stderr。
+
+        真机证据（2026-11-21 22:29，已装 v2.1.3.13）：连续制造连接重置后，
+        service_stderr.log 又出现
+            Exception occurred during processing of request from ('127.0.0.1', ...)
+            ... http\\server.py, line 404, in handle_one_request ... ConnectionResetError
+        原因：do_GET / do_POST 的兜底只管「路由之后」，而 BaseHTTPRequestHandler
+        在读请求行时就会抛 ConnectionResetError —— 异常一路冒到
+        socketserver.process_request_thread 的 handle_error，直接把 traceback 写进 stderr ✗。
+        判据与响应阶段完全相同（`_is_client_disconnect`）；非断开异常照旧抛出去 ✓。
+        """
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except (ConnectionError, OSError) as exc:
+            if not _is_client_disconnect(exc):
+                raise
+            _log("请求读取阶段客户端提前断开（不是服务错误，已静默收尾）", level=logging.INFO)
+            self.close_connection = True
+
     def _parse_url(self):
         if "?" in self.path:
             path, qs = self.path.split("?", 1)

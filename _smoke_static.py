@@ -5214,6 +5214,55 @@ check("维护 v2.1.3.13（H）：死代码 _read_json_body 已删除（零调用
       and "def _read_json_body_safe(payload)" in src_web,
       "调用点 %r" % re.findall(r"_read_json_body\(", src_web))
 
+# —— v2.1.3.14：请求读取阶段（handle_one_request）的客户端断开也不许打 traceback ——
+_v14_class = src_web.split("class _Handler(", 1)[1].split("def do_GET(self)", 1)[0]
+check("维护 v2.1.3.14：_Handler 覆盖 handle_one_request，复用同一个断开判据",
+      "def handle_one_request(self):" in _v14_class
+      and "BaseHTTPRequestHandler.handle_one_request(self)" in _v14_class
+      and "_is_client_disconnect(exc)" in _v14_class
+      and "请求读取阶段客户端提前断开（不是服务错误" in src_web,
+      "handle_one_request 覆盖检查")
+
+
+class _V14ResetReader:
+    """假 rfile：读请求行时抛 ConnectionResetError（真机 2026-11-21 22:29 的形态）。"""
+
+    def readline(self, n=-1):
+        raise ConnectionResetError(10054, "远端主机强制关闭了一个现有的连接")
+
+
+class _V14ValueReader:
+    """假 rfile：非网络异常 —— 必须照旧抛出去，不能吞真正的 bug。"""
+
+    def readline(self, n=-1):
+        raise ValueError("不是网络错误")
+
+
+# 前面的 2.1.3.13 用例可能给 web_api 注入了「只认 error/warning」的假 logger；
+# 这里要验证 INFO 收尾，先临时摘掉 logger（_log 在 logger=None 时静默），跑完还原。
+_v14_logger_backup = getattr(_wa, "logger", None)
+_wa.logger = None
+_v14 = object.__new__(_wa._Handler)
+_v14.rfile = _V14ResetReader()
+_v14.wfile = None
+_v14.close_connection = False
+_v14.handle_one_request()
+check("维护 v2.1.3.14：读请求阶段 ConnectionResetError 被静默收尾（close_connection=True，不抛）",
+      _v14.close_connection is True, repr(_v14.close_connection))
+
+_v14b = object.__new__(_wa._Handler)
+_v14b.rfile = _V14ValueReader()
+_v14b.wfile = None
+_v14b.close_connection = False
+_v14_err = None
+try:
+    _v14b.handle_one_request()
+except ValueError as exc:  # noqa: BLE001  —— 期望它冒出来
+    _v14_err = exc
+_wa.logger = _v14_logger_backup   # 还原前面用例注入的 logger（别污染后续断言）
+check("维护 v2.1.3.14：非网络异常照旧抛出去（不吞真正的 bug）",
+      isinstance(_v14_err, ValueError), repr(_v14_err))
+
 
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
@@ -5303,7 +5352,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.13", version.VERSION == "2.1.3.13", version.VERSION)
+check("版本 = 2.1.3.14", version.VERSION == "2.1.3.14", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
