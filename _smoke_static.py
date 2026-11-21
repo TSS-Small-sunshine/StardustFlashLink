@@ -5352,7 +5352,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.15", version.VERSION == "2.1.3.15", version.VERSION)
+check("版本 = 2.1.3.16", version.VERSION == "2.1.3.16", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
@@ -5443,6 +5443,125 @@ check("v2.1.3.15 版本：setup.iss 文件头与目标产物名同步（版本�
       (";   版本: v%s" % version.VERSION) in _iss_v215
       and (";   目标: 生成 StardustFlashLink-Setup-v%s.exe" % version.VERSION) in _iss_v215,
       "MyAppVersion=%s" % version.VERSION)
+
+# ============================================================
+# v2.1.3.16：卸载只读预览（uninstall.bat --check）+ 编码注释与事实对齐
+#   断言分两层：先从 .bat 切出「--check 分支」文本判内容与顺序（结构级），
+#   再做独立的字节级编码断言（无 BOM / 全 CRLF）—— 只 grep 一句提示语会被糊弄 ✗。
+# ============================================================
+_uinst_v216 = pathlib.Path("uninstall.bat").read_text(encoding="utf-8", errors="replace")
+_inst_v216 = pathlib.Path("install.bat").read_text(encoding="utf-8", errors="replace")
+_iss_v216 = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
+
+# —— ① --check 分支：必须在自提升之前识别，且只读 ——
+_v216_dispatch_pos = _uinst_v216.find('"%~1"=="--check"')
+_v216_elevation_pos = _uinst_v216.find("\nnet session >nul 2>&1\n")
+check("v2.1.3.16 ①：uninstall.bat 在自提升管理员之前识别 --check / /check",
+      _v216_dispatch_pos != -1
+      and _uinst_v216.find('"%~1"=="/check"') != -1
+      and "goto :check_only" in _uinst_v216
+      and _v216_elevation_pos != -1
+      and _v216_dispatch_pos < _v216_elevation_pos,
+      "check@%d elevation@%d" % (_v216_dispatch_pos, _v216_elevation_pos))
+
+_v216_check_start = _uinst_v216.find("\n:check_only\n")
+_v216_check_end = _uinst_v216.find("\n:elevate\n")
+_v216_check_branch = ""
+if (_v216_check_start != -1 and _v216_check_end != -1
+        and _v216_check_end > _v216_check_start):
+    _v216_check_branch = _uinst_v216[_v216_check_start:_v216_check_end]
+check("v2.1.3.16 ①：--check 分支含 sc query 只读查询服务状态",
+      "sc query DrcomAutoLogin" in _v216_check_branch and "只读" in _v216_check_branch,
+      "len=%d" % len(_v216_check_branch))
+check("v2.1.3.16 ①：--check 分支含 reg query 只读查询托盘自启项 / 偏好键",
+      "reg query" in _v216_check_branch and "DrcomAutoLoginTray" in _v216_check_branch
+      and "HKLM\\SOFTWARE\\DrcomAutoLogin" in _v216_check_branch)
+check("v2.1.3.16 ①：--check 分支含 PowerShell Test-Path 只读查询快捷方式",
+      "PowerShell Test-Path 只读" in _v216_check_branch
+      and "Test-Path -LiteralPath" in _v216_check_branch)
+check("v2.1.3.16 ①：--check 分支查 启动UI.bat / config.json / password.txt / logs / backup",
+      all(_x in _v216_check_branch for _x in
+          ("启动UI.bat", "config.json", "password.txt", "CHECK_LOGS", "CHECK_BACKUP")))
+check("v2.1.3.16 ①：--check 分支结尾明确「只读预览」且提示真卸载要不带参数",
+      "只读预览结束：没有修改任何东西" in _v216_check_branch
+      and "不带参数" in _v216_check_branch
+      and "exit /b 0" in _v216_check_branch)
+# 从「--check 分支文本」里断言不含破坏性命令 —— 把删除命令写进预览分支也必须红 ✗
+_v216_destructive = []
+for _v216_pat, _v216_desc in (
+        (r"(?i)\bsc\s+(stop|start|delete|create|config)\b", "sc 写操作"),
+        (r"(?i)\bnssm(?:\.exe)?\b[^\r\n]*\b(stop|remove|install|start)\b", "nssm 写操作"),
+        (r"(?m)^\s*reg\s+(add|delete|import)\b", "reg 写操作"),
+        (r"(?i)\bdel\s+/[fq]", "del 删除文件"),
+        (r"(?i)\brd\s+/s", "rd 删除目录"),
+        (r"(?i)\bRemove-Item\b", "Remove-Item 删除"),
+        (r"(?i)\bStart-Process\b", "Start-Process（可能弹 UAC）"),
+):
+    if re.search(_v216_pat, _v216_check_branch):
+        _v216_destructive.append(_v216_desc)
+check("v2.1.3.16 ①：--check 分支不含任何破坏性命令 / UAC 调用",
+      not _v216_destructive, "命中=%s" % _v216_destructive)
+check("v2.1.3.16 ①：--check 分支不需要管理员（无 net session / 自提升块）",
+      "net session" not in _v216_check_branch
+      and "ELEVATE_PS1_NAME" not in _v216_check_branch)
+check("v2.1.3.16 ①：不带参数时原卸载流程原样保留（服务移除 / choice / 完成提示）",
+      "sc stop DrcomAutoLogin" in _uinst_v216
+      and "sc delete DrcomAutoLogin" in _uinst_v216
+      and "choice /C YN /N /D N /T 30" in _uinst_v216
+      and "卸载完成！" in _uinst_v216)
+check("v2.1.3.16 ①：uninstall.bat 的 --check 预览 banner 同步版本号",
+      ("卸载 - 只读预览 (v%s)" % version.VERSION) in _uinst_v216)
+
+# —— ② 编码注释与事实对齐（只改注释，不动字节编码）——
+check("v2.1.3.16 ②：install.bat 头注释改成「UTF-8（无 BOM）」并说明不要加 BOM",
+      "UTF-8（无 BOM）" in _inst_v216 and "不要给本文件加 BOM" in _inst_v216
+      and "修复: UTF-8 BOM" not in _inst_v216)
+check("v2.1.3.16 ②：uninstall.bat 头注释改成「UTF-8（无 BOM）」并说明不要加 BOM",
+      "UTF-8（无 BOM）" in _uinst_v216 and "不要给本文件加 BOM" in _uinst_v216
+      and "修复: UTF-8 BOM" not in _uinst_v216)
+check("v2.1.3.16 ②：setup.iss 头注释改成「UTF-8（无 BOM）」并注明 ISCC 6.7.1 实测 / 加 BOM 前先确认",
+      "UTF-8（无 BOM）" in _iss_v216 and "ISCC 6.7.1" in _iss_v216
+      and "若将来要加 BOM" in _iss_v216 and "CRLF" in _iss_v216
+      and "UTF-8 + BOM" not in _iss_v216)
+
+# —— ③ .bat / .iss 字节级：无 BOM + 全 CRLF（用户解压 zip 直接跑也不能坏）——
+_v216_win_scripts = ("install.bat", "uninstall.bat",
+                     "packaging/build.bat", "packaging/setup.iss")
+_v216_with_bom = []
+_v216_not_crlf = []
+for _v216_rel in _v216_win_scripts:
+    _v216_raw = pathlib.Path(_v216_rel).read_bytes()
+    if _v216_raw.startswith(b"\xef\xbb\xbf"):
+        _v216_with_bom.append(_v216_rel)
+    if not (b"\r\n" in _v216_raw
+            and _v216_raw.count(b"\n") == _v216_raw.count(b"\r\n")
+            and _v216_raw.count(b"\r") == _v216_raw.count(b"\r\n")):
+        _v216_not_crlf.append(_v216_rel)
+check("v2.1.3.16 ③：.bat / .iss 全部无 BOM（首 3 字节不是 EF BB BF）",
+      not _v216_with_bom, "带 BOM=%s" % _v216_with_bom)
+check("v2.1.3.16 ③：.bat / .iss 全部 CRLF（LF 数 == CRLF 数、无裸 CR）",
+      not _v216_not_crlf, "非 CRLF=%s" % _v216_not_crlf)
+
+# —— ④ 版本字面量同步（v2.1.3.16 本轮新增的同步点）——
+_readme_v216 = pathlib.Path("README.md").read_text(encoding="utf-8", errors="replace")
+_pkg_readme_v216 = pathlib.Path("packaging/README.md").read_text(encoding="utf-8", errors="replace")
+_svc_v216 = pathlib.Path("联网_service.py").read_text(encoding="utf-8", errors="replace")
+_changelog_v216 = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8", errors="replace")
+_notes_v216 = pathlib.Path("packaging/RELEASE-NOTES.md").read_text(encoding="utf-8", errors="replace")
+check("v2.1.3.16 版本：README 版本表 / 构建产物 / 版本记录同步",
+      ('`v%s "Vega"`（织女星' % version.VERSION) in _readme_v216
+      and ("StardustFlashLink-Setup-v%s.exe" % version.VERSION) in _readme_v216
+      and ("– v%s（当前）" % version.VERSION) in _readme_v216)
+check("v2.1.3.16 版本：packaging/README.md 同步当前版本",
+      ("v%s" % version.VERSION) in _pkg_readme_v216)
+check("v2.1.3.16 版本：联网_service.py 文件头同步",
+      ("Web UI 配置版 v%s" % version.VERSION) in _svc_v216)
+check("v2.1.3.16：CHANGELOG 有 v2.1.3.16 段",
+      ("## v%s" % version.VERSION) in _changelog_v216)
+check("v2.1.3.16：RELEASE-NOTES.md 模板头部已重写且保留占位符（不写死版本号）",
+      "{{VERSION}}" in _notes_v216 and "{{CODENAME_CN}}" in _notes_v216
+      and "uninstall.bat --check" in _notes_v216
+      and version.VERSION not in _notes_v216)
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))
 sys.exit(1 if FAILS else 0)
