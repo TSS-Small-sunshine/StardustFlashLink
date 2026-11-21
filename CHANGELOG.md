@@ -5,6 +5,94 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v3.0.0.0-preview.6 (fix) — 2026-11-22 · 代号 `Altair`（牛郎星）· **3.0 预览线**
+
+> 3.0「Altair」线 **preview.5 之后的审计收尾第三批**：只修 `_维护报告/audit/rust-3.0.md` 里的
+> **P2-5（核心）** 与 P3-7 / P3-8 / P3-13 / P3-15 共 5 条，**不加新功能**。仍是**预览版**（R6）：
+> 正式用户的自动更新收不到它；`main` 的 2.x 稳定线完全不受影响 ✓。
+
+### 🔧 ① GUI 后台检查也写业务日志 / 指标（P2-5，本轮核心）
+
+- **问题**：GUI 自带的后台检查自己复制了一份「守卫 → 账号 → 密码 → `session::check_once`」✗，
+  而且**从不写 `campus_login.log`** —— 只用界面的用户生成诊断包时 `logs/campus_login.log`
+  永远是空的、`metrics.json` 全 0（2.x 那边每天都有业务日志 ✗）。
+- **修法**：新增 `drcom-core::runtime`，一次检查只有**一个**共享入口 ✓：
+  - `runtime::evaluate(cfg, probe, password, http, timeout)`：**纯逻辑**（守卫 → 账号 → 密码 →
+    `session::check_once`；探机结果 / 密码 / HTTP 客户端全入参注入 → 单测 hermetic ✓）；
+  - `runtime::check_once(cfg, timeout)`：环境层（真探 Wi-Fi/IP、读 `password.txt`、真 HTTP）——
+    **CLI 的 `one_check` 与 GUI worker 都只调它** ✓（R7：判定 / 等级 / 文案不再有两套）；
+  - `runtime::kind_of(outcome)`：ok / fail / skip 口径只有这一处 ✓；
+  - `runtime::business_log(dir)` + `runtime::append_business_log(dir, time, kind, summary)`：
+    业务日志落点只有一处（`<数据目录>/logs/campus_login.log`，**目录不存在会自动建** ✓），
+    写出来的行与 CLI **逐字同格式**：`2026-11-22 03:12:00Z [ok] 已在线，无需登录` ✓。
+- **GUI worker 行为**：每次**真正检查**后追一行业务日志 → `metrics::collect` 与诊断包直接可用 ✓；
+  「`auto_check_enabled` 关掉 / 读配置失败」这类 **early-return 不写日志**（那不是一次检查，
+  别每到检查点就刷一行噪音 ✗）；日志写失败只在 stderr 提示、不影响结果展示 ✓。
+- **断言**：
+  - `runtime::tests::one_check_writes_exactly_one_business_log_line_metrics_can_read`：注入一个
+    **不存在**的 logs 临时目录，跑一次真检查（假 HTTP，不联网）→ 文件恰好 1 行、
+    `metrics::collect` 统计到 ok=1 / 成功率 100%、日志里不含密码 ✓；
+  - `runtime::tests::evaluate_maps_the_shared_four_outcomes_to_kinds`：已在线 / 守卫跳过 /
+    账号未设置 / 密码空 / 网关不可达五条路径的等级 ✓；
+  - `runtime::tests::skipped_check_is_logged_as_skip_and_not_counted_as_failure`（skip 不进成功率）✓；
+  - `worker::tests::only_a_real_check_merits_a_business_log_line`（early-return 不写日志）✓。
+- **文档**：`desktop/README.md`「排障：一键脱敏诊断包」写明「只用界面的用户现在也有业务日志与统计」
+  （以前那句「诊断包含 logs/campus_login.log」在只开 GUI 的机器上并不成立 ✗）。
+
+### 🧰 ② P3 收尾（7 / 8 / 13 / 15）
+
+- **`profile ssids` 给死代码一个真出口**（P3-7）：`probe::known_ssids` / `visible_ssids` 全仓库
+  无调用，注释却声称「设置界面里点一下就能填」✗ → 新增 CLI 子命令
+  `stardust-flash-link profile ssids`：打印「当前 Wi-Fi / 本机保存过 / 附近可见」三个清单
+  （**纯只读**：不读配置、不写盘 ✓；macOS 读不到可见列表时如实写「读不到」，不编造 ✗）。
+  帮助文本 / `desktop/README.md` / 根 README 命令表 / `docs/PLATFORMS.md` 同步；
+  设置界面**仍然没有**点选控件，文档也如实写「先用 `profile ssids` 查名字」（不再留虚假承诺 ✗）。
+  断言：`profile_ssids_reports_three_lists_and_is_read_only`（文本逐字结构 + 退出码 0）✓。
+- **便携模式文档-实现一致**（P3-8）：`platform.rs` 文档旧版写「程序目录有 `portable.marker` **或**
+  配置里 `portable_mode = true`」✗ —— 实际只认 marker，那个配置键从未被读取（配置本身就在数据
+  目录里，靠它决定数据目录是鸡生蛋 ✗）。现在：文档明确**只认 marker**；`Config` 里删掉从未
+  使用的 `portable_mode` 字段，老配置里若还留着这个键 → 走 `extra` **原样保留**（不丢数据、
+  也不生效 ✓）。断言：`config::tests::portable_mode_is_not_a_config_key_and_cannot_enable_portable_mode` ✓。
+- **统计兼容 2.x 旧日志格式**（P3-13）：`metrics::parse_line` 除 3.0 的
+  `2026-09-28 15:14:15Z [ok] …` 外，也认 2.x 的 `[2026-09-28 07:28:05] [INFO] …`
+  （`logging.Formatter` 口径）。2.x 结局行按 2.x `metrics.py` 的常量表归类：
+  `已在线，无需登录` / `登录成功:` → ok；`登录失败:` → fail（**带冒号才算一次结局**，
+  紧随其后的「登录失败，进入退避：…」不会重复计数 ✓）；`网络位置不在白名单` /
+  `密码未设置，跳过登录` / `账号未设置，跳过登录` → skip；其余（`开始检查 (reason=…)` /
+  `… 仍不可达` 等）→ unmarked（不进成功率，宁可少算不算错 ✓）。把旧 `campus_login.log`
+  拷过来不再是空面板 ✓。顺手把 3.0 解析改成 `get(..20)`：坏行里中文跨过第 20 字节时
+  **不会 panic**（诊断包不许崩 ✓）。
+  断言：`parses_the_real_two_x_log_format`、
+  `a_copied_two_x_log_shows_real_numbers_instead_of_an_empty_panel` —— 夹具取自 2.x 仓库的真实
+  日志形状（`联网_service.py` 的 Formatter、`protocol.py` 的 `_log` 文案、
+  `_smoke_static.py` / `_smoke_http.py` 的样本），不是拍脑袋编的 ✓。
+- **`.desktop` / deb 元数据规范**（P3-15）：
+  - 删掉普通桌面项里的 `X-GNOME-Autostart-enabled=false` ✗（那是「自启项」
+    `~/.config/autostart/*.desktop` 才有的字段，放这里语义相反且毫无作用）；
+  - `Icon=` 从 App ID `stardust-flash-link`（打包从不产出图标文件 → 桌面显示空白图标 ✗）改成
+    **标准图标名 `network-wireless`**（Adwaita / hicolor 主题本来就有，零额外文件 ✓）；
+  - deb `Installed-Size` 不再只算一个 exe 的字节 ✗：改为**包内会装到磁盘的文件总字节**
+    （二进制 + 生成的 `.desktop`）向上取整成 KB；CI 把 GUI + CLI 的字节和用
+    `package-files --install-bytes` 传进去（交叉编译 / 多程序包不再偏小 ✓）。
+  - 断言：`package::tests::deb_installed_size_counts_the_whole_package_not_just_the_exe`（纯函数
+    `installed_size_kb` 的边界 + deb control 行）、`desktop_entry_has_the_fields_linux_needs`
+    （Icon 是标准名、不许引用不存在的文件、不许带自启项字段）✓。
+
+### 🧪 ③ 自检
+
+- `cargo test --workspace` **338 项单元 + 1 项文档测试全绿**（preview.5 基线 328 + 1，本轮 **+10**：
+  core +8 —— runtime 4 / config 1 / package 1 / metrics 2；CLI +1 —— `profile ssids`；
+  GUI +1 —— worker 的 early-return 断言）；0 warning ✓；
+- `cargo build -p drcom-ui` 通过（改过界面 Rust 代码必须重建 ✓）；
+- 版本号 `APP_CHANNEL_SEQ` 5 → 6（`v3.0.0.0-preview.6`）✓；
+- 文档同步：`desktop/README.md`（状态 / 测试数 / 诊断包节 / `profile ssids` / 目录里补 `runtime.rs`）、
+  `docs/PLATFORMS.md`（M4 状态 / 当前测试数 / 方案与 Wi-Fi 名 / 统计兼容 2.x / 包内文件口径）、
+  `AGENTS.md` §9.2 测试数 + §9.5 打包命令（`--install-bytes`）、根 `README.md`（测试数 / 命令表）✓；
+- 隐私：本轮测试夹具只用合成值（`2023001234`、`#Demo-Pwd-0000#`、`Campus-WiFi`），未读取 / 写入任何
+  真机 `config.json` / `password.txt`，**未执行任何会动真机状态的** service / autostart / update apply 命令 ✓；
+- 已知限制：本轮修掉「GUI 用户诊断包日志恒空」（原 README 承诺在只开 GUI 的机器上不成立 ✗）；
+  其余限制（托盘、Windows 安装器、ARMv7 GUI sysroot、GUI 就地升级未真机验证）**仍然成立** ✓。
+
 ## v3.0.0.0-preview.5 (fix) — 2026-11-21 · 代号 `Altair`（牛郎星）· **3.0 预览线**
 
 > 3.0「Altair」线 **preview.4 之后的审计收尾第二批**：只修 `_维护报告/audit/rust-3.0.md` 里
