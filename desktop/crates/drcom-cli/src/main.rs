@@ -293,6 +293,31 @@ fn login_args_error(args: &[String]) -> Option<String> {
     None
 }
 
+/// 守卫判定 → 要打印的「跳过本次检查」两行（**纯函数**；`None` = 在校园网里，继续登录 ✓）。
+///
+/// 审计 P3-2：`login` 原先在「dry-run 之前」与「真正检查之前」**逐字写了两遍**
+/// `probe::snapshot()` + `guard_allows` + 两行 println ✗ —— `probe::snapshot()` 会起外部命令
+/// （Windows `netsh` / `ipconfig`、Linux/macOS `nmcli` / `airport`），一次 login 白探两遍；
+/// 两段文案还得手工保持一致。现在**只探一次、只判一次**，这个函数负责把 verdict 翻成那两行
+/// （**文案与顺序逐字不变** ✓，退出码也仍是 0 = 跳过不算失败 ✓）。
+fn guard_skip_lines(
+    cfg: &Config,
+    probe: &drcom_core::probe::Probe,
+) -> Option<Vec<String>> {
+    let verdict = drcom_core::guard_allows(cfg, probe.ssid.as_deref(), &probe.ips);
+    if verdict.allowed {
+        return None;
+    }
+    Some(vec![
+        format!("跳过本次检查：{}", verdict.reason),
+        format!(
+            "（当前 Wi-Fi: {} · 本机 IP: {}）",
+            probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
+            if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
+        ),
+    ])
+}
+
 /// `login`：读配置（命令行可覆盖）→ 查在线 → 需要时登录。
 fn login(args: &[String]) -> i32 {
     // 先校验参数（用法错误 → 2，且**不读配置/不联网** ✓）
@@ -327,15 +352,13 @@ fn login(args: &[String]) -> i32 {
         return 1;
     }
     // —— 网络位置守卫（2.x v2.0.6.2 的功能）：不在校园网就别白跑认证 ✓ ——
+    // 审计 P3-2：**只探一次机、只判一次守卫**，后面所有分支复用这个结论 ✓
+    //（原先在「真正检查之前」又探一遍、判一遍，两段文案逐字重复 —— 一次 login 白跑两遍外部命令 ✗）。
     let probe = drcom_core::probe::snapshot();
-    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
-    if !verdict.allowed {
-        println!("跳过本次检查：{}", verdict.reason);
-        println!(
-            "（当前 Wi-Fi: {} · 本机 IP: {}）",
-            probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
-            if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
-        );
+    if let Some(lines) = guard_skip_lines(&cfg, &probe) {
+        for line in lines {
+            println!("{}", line);
+        }
         return 0;
     }
 
@@ -366,20 +389,9 @@ fn login(args: &[String]) -> i32 {
         return 1;
     }
 
-    // —— 一次检查：守卫 → session::check_once → 写业务日志 ✓（与 GUI 同一套逻辑）——
+    // —— 一次检查：守卫已有结论（上面只探一次）→ session::check_once → 写业务日志 ✓ ——
+    //（与 GUI / run 同一套逻辑；审计 P3-2 把这里重复的 probe + 守卫判定删掉了 ✓）
     let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SEC);
-    let probe = drcom_core::probe::snapshot();
-    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
-    if !verdict.allowed {
-        println!("跳过本次检查：{}", verdict.reason);
-        println!(
-            "（当前 Wi-Fi: {} · 本机 IP: {}）",
-            probe.ssid.clone().unwrap_or_else(|| "读不到".to_string()),
-            if probe.ips.is_empty() { "读不到".to_string() } else { probe.ips.join(", ") }
-        );
-        return 0;
-    }
-
     let report = session::check_once(&cfg, &password, &PlainHttp, timeout);
     let summary = report.outcome.summary_cn();
     println!("{}", summary);
@@ -2095,6 +2107,39 @@ mod tests {
         assert!(login_args_error(&s(&["stray-value"])).is_some(), "多余位置参数要报用法 ✗");
         // 帮助里也不再宣传 --password ✓
         assert!(!help_text().contains("--password"), "帮助里不许再出现 --password ✗");
+    }
+
+    #[test]
+    fn login_guard_lines_are_verbatim_and_evaluated_in_one_place() {
+        // 审计 P3-2：login 的守卫判定原先写了两遍（一次 login 探两次机 ✗）——
+        // 现在只探一次、复用 verdict；这个纯函数锁死「跳过本次检查」两行的文案 ✓
+        let mut cfg = Config::default();
+        cfg.network_guard_enabled = true;
+        cfg.guard_allowed_ssids = "Dorm-WiFi".to_string(); // 白名单里没有 Campus-WiFi
+        let probe = drcom_core::probe::Probe {
+            ssid: Some("Campus-WiFi".to_string()),
+            ips: vec!["172.16.80.77".to_string()],
+        };
+        let lines = guard_skip_lines(&cfg, &probe).expect("不在白名单必须拦下 ✓");
+        assert_eq!(lines.len(), 2, "跳过提示固定两行（与旧实现逐字一致）✓: {:?}", lines);
+        assert!(lines[0].starts_with("跳过本次检查："), "{}", lines[0]);
+        assert!(lines[0].contains("不在校园网"), "{}", lines[0]);
+        assert_eq!(lines[1], "（当前 Wi-Fi: Campus-WiFi · 本机 IP: 172.16.80.77）");
+
+        // 读不到 Wi-Fi 时如实写「读不到」（不编造 ✗）；有 IP 但不命中 → 仍然拒绝 ✓
+        let unknown = drcom_core::probe::Probe {
+            ssid: None,
+            ips: vec!["192.168.1.20".to_string()],
+        };
+        let lines = guard_skip_lines(&cfg, &unknown).unwrap();
+        assert_eq!(lines[1], "（当前 Wi-Fi: 读不到 · 本机 IP: 192.168.1.20）");
+
+        // 命中白名单 → None（login 继续走 dry-run / 真检查，不再二次判定 ✓）
+        cfg.guard_allowed_ssids = "Campus-WiFi".to_string();
+        assert!(guard_skip_lines(&cfg, &probe).is_none());
+        // 守卫关掉 → 永远不拦（2.x 的行为 ✓）
+        cfg.network_guard_enabled = false;
+        assert!(guard_skip_lines(&cfg, &probe).is_none());
     }
 
     #[test]

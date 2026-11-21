@@ -4,11 +4,11 @@
 > （Windows / Linux AMD64·ARMv8·ARMv7 / macOS Intel·Apple Silicon），
 > 并且**不依赖浏览器** —— GUI 外壳在 M2 接到这个核心上。
 
-## 现在的状态（M4 收尾 · preview.6，2026-11-22）
+## 现在的状态（M4 收尾 · preview.7，2026-11-22）
 
 | 项 | 值 |
 | --- | --- |
-| 单元测试 | **338 项全绿**（核心 274 + 可执行 29 + 界面 35；另有 1 项文档测试）—— Windows 实测；Unix 平台多 1 项文件权限测试（339）✓ |
+| 单元测试 | **342 项全绿**（核心 276 + 可执行 30 + 界面 36；另有 1 项文档测试）—— Windows 实测；Unix 平台多 1 项文件权限测试（343）✓ |
 | headless 可执行 | **0.32 MB**（preview.4 CI 实测；每版由 CI「体积报告」打印 ✓） |
 | Slint GUI | **7.83 MB**（preview.4 CI 实测，Windows x86_64；零 WebView，真机可启动 ✓） |
 | 依赖 | 核心只 2 个（`serde`/`serde_json`）；GUI 另加 Slint（软件渲染器 ✓） |
@@ -145,8 +145,11 @@ stardust-flash-link update backups                    # 列出所有备份（bac
   路径穿越 / 盘符 / 绝对路径 / 反斜杠 / `..` 段一律白名单拒绝；exe 还要过**平台魔数**
   （Windows `MZ` / Linux `ELF` / macOS Mach-O）✓。
 - **安装目录 / 备份 / 用户数据**：安装目录 = 当前 exe 所在目录；备份放 `<安装目录>/backup/`；
-  **绝不碰用户数据目录**（`platform::data_dir()`）✓。安装目录不可写（例如装在 Program Files 又没权限）时
-  `apply` 会明确失败、**不动程序** ✓。
+  **绝不碰用户数据目录**（`platform::data_dir()`）✓。安装目录不可写（例如装在 `Program Files` / `/usr/bin`
+  又没权限）时 `apply` / `rollback` 会明确失败、**不动程序** ✓，并在错误文案里给**可操作的权限提示**
+  （preview.7，审计 D）：Windows →「以管理员身份运行」重开程序 / 换到可写目录（如 `%LOCALAPPDATA%\StardustFlashLink`）；
+  Linux / macOS → 用 `sudo` 或装到用户可写目录（如 `~/.local/bin`）—— 纯函数 `permission_hint(os, is_permission_error)`，
+  只在**权限错误**（`ErrorKind::PermissionDenied`）时追加，杀毒软件占用 / 磁盘错等其它错误不多嘴 ✓。
 - **检查 / 下载（第一块，没变）**：解析 GitHub `/releases`（draft 忽略、正式通道只收非 prerelease ✓）、
   按产物名挑本机资产（只认 `stardust-flash-link-<版本>-<目标>.(zip|deb|dmg)`，**宁可不更新也不装错平台** ✓）、
   有界下载（`size × 1.5`）、SHA256 校验（**摘要缺失即拒绝**，与 2.x I10 / P0-2 同口径 ✓）；
@@ -185,6 +188,10 @@ stardust-flash-link diagnostics --out diag.zip   # 忽略路径则放数据目�
 > 统计全是 0。现在两条路径都调 **同一个** `drcom_core::runtime::check_once`
 > （守卫 → 账号 → 密码 → 一次检查），等级 / 文案不再有第二套口径 ✓。
 > 注意：`auto_check_enabled` 关掉或配置读不出来时**不写日志**（那不是一次检查，别刷屏 ✗）。
+> **手点「立即检查」也会落一行** ✓（preview.7，审计 P2-5 的收尾）：同一个格式、同一个
+> `runtime::append_business_log`、同一套 ok/fail/skip 等级；但**「测试连接」不写** ✗ ——
+> 它用的是设置表单里**还没保存**的值（密码 / 白名单都可能是临时试的），不是一次周期检查，
+> 写进 `campus_login.log` 会把成功率统计搅浑（代码注释里写明了这个口径 ✓）。
 
 铁律：**密码永远不进包** ✓；日志里任何 URL 都会被擦成 `<url>` ✓（有单测 + 真机双向验证 ✓；
 包用第三方工具校验为**标准 ZIP** ✓：本机验证用 Python `zipfile.testzip()`，CI 里 Linux 用
@@ -254,7 +261,7 @@ crates/drcom-core/     平台无关核心（无 UI、无平台框架）
   zipread.rs           只读 ZIP（zipwriter 的对偶）：只收 store、逐条 CRC + 路径白名单
 crates/drcom-cli/      无界面可执行（headless 优先：Linux 服务器/树莓派要它 ✓）
   main.rs              CLI 子命令（version/status/login/update/…）
-  server.rs            本地控制 API（只绑回环 + 安全头 + 1 MB 上限 + 有界排空）
+  server.rs            本地控制 API（只绑回环 + 安全头 + 1 MB 上限 + 有界排空；只读、无凭据 → 不需要 2.x 的写请求三道校验，见文件头）
 ```
 
 ## 硬规则（改代码前先读）
@@ -263,5 +270,8 @@ crates/drcom-cli/      无界面可执行（headless 优先：Linux 服务器/�
    `systemd --user`（Linux）与 launchd（macOS）下 ✓；
 2. **密码绝不进日志**：任何可能打印的字符串先过 `secret::scrub_url` ✓（有测试守着）；
 3. **配置与 API 契约向后兼容**：3.0 直接读 2.x 的 `config.json` / `password.txt` ✓；
-4. **只绑 127.0.0.1**：本地 API 永远不对外 ✓；
+4. **只绑 127.0.0.1**：本地 API 永远不对外 ✓；路由全是 **GET 只读**、无凭据 →
+   **不需要** 2.x Web UI 那三道写请求校验（Host 白名单 / Origin / `X-Requested-With`）——
+   2.x 不变量 I11 只约束 2.x 的 Web UI；3.0 加了只会误伤本地脚本 ✗（审计 P3-5，
+   边界与「以后加写接口要重新评估」写在 [`crates/drcom-cli/src/server.rs`](crates/drcom-cli/src/server.rs) 文件头 ✓）；
 5. **开发期不升正式通道**：`APP_CHANNEL` 保持 `Preview`，等便携版成型再谈 ✓。

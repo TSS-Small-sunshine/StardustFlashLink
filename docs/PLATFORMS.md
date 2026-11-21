@@ -79,7 +79,7 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | **M1** | 完整核心：登录/在线探测/**位置守卫**/方案/退避/日志轮转/指标/诊断包 | 与 2.x 行为对齐（`_smoke_*` 通过） |
 | **M2** | 桌面壳：托盘/窗口/单实例/自启/深色主题；UI 迁移 | 三平台可运行 App |
 | **M3** | 平台守护：Windows 服务(NSSM) / **systemd --user** / **launchd LaunchAgent**；打包矩阵 | 各平台安装包 + AppImage/dmg |
-| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 自动更新已完成（2026-11-21，preview.5）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；**审计 P2/P3 收尾**（CI 外部互验、plist 版本规范、卸载/关自启幂等、退出码语义、`--prefix` 打包，见 CHANGELOG preview.5）✓；**preview.6** 再收 5 条：**GUI 后台检查也写业务日志/指标**（`core::runtime` 共享入口，P2-5）、`profile ssids`（P3-7）、便携模式文档-实现一致（P3-8）、`.desktop` 自启字段/图标名 + deb `Installed-Size` 口径（P3-15）、统计兼容 2.x 旧日志格式（P3-13）✓；便携版单文件 / 正式安装器 / 正式通道仍待做 |
+| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 自动更新已完成（2026-11-21，preview.5）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；**审计 P2/P3 收尾**（CI 外部互验、plist 版本规范、卸载/关自启幂等、退出码语义、`--prefix` 打包，见 CHANGELOG preview.5）✓；**preview.6** 再收 5 条：**GUI 后台检查也写业务日志/指标**（`core::runtime` 共享入口，P2-5）、`profile ssids`（P3-7）、便携模式文档-实现一致（P3-8）、`.desktop` 自启字段/图标名 + deb `Installed-Size` 口径（P3-15）、统计兼容 2.x 旧日志格式（P3-13）✓；**preview.7** 再收 5 条：GUI 手点「立即检查」也写业务日志（P2-5 收尾）、`login` 守卫只探一次机（P3-2）、只读 API 的安全边界写清（P3-5，不加校验）、自我替换的安装目录权限提示（`permission_hint`，审计 D）、2.x「仍不可达」归 fail（审计 E）✓；便携版单文件 / 正式安装器 / 正式通道仍待做 |
 
 ### M4 第二块：自我替换 / 回滚（2026-11-18 完成）
 
@@ -130,8 +130,8 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | 启动验证 | 真机启动 GUI，5 秒后进程仍存活（说明 winit 后端 + 软件渲染器初始化成功 ✓） |
 | 真机行为验证 | 守卫按白名单拦下并写出日志：`2026-09-28 13:30:48Z 不在校园网（…）（Wi-Fi: 6#119）` ✓ |
 
-> **当前测试数（2026-11-22，preview.6）**：`cargo test --workspace` **338 项单元 + 1 项文档测试全绿**、0 warning ✓
-> （core 274 / cli 29 / ui 35；体积与耗时以 CI 每版的「体积报告」为准 ✓）。
+> **当前测试数（2026-11-22，preview.7）**：`cargo test --workspace` **342 项单元 + 1 项文档测试全绿**、0 warning ✓
+> （core 276 / cli 30 / ui 36；体积与耗时以 CI 每版的「体积报告」为准 ✓）。
 
 > **体积说明**：GUI 7.83 MB vs headless 0.32 MB —— 差在窗口系统（winit）与渲染器。
 > 仍远小于 Electron（≈150 MB）；M3 会再试：

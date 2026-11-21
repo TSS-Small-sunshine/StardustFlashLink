@@ -5,6 +5,85 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v3.0.0.0-preview.7 (fix) — 2026-11-22 · 代号 `Altair`（牛郎星）· **3.0 预览线**
+
+> 3.0「Altair」线 **preview.6 之后的审计收尾第四批**：收掉 `_维护报告/audit/rust-3.0.md` 的
+> **P2-5（手点检查的收尾）** 与 P3-2 / P3-5，外加两条真实使用中会咬到的小项（自我替换权限提示、
+> 2.x 旧日志口径），**不加新功能、不新增依赖**（R1）。仍是**预览版**（R6）：正式用户的自动更新
+> 收不到它；`main` 的 2.x 稳定线完全不受影响 ✓。
+
+### 🖱️ ① 手点「立即检查」也写业务日志（P2-5 收尾，本轮核心）
+
+- **问题**：preview.6 让 GUI **后台检查**写业务日志了，但用户**手点「立即检查」**仍然只把结果画在窗口里 ✗
+  —— 只用界面、偶尔手点一下的机器，诊断包里还是看不到这次检查、`metrics` 也统计不到。
+- **修法**：`drcom-ui::model` 抽出可注入的 `run_check_with(cfg, password, http, log_dir, finished, note)`：
+  一次真检查 → 用 **`drcom_core::runtime::append_business_log`** 追一行（与后台检查 / CLI 逐字同格式、
+  同一套 `runtime::kind_of` 等级）→ 再把结果翻成界面文案 ✓。`run_check()` 只负责读环境（legacy 配置 /
+  密码 / 日志目录）后调用它。
+- **两种不写的情况**（口径写进代码注释与 README）：
+  - **「测试连接」不写** ✗ —— 它拿的是设置表单里**还没保存**的值（密码 / 白名单都可能是临时试的），
+    不是一次周期检查，写进去会把成功率统计搅浑；
+  - 手点路径里的 early-return（没配置 / 配置有错 / 账号没填 / 密码空 / 守卫拦下）也不写 ——
+    那些是「还没到检查这一步」的准备提示，与后台「只有真正检查才落一行」同口径 ✓。
+- **断言**：`model::tests::a_manual_check_writes_exactly_one_business_log_line_that_metrics_can_count` ——
+  临时目录注入（**故意不建 logs/**）→ 文件恰好 1 行、格式含 `Z [ok] `、`metrics::collect` 统计到
+  ok=1 / 成功率 100%、日志与界面文案都不含密码 ✓。
+
+### 🧹 ② P3 收尾（2 / 5）
+
+- **`login` 的守卫判定只做一次**（P3-2）：`login` 原先在「dry-run 之前」与「真正检查之前」**逐字写了两遍**
+  `probe::snapshot()` + `guard_allows` + 两行 println ✗ —— `probe::snapshot()` 会起外部命令
+  （Windows `netsh` / `ipconfig`、Linux/macOS `nmcli` / `airport`），一次 `login` 白探两遍。
+  现在**只探一次、只判一次**并复用 verdict（纯函数 `guard_skip_lines`）；跳过文案 / 顺序 / 退出码
+  （0 = 跳过不算失败）**逐字不变** ✓。
+  断言：`tests::login_guard_lines_are_verbatim_and_evaluated_in_one_place`（两行文案逐字 + 读不到 Wi-Fi
+  如实写「读不到」+ 命中 / 关闭守卫时 None）✓。
+- **3.0 只读 API 的安全边界写清**（P3-5）：`drcom-cli/src/server.rs` 文件头 + `desktop/README.md` 写明
+  「只绑 `127.0.0.1`、路由全是 GET 只读、无凭据 → **不需要** 2.x Web UI 那三道写请求校验
+  （Host 白名单 / Origin / `X-Requested-With`；2.x 不变量 I11 只约束 2.x 的 Web UI）」；
+  **故意不加校验** ✗ —— 加了只会误伤 `curl http://127.0.0.1:8848/api/status` 这类本地脚本（审计 P3-5 的结论）；
+  同时写明「以后若加写接口，这段边界失效、必须重新评估威胁模型」✓。
+
+### 🔐 ③ 自我替换的安装目录权限提示（审计 D）
+
+- **问题**：自我替换要往**安装目录**写（备份 + 换 exe）。装在 `Program Files` / `/usr/bin` 时，
+  普通权限下只会看到「拒绝访问（os error 5）」，用户不知道下一步该干嘛 ✗。
+- **修法**：`core::update_apply` 新增纯函数 **`permission_hint(os, is_permission_error)`**：
+  - Windows → 「以管理员身份运行」重开 / 换到可写目录（`%LOCALAPPDATA%\StardustFlashLink`）；
+  - Linux / macOS → 用 `sudo`，或装到用户可写目录（`~/.local/bin`）；
+  - **只有权限错误才提示**（`ErrorKind::PermissionDenied`）：杀毒软件占用 / 磁盘满 / 文件不存在不追加 ✗。
+  接进 `apply` / `rollback` 共用引擎的所有 io 错误路径（建备份目录、复制、rename 舞步）✓。
+- **断言**：`update_apply::tests::permission_hint_is_actionable_and_only_for_permission_errors` ——
+  三平台 × 权限/非权限 4 组、Windows 文案含「管理员 / Program Files / 可写」、Unix 含「sudo / /usr/bin」、
+  `PermissionDenied` 追加提示而 `NotFound` / 磁盘满不追加 ✓。
+
+### 📊 ④ 2.x 旧日志「仍不可达」归 fail（审计 E）
+
+- **口径**：2.x `metrics.py` 把 `等待 Ns 后 … 仍不可达`（`EV_UNREACHABLE`）算成**不健康**
+  —— 周期结局是 `unreachable`，`series.fail` 把它并进失败、uptime 的分母照算。
+  preview.6 的 2.x 兼容解析把它当 `unmarked`（不进成功率）→ 真实的「网一直不通」被漏成「没样本」，
+  成功率虚高 ✗。
+- **修法**：`metrics::classify_v2` 对正文含「仍不可达」→ `Kind::Fail`（与 `登录失败:` 同口径）；
+  过程行（`开始检查` / `网络已可达（第 N 次…）` / `等待中 (N): …`）仍是 `unmarked` ✓。
+- **断言**：`metrics::tests::two_x_unreachable_counts_as_a_failure_like_two_x_metrics_does` ——
+  夹具逐字取自 2.x `protocol.py:148` 的 `_log(..., level=logging.ERROR)`，断言 fail + 与一次成功混算
+  成功率 50%；`a_copied_two_x_log_…` 也把这条真实行加进旧日志面板断言 ✓。
+
+### 🧪 ⑤ 自检
+
+- `cargo test --workspace` **342 项单元 + 1 项文档测试全绿**（preview.6 基线 338 + 1，本轮 **+4**：
+  core +2 —— `permission_hint` 1 / 2.x「仍不可达」1；CLI +1 —— `login` 守卫复用；GUI +1 —— 手点检查落日志）；
+  0 warning ✓；
+- `cargo build -p drcom-ui` 通过（改过界面 Rust 代码必须重建 ✓）；
+- 版本号 `APP_CHANNEL_SEQ` 6 → 7（`v3.0.0.0-preview.7`）✓；
+- 文档同步：`desktop/README.md`（状态 / 测试数 / 诊断包节的手点口径 / 目录里 `server.rs` 边界 / 硬规则 4 /
+  自我替换权限提示）、`docs/PLATFORMS.md`（M4 状态 / 当前测试数）、`AGENTS.md` §9.2 测试数、
+  根 `README.md`（测试数）✓；
+- 隐私：本轮测试夹具只用合成值（`2023001234`、`#Demo-Pwd-0000#`、`Campus-WiFi`），未读取 / 写入任何
+  真机 `config.json` / `password.txt`，**未执行任何会动真机状态的** service / autostart / update apply 命令 ✓；
+- 已知限制：`permission_hint` 的触发依赖真实的 `ErrorKind::PermissionDenied`（单测用合成 io 错误），
+  Windows `Program Files` / Linux `/usr/bin` 的**真实拒绝访问**仍待真机验证；其余限制（托盘、Windows 安装器、
+  ARMv7 GUI sysroot、GUI 就地升级未真机验证）**仍然成立** ✓。
 ## v3.0.0.0-preview.6 (fix) — 2026-11-22 · 代号 `Altair`（牛郎星）· **3.0 预览线**
 
 > 3.0「Altair」线 **preview.5 之后的审计收尾第三批**：只修 `_维护报告/audit/rust-3.0.md` 里的
