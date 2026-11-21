@@ -8,7 +8,7 @@
 ## v3.0.0.0-preview.5 (fix) — 2026-11-21 · 代号 `Altair`（牛郎星）· **3.0 预览线**
 
 > 3.0「Altair」线 **preview.4 之后的审计收尾第二批**：只修 `_维护报告/audit/rust-3.0.md` 里
-> 审计出的 13 条（P2/P3），**不加新功能**。仍是**预览版**（R6）：正式用户的自动更新收不到它；
+> 审计出的 13 条（P2/P3）+ 1 条发布流程里现形的并发缺陷，**不加新功能**。仍是**预览版**（R6）：正式用户的自动更新收不到它；
 > `main` 的 2.x 稳定线完全不受影响 ✓。
 
 ### 🩹 ① 幂等 / 可用性（真机会咬人的那几条）
@@ -52,9 +52,22 @@
   - **Windows runner**：`Get-FileHash`（SHA256）逐行对照 `SHA256SUMS` + `Expand-Archive` 解压测试；
   - 只跑在各自 runner 上、只用 runner 自带工具（不引入新依赖 ✓）—— 自研 SHA-256 / ZIP 不再「自洽地错」✓。
 
-### 🧪 ④ 自检
-- `cargo test --workspace` **326 项单元 + 1 项文档测试全绿**（本机基线 315 + 1，本轮 **+11**：
-  core +7、CLI +3、GUI +1）；0 warning ✓；
+### 🧩 ④ 并发「下载并安装」的临时目录撞车（macOS CI 现形，preview.5 内修掉）
+- **现象**：preview.5 首次预览发布 dispatch 上 `测试（macos-latest）` 红在
+  `model::tests::install_update_downloads_verifies_and_replaces_offline`：
+  `把下载文件改名为 …/sfl-gui-update-3634-…/…zip 失败: No such file or directory`。
+- **根因**：GUI「下载并安装」的 staging 目录名只用 `pid + SystemTime 纳秒`；macOS 上同一 tick 内
+  两个**并列测试线程**可能读到同一个纳秒值 → 撞同一个 staging 目录 → 先完成的 `remove_dir_all`
+  把另一个的 `.part` 删掉 → `rename` ENOENT。不是网络问题、也不是 ZIP 问题 ✓。
+- **修复**：名字再叠一个**进程内单调原子序号**（`static AtomicU64`，零新依赖 ✓）；
+  `install_update_with` 改用 `staging_dir_name(pid, nonce, seq)` —— 并列调用一定互不干扰 ✓。
+- **断言**：`staging_dirs_are_unique_even_within_the_same_tick`（8 线程 × 64 次，故意共用同一
+  nonce，断言 512 个名字全唯一）＋ `concurrent_offline_installs_do_not_share_staging_dirs`
+  （4 线程各自离线安装，断言 4 个都装对、互不串目录）✓。
+
+### 🧪 ⑤ 自检
+- `cargo test --workspace` **328 项单元 + 1 项文档测试全绿**（本机基线 315 + 1，本轮 **+13**：
+  core +7、CLI +3、GUI +3）；0 warning ✓；
 - `cargo build -p drcom-ui` 通过（改过界面 Rust 代码必须重建 ✓）；
 - 版本号 `APP_CHANNEL_SEQ` 4 → 5（`v3.0.0.0-preview.5`）✓；
 - 文档同步：`desktop/README.md`（测试数 / 状态 / **退出码表** / 外部互验说明）、`docs/PLATFORMS.md`

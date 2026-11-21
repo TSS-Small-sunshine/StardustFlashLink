@@ -159,7 +159,7 @@ Linux `~/.local/share/stardust-flash-link`、macOS `~/Library/Application Suppor
 
 ```bash
 cd desktop
-cargo test --workspace                  # 326 项测试（核心 266 / 命令行 28 / 界面 32 / doctest 1 ✓）
+cargo test --workspace                  # 328 项测试（核心 266 / 命令行 28 / 界面 34 / doctest 1 ✓）
 cargo build --release -p drcom-cli      # 命令行
 cargo build --release -p drcom-ui       # 桌面界面
 ```
