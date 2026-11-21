@@ -5,6 +5,74 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.13 (fix) — 2026-11-21 · 代号 `Vega`（织女星）
+
+> 主题：**真机日志降噪 + Web 面板剩余 P3 收尾** —— 客户端提前断开（切页面 / 关标签）不再被当成
+> 服务错误刷 `[ERROR]`；顺手清掉 SyntaxWarning、绝对路径上屏、innerHTML 裸拼、日志轮询、
+> 重复请求、未用形参、死代码与配置「读-改-写」锁窗口。
+> 接口路径 / 字段名、配置结构、服务名、安装路径**都没动** ✓；仍零第三方依赖 / 零新增静态文件 ✓。
+
+### 🔊 ① 客户端提前断开不再当服务错误（真机证据）
+- **真机现象**：2026-11-21 `logs\campus_login.log` 出现 **3 次**
+  `[ERROR] GET /api/metrics 异常: [WinError 10053] 你的主机中的软件中止了一个已建立的连接。`
+  —— 面板本来每 2 秒轮询 /api/metrics，用户切走页面 / 关标签 / 浏览器提前释放连接时，
+  服务端写响应会遇到 `WinError 10053`（WSAECONNABORTED）。旧实现把它当服务错误：先记 `ERROR`，
+  再**尝试写第二次 500**；第二次写同样失败（`ConnectionAbortedError`）时 traceback 直接打到
+  `service_stderr.log` ✗（旧版真机日志里见过）。
+- **判据**：新增 `_is_client_disconnect(exc)`：`ConnectionAbortedError` / `ConnectionResetError` /
+  `BrokenPipeError`，以及 `winerror` 为 10053 / 10054 / 10058 / 10061 或 `errno` 为
+  `ECONNRESET` / `EPIPE` / `ESHUTDOWN` / `ECONNABORTED` 的 `OSError`。`TimeoutError` 与普通
+  `OSError` **不算**断开（仍按服务错误处理）✓。
+- **兜底分支**：`do_GET` / `do_POST` 的 except 先判断开 → 记一行 INFO
+  「客户端提前断开（不是服务错误）」并直接收尾，**不再写 500**；非断开异常仍是 `ERROR` + 500，
+  且 500 写失败（连接已断）时静默，不让二次异常冒到 stderr ✓。
+- **成功响应路径**：`_send_json` / `_send_bytes` 写到一半被断开时同样只记 INFO、静默收尾
+  （正常响应行为与字节一个没变）✓；`do_POST` 读请求体时被重置（旧实现会一路冒到
+  `BaseHTTPRequestHandler` 打 traceback）也走同一判据 ✓。
+- **防回归**：`_smoke_static.py` 新增 10 条（判据三类异常 / 四个 WinError / 非断开反例 /
+  6 个行为级分支：成功响应途中断开、GET 兜底断开、GET 兜底非断开仍 ERROR+500、POST 兜底断开、
+  POST 读体断开、500 写失败的二次异常静默），用假 handler **离线**跑真实 do_GET / do_POST ✓。
+
+### 🧹 ② SyntaxWarning 清零（非法转义）
+- `web_api.py` 的 `_restart_script_dir_candidates()` docstring 里 `C:\Windows\Temp` /
+  `D:\Program Files` 的 `\W` / `\P` 是非法转义；`auto_update.py` 的
+  `Local\DrcomAutoLoginTray` 的 `\D` 同理 —— 都改成 **raw docstring**（内容不变）✓。
+- 新增冒烟断言：**全仓 .py 编译零 SyntaxWarning**（排除 `tools/` / `python/` / `__pycache__` /
+  `packaging/output` / `logs/`，本机扫描 13 个 .py；有非法转义或新语法错误直接红）✓。
+
+### 🖥 ③ Web 面板剩余 P3（P3-3 / P3-7 / P3-13 / P3-14 / P3-10）
+- **P3-3 绝对路径上屏**：新增前端 `shortPath()`（只留最后两级、前面用 `…` 折叠，如
+  `…\logs\campus_login.log`）与统一展示口 `showPath()`（折叠路径进内容、完整路径进 `title`）。
+  「关于」页的 `config_file` / `data_dir` / `log_file`、`/api/log_file_path` 的日志路径、
+  `/api/update/history` 的 `path` 全部改走它；**后端 JSON 字段名一个没改**（I5）✓。
+- **P3-7 innerHTML 裸拼**：日志文件列表的 `it.name` / `it.size_h` / `it.rotate_hint` 不再拼字符串
+  HTML，改 `createElement` + `textContent`（显示结果一字不差，不再解释 HTML）✓。
+- **P3-13 日志轮询**：boot 不再无条件 `startLogPolling()`；改为 `activateTab` 里按当前页启停
+  （进「日志」页开 + 首拉，离开就 `clearInterval`），前台恢复时也只有日志页才补拉 ——
+  面板不可见时不再每 2 秒拉一次日志 ✓。
+- **P3-14 切配置页发两次 /api/config**：升级设置字段合进 `loadConfig` 的同一次响应，删掉
+  二次拉取的 wrapper —— 切一次配置页只发 **1 次** `/api/config` ✓（保存路径不变）。
+- **P3-10**：`api_post_restart(handler)` 的未使用形参删掉（调用点同步）；升级历史里的 `path`
+  按 P3-3 折叠显示（后端字段保留）✓。
+
+### 🧱 ④ 配置「读-改-写」锁窗口（P3-11）与死代码（P3-1）
+- **P3-11**：`POST /api/profiles/auto` 是 web_api 里唯一没套锁的读-改-写 → 纳入服务层注入的
+  `CONFIG_LOCK`（RLock，与配置页保存 / 方案保存 / 凭据保存同一把）；`profiles.auto_switch()`
+  的「读配置判总开关 → 挑方案 → 切方案」也整段持同一把锁（`activate()` 用的是可重入 RLock，
+  不会死锁）。以前「用户刚关掉自动切换」与「正在跑的一次检查」可能用旧配置切方案 ✓。
+- **P3-1**：`web_api.py` 的 `_read_json_body()` 确认**零调用**后删除（`_read_json_body_safe` 保留，
+  do_POST 行为不变）✓。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **626 项**（基线 601 → +25：A 的判据 3 条 + 行为级 6 条 + `_send_json` /
+  `_send_bytes` 判据 1 条 + B 全仓 SyntaxWarning 扫描 2 条 + C 5 条 + D 1 条 + E 3 条 + F 1 条 +
+  G 1 条 + H 1 条 + I 1 条；另把 M-3b 的装饰器数从 4 更新为 5）；
+- HTTP `_smoke_http.py` **63 项** ✓（路由 / 拦截 / 更新 / 重启分支全绿；客户端断开分支不便用真实
+  socket 稳定复现，改在静态冒烟里用假 handler 做行为级断言）；
+- 渲染器 `--self-test`、PR 机器人 `--self-test`、`build-installer.yml` YAML 解析、发布说明
+  `--dry-run`（预演本版、无残留占位符）全绿 ✓；
+- 真机复验（发布后）：观察 `logs\campus_login.log` 不再出现 `WinError 10053` 的 `[ERROR]`。
+
 ## v2.1.3.12 (fix) — 2026-11-20 · 代号 `Vega`（织女星）
 
 > 主题：**把「自动分析门户 AC」做扎实、做可见**，并修掉用户反馈的 **README 链接失效**。
