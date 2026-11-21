@@ -3,9 +3,16 @@
 //! 目标平台矩阵（见 `docs/PLATFORMS.md`）：
 //!   Windows x86_64 / ARM64 · Linux AMD64 / ARMv8 / **ARMv7** · macOS Intel / Apple Silicon
 //!
-//! 便携版（portable）规则：程序目录里存在 `portable.marker`，或配置里 `portable_mode = true`
-//! → 数据一律落在**程序目录**下的 `data/`，不写系统目录 ✓（U 盘/免安装场景）。
-//! 如果程序目录不可写（比如装在 Program Files 且无权限），**自动退回**系统目录并记一条日志 ✓。
+//! 便携版（portable）规则：**只认程序目录里有没有 `portable.marker`** ✓ ——
+//! 有 → 数据一律落在程序目录下的 `data/`，不写系统目录 ✓（U 盘/免安装场景）；
+//! 没有 → 走正常的数据目录 ✓。
+//!
+//! 审计 P3-8：这份文档旧版还写着「**或**配置里 `portable_mode = true`」✗ ——
+//! 那个配置键**从来没被读取**（而且配置本身就在数据目录里，靠它决定数据目录是鸡生蛋 ✗）。
+//! 现在文档与实现一致：**只有 marker**；`config.json` 里即使出现 `portable_mode`
+//! 也只是被原样保留的未知字段，**不生效** ✓（见 `Config` 的注释）。
+//!
+//! 如果程序目录不可写（比如装在 Program Files 且无权限），**自动退回**系统目录 ✓。
 
 use std::path::{Path, PathBuf};
 

@@ -98,9 +98,11 @@ pub struct Config {
     /// 3.0 新增：订阅哪条发行通道（默认正式版 → 收不到预览版 ✓）
     #[serde(default = "default_update_channel")]
     pub update_channel: UpdateChannel,
-    /// 3.0 新增：便携版标记（数据放程序目录而不是系统目录）
-    #[serde(default)]
-    pub portable_mode: bool,
+    // 审计 P3-8：**这里没有 `portable_mode` 键** ✗ —— 便携模式只认程序目录里的
+    // `portable.marker`（见 `platform::is_portable`）。早期预览版曾把它当成配置字段
+    // （文档也写着「或配置里 portable_mode = true ✗」），但它**从未被读取**、而且配置
+    // 本身就落在数据目录里（靠它决定数据目录是鸡生蛋 ✗）。删掉字段后，老配置里若还留着
+    // 这个键，会走下面的 `extra` **原样保留**：不丢数据、也不生效 ✓。
     /// 未知字段原样保留 ✓
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
@@ -132,7 +134,6 @@ impl Default for Config {
             update_check_interval_hours: 6,
             update_min_free_disk_mb: 200,
             update_channel: default_update_channel(),
-            portable_mode: false,
             extra: BTreeMap::new(),
         }
     }
@@ -521,6 +522,25 @@ mod tests {
         expected.sort();
         assert_eq!(got, expected, "每次损坏的原文都要各留一份 ✓");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn portable_mode_is_not_a_config_key_and_cannot_enable_portable_mode() {
+        // 审计 P3-8：便携模式**只认程序目录里的 portable.marker** ✓ —— 配置里写
+        // portable_mode 不生效；但老配置里的这个键必须原样保留（不悄悄丢用户数据 ✓）。
+        let cfg = Config::from_json(r#"{"account": "2023001234", "portable_mode": true}"#)
+            .expect("未知键不影响解析 ✓");
+        assert_eq!(cfg.account, "2023001234");
+        assert!(
+            cfg.extra.contains_key("portable_mode"),
+            "老配置里的 portable_mode 要落到 extra 原样保留: {:?}",
+            cfg.extra
+        );
+        let back = cfg.to_json().unwrap();
+        assert!(back.contains("\"portable_mode\""), "写回时也要带着它 ✓: {}", back);
+        // Config 结构体里已经没有这个字段了（审计 P3-8）—— 便携判定只看 marker、
+        // 不读配置，所以这里只需断言「保留但不生效」✓
+        assert_eq!(cfg, Config::from_json(&back).unwrap(), "往返不丢未知字段 ✓");
     }
 
     #[test]
