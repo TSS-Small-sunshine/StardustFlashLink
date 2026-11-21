@@ -107,19 +107,14 @@ fn set_last_at(state: &Arc<Mutex<WorkerState>>, at: String) {
     }
 }
 
-/// `HH:MM:SS`（只用标准库 ✓ —— 为三个数字引 crate 不值得 ✗）。
+/// `HH:MM:SSZ` —— **UTC 口径，与业务日志逐字一致** ✓。
+///
+/// 审计 P2-9：这里原先硬编码 `(secs + 8 * 3600)`（注释还写着「本地 UTC+8，与日志口径一致」✗）——
+/// 日志用的是 `timefmt::format_utc`（UTC，带 Z），两者差 8 小时；而且「本地 = UTC+8」
+/// 只在无夏令时的中国时区成立，Linux/macOS 的海外用户会全错 ✗。
+/// 现在统一交给 [`drcom_core::timefmt::clock_utc`]，口径只有一处 ✓。
 fn now_clock() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let of_day = (secs + 8 * 3600) % 86400; // 本地 UTC+8，与日志口径一致 ✓
-    format!(
-        "{:02}:{:02}:{:02}",
-        of_day / 3600,
-        (of_day % 3600) / 60,
-        of_day % 60
-    )
+    drcom_core::timefmt::clock_utc(std::time::SystemTime::now())
 }
 
 /// 跑一次检查（与 CLI 同一条链路 ✓）。
@@ -264,10 +259,13 @@ mod tests {
     }
 
     #[test]
-    fn clock_is_hh_mm_ss() {
+    fn clock_is_hh_mm_ss_utc_with_z() {
         let clock = now_clock();
-        assert_eq!(clock.len(), 8, "{}", clock);
-        let parts: Vec<&str> = clock.split(':').collect();
+        // 审计 P2-9：必须带 Z（UTC），且与日志 timefmt::format_utc 同一口径 ✓
+        assert_eq!(clock.len(), 9, "{}", clock);
+        assert!(clock.ends_with('Z'), "界面时钟必须是 UTC 口径（带 Z）✓: {}", clock);
+        let time_part = &clock[..8];
+        let parts: Vec<&str> = time_part.split(':').collect();
         assert_eq!(parts.len(), 3, "{}", clock);
         for part in &parts {
             assert_eq!(part.len(), 2, "{}", clock);
@@ -275,6 +273,18 @@ mod tests {
         }
         assert!(parts[0].parse::<u32>().unwrap() < 24, "{}", clock);
         assert!(parts[1].parse::<u32>().unwrap() < 60, "{}", clock);
+        assert!(parts[2].parse::<u32>().unwrap() < 60, "{}", clock);
+        // 与日志格式同源：format_utc(now) 里就含这段时钟 ✓
+        // （前后各取一次，跨秒边界也不会偶发红 ✓）
+        let before = drcom_core::timefmt::format_utc(std::time::SystemTime::now());
+        let after = drcom_core::timefmt::format_utc(std::time::SystemTime::now());
+        assert!(
+            before.contains(time_part) || after.contains(time_part),
+            "日志 {} / {} 与界面时钟 {} 口径必须一致 ✓",
+            before,
+            after,
+            clock
+        );
     }
 
     #[test]
