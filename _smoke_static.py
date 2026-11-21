@@ -2167,9 +2167,9 @@ check("维护 M-3：profiles 只有一段受 ImportError 保护的 import（可�
       "代码里出现 %d 次" % _m3_code.count("import profiles as _profiles_mod"))
 # 审计 C-06：方案保存 / 切换的「读-改-写」必须与服务层 api_post_config 共用同一把锁
 _m3_prof = pathlib.Path("profiles.py").read_text(encoding="utf-8")
-check("维护 M-3b：profiles 的四个读-改-写入口都持同一把 CONFIG_LOCK",
+check("维护 M-3b：profiles 的读-改-写入口都持同一把 CONFIG_LOCK",
       "def _with_config_lock(fn)" in _m3_prof
-      and _m3_prof.count("@_with_config_lock") == 4
+      and _m3_prof.count("@_with_config_lock") == 5   # v2.1.3.13（P3-11）：+auto_switch
       and "config_lock=None" in _m3_prof,
       "装饰器 %d 个" % _m3_prof.count("@_with_config_lock"))
 
@@ -4827,6 +4827,393 @@ check("维护 v2.1.3.12：README 表格每行的列数一致（行内代码里�
       not _bad_readme_tables, repr(_bad_readme_tables[:5]))
 
 
+
+# ============================================================
+# v2.1.3.13（2026-11-21）：真机日志降噪 + 剩余 P3 收尾
+#   真机证据（logs/campus_login.log 2026-11-21）：面板轮询 /api/metrics 时出现 3 次
+#   「[ERROR] GET /api/metrics 异常: [WinError 10053]」—— 客户端提前断开（切页面 /
+#   关标签 / 浏览器提前释放连接）被当成了服务错误；旧版还会在「写 500 失败」时把
+#   traceback 打进 service_stderr.log。本段钉住降噪判据与行为。
+#   接口路径 / 字段名、配置结构、服务名、安装路径都没动（I5 / I1 / I2）。
+# ============================================================
+import warnings  # noqa: E402
+
+import web_api as _wa13  # noqa: E402
+
+_V13_MISSING = object()
+_V13_SNAPSHOT_ATTRS = (
+    "logger", "api_get_status", "api_post_login", "_restart_service_soon",
+    "_load_config", "_save_config", "_validate_config", "CONFIG_LOCK",
+)
+_v13_saved = {_a: _wa13.__dict__.get(_a, _V13_MISSING) for _a in _V13_SNAPSHOT_ATTRS}
+
+
+def _v13_restore():
+    for _a, _old in _v13_saved.items():
+        if _old is _V13_MISSING:
+            try:
+                delattr(_wa13, _a)
+            except AttributeError:
+                pass
+        else:
+            setattr(_wa13, _a, _old)
+
+
+# —— B：全仓 .py 编译零 SyntaxWarning（非法转义清零）——
+_SYNTAX_SKIP_DIRS = {"tools", "python", "__pycache__", "output", "logs"}
+_syntax_hits = []
+_syntax_count = 0
+for _py in sorted(pathlib.Path(".").rglob("*.py")):
+    if set(_py.parts) & _SYNTAX_SKIP_DIRS:
+        continue
+    _syntax_count += 1
+    try:
+        _py_text = _py.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    with warnings.catch_warnings(record=True) as _caught:
+        warnings.simplefilter("always")
+        try:
+            compile(_py_text, _py.as_posix(), "exec")
+        except SyntaxError as _syntax_exc:
+            _syntax_hits.append((_py.as_posix(), 0, "SyntaxError: %s" % _syntax_exc))
+            continue
+    for _w in _caught:
+        if issubclass(_w.category, SyntaxWarning):
+            _syntax_hits.append((_py.as_posix(), _w.lineno, str(_w.message)))
+check("维护 v2.1.3.13（B）：全仓 .py 编译零 SyntaxWarning（排除 tools/python/__pycache__/packaging/output/logs）",
+      not _syntax_hits and _syntax_count >= 13,
+      "扫描 %d 个 .py，命中 %r" % (_syntax_count, _syntax_hits[:5]))
+check("维护 v2.1.3.13（B）：两个已知非法转义源已改 raw docstring（web_api 执行器目录 / auto_update 托盘互斥体名）",
+      'r"""执行器候选目录' in src_web
+      and 'r"""本登录会话里托盘是否已经在跑' in src_upd,
+      "raw docstring 断言")
+
+
+# —— A：客户端提前断开 = 不是服务错误（行为级：假 handler 走真实 do_GET / do_POST）——
+check("维护 v2.1.3.13（A）：_is_client_disconnect 认出 ConnectionAborted / Reset / BrokenPipe",
+      _wa13._is_client_disconnect(ConnectionAbortedError(10053, "x"))
+      and _wa13._is_client_disconnect(ConnectionResetError(10054, "x"))
+      and _wa13._is_client_disconnect(BrokenPipeError(32, "x")),
+      "三类断连异常")
+check("维护 v2.1.3.13（A）：_is_client_disconnect 覆盖 WinError 10053 / 10054 / 10058 / 10061",
+      all(_wa13._is_client_disconnect(OSError(_code, "synthetic"))
+          for _code in (10053, 10054, 10058, 10061)),
+      "WinError 数值族")
+check("维护 v2.1.3.13（A）：普通异常 / TimeoutError / 其它 OSError 不算客户端断开（仍按服务错误处理）",
+      not _wa13._is_client_disconnect(RuntimeError("boom"))
+      and not _wa13._is_client_disconnect(TimeoutError("timeout"))
+      and not _wa13._is_client_disconnect(OSError(2, "no such file")),
+      "非断开判据")
+
+
+class _DisconnectCaptureLogger(object):
+    """记录每条日志的等级与正文（_log 只用到 info/warning/error/debug/log）。"""
+
+    def __init__(self):
+        self.records = []
+
+    def _record(self, level, msg, args):
+        try:
+            rendered = (msg % args) if args else str(msg)
+        except Exception:  # noqa: BLE001
+            rendered = "%s %r" % (msg, args)
+        self.records.append((level, rendered))
+
+    def debug(self, msg, *args):
+        self._record("DEBUG", msg, args)
+
+    def info(self, msg, *args):
+        self._record("INFO", msg, args)
+
+    def warning(self, msg, *args):
+        self._record("WARNING", msg, args)
+
+    def error(self, msg, *args):
+        self._record("ERROR", msg, args)
+
+    def critical(self, msg, *args):
+        self._record("CRITICAL", msg, args)
+
+    def exception(self, msg, *args):
+        self._record("ERROR", msg, args)
+
+    def log(self, level, msg, *args):
+        self._record(str(level), msg, args)
+
+
+class _DisconnectFakeHandler(_wa13._Handler):
+    """假 handler：记录「尝试写响应」的状态码 / body，可让写 body 抛断连异常。
+
+    不调 BaseHTTPRequestHandler.__init__（不碰真实 socket），只提供 do_GET / do_POST
+    会用到的那几个方法 —— 这样能**离线、确定性地**验证「断开分支」与「500 分支」。
+    """
+
+    def __init__(self, path="/api/status", command="GET", break_write=False):
+        self.path = path
+        self.command = command
+        self.headers = {}
+        self.rfile = None
+        self.wfile = self
+        self.break_write = break_write
+        self.responses = []
+        self.bodies = []
+        self.close_connection = False
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _check_request(self):
+        return True
+
+    def send_response(self, code, message=None):
+        self.responses.append(code)
+
+    def send_header(self, key, value):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.bodies.append(data)
+        if self.break_write:
+            raise ConnectionAbortedError(10053, "客户端提前断开（合成夹具）")
+        return len(data)
+
+
+class _DisconnectFakeRFile(object):
+    def __init__(self, exc):
+        self.exc = exc
+
+    def read(self, _n):
+        raise self.exc
+
+
+def _run_http_handler(handler, method_name):
+    """跑 do_GET / do_POST；返回 None = 正常返回，否则异常字符串（不让冒烟脚本自己崩）。"""
+    try:
+        getattr(handler, method_name)()
+        return None
+    except Exception as exc:  # noqa: BLE001
+        return repr(exc)
+
+
+def _v13_raise_aborted():
+    raise ConnectionAbortedError(10053, "客户端提前断开（合成夹具）")
+
+
+def _v13_raise_boom():
+    raise RuntimeError("boom-v2.1.3.13")
+
+
+try:
+    _cap13 = _DisconnectCaptureLogger()
+    _wa13.logger = _cap13
+
+    # (a) 成功响应写到一半客户端断开 → 只 INFO，不 ERROR、不写 500
+    _h13a = _DisconnectFakeHandler(break_write=True)
+    _wa13.api_get_status = lambda: {"ok": True}
+    _ret13a = _run_http_handler(_h13a, "do_GET")
+    _levels13a = [lvl for lvl, _ in _cap13.records]
+    check("维护 v2.1.3.13（A）：成功响应途中客户端断开 → 静默（只 INFO / 不再 ERROR + 写 500）",
+          _ret13a is None and _levels13a == ["INFO"]
+          and _h13a.responses == [200] and len(_h13a.bodies) == 1
+          and "客户端提前断开" in _cap13.records[0][1],
+          repr((_ret13a, _levels13a, _h13a.responses)))
+
+    # (b) do_GET 兜底：异常本身是断开 → INFO + 直接收尾，零响应
+    _cap13.records[:] = []
+    _h13b = _DisconnectFakeHandler()
+    _wa13.api_get_status = _v13_raise_aborted
+    _ret13b = _run_http_handler(_h13b, "do_GET")
+    _levels13b = [lvl for lvl, _ in _cap13.records]
+    check("维护 v2.1.3.13（A）：do_GET 兜底遇客户端断开 → INFO + 不写 500（不再 ERROR + 二次写）",
+          _ret13b is None and _levels13b == ["INFO"]
+          and _h13b.responses == [] and _h13b.bodies == []
+          and "GET /api/status 客户端提前断开" in _cap13.records[0][1],
+          repr((_ret13b, _levels13b, _h13b.responses)))
+
+    # (c) 非断开异常仍是 ERROR + 一次 500（降噪不改变服务错误语义）
+    _cap13.records[:] = []
+    _h13c = _DisconnectFakeHandler()
+    _wa13.api_get_status = _v13_raise_boom
+    _ret13c = _run_http_handler(_h13c, "do_GET")
+    _levels13c = [lvl for lvl, _ in _cap13.records]
+    check("维护 v2.1.3.13（A）：非断开异常仍是 ERROR + 一次 500（服务错误语义不变）",
+          _ret13c is None and "ERROR" in _levels13c
+          and _h13c.responses == [500] and len(_h13c.bodies) == 1,
+          repr((_ret13c, _levels13c, _h13c.responses)))
+
+    # (d) do_POST 兜底：BrokenPipe 也算断开 → INFO + 不写 500
+    _cap13.records[:] = []
+    _h13d = _DisconnectFakeHandler(path="/api/login", command="POST")
+    _wa13.api_post_login = (lambda: (_ for _ in ()).throw(
+        BrokenPipeError(32, "客户端提前断开（合成夹具）")))
+    _ret13d = _run_http_handler(_h13d, "do_POST")
+    _levels13d = [lvl for lvl, _ in _cap13.records]
+    check("维护 v2.1.3.13（A）：do_POST 兜底遇客户端断开 → INFO + 不写 500（BrokenPipe 同样识别）",
+          _ret13d is None and _levels13d == ["INFO"]
+          and _h13d.responses == [] and _h13d.bodies == []
+          and "POST /api/login 客户端提前断开" in _cap13.records[0][1],
+          repr((_ret13d, _levels13d, _h13d.responses)))
+
+    # (e) do_POST 读请求体时断开（旧实现会一路冒到 stderr）→ INFO、零响应
+    _cap13.records[:] = []
+    _h13e = _DisconnectFakeHandler(path="/api/login", command="POST")
+    _h13e.headers = {"Content-Length": "10"}
+    _h13e.rfile = _DisconnectFakeRFile(ConnectionResetError(10054, "reset（合成夹具）"))
+    _ret13e = _run_http_handler(_h13e, "do_POST")
+    _levels13e = [lvl for lvl, _ in _cap13.records]
+    check("维护 v2.1.3.13（A）：POST 读请求体时客户端断开 → INFO 收尾（不再冒 traceback 到 stderr）",
+          _ret13e is None and _levels13e == ["INFO"]
+          and _h13e.responses == [] and _h13e.bodies == []
+          and "读请求体时" in _cap13.records[0][1],
+          repr((_ret13e, _levels13e)))
+
+    # (f) 非断开异常的 500 写不出去（连接已断）→ 静默，不抛二次异常
+    _cap13.records[:] = []
+    _h13f = _DisconnectFakeHandler(break_write=True)
+    _wa13.api_get_status = _v13_raise_boom
+    _ret13f = _run_http_handler(_h13f, "do_GET")
+    _levels13f = [lvl for lvl, _ in _cap13.records]
+    check("维护 v2.1.3.13（A）：非断开异常时 500 写失败（连接已断）→ 静默，不再抛二次异常",
+          _ret13f is None and "ERROR" in _levels13f and "INFO" in _levels13f
+          and _h13f.responses == [500],
+          repr((_ret13f, _levels13f, _h13f.responses)))
+
+    # —— G：api_post_restart 去掉未使用形参（无参调用仍 200）——
+    _wa13._restart_service_soon = lambda: None
+    _g13_status, _g13_body = _wa13.api_post_restart()
+    check("维护 v2.1.3.13（G）：api_post_restart 去掉未使用形参 handler 后仍可用（无参调用 → 200）",
+          _g13_status == 200 and (_g13_body or {}).get("ok") is True
+          and "def api_post_restart(handler):" not in src_web
+          and "api_post_restart(self)" not in src_web,
+          repr((_g13_status, _g13_body)))
+
+    # —— I：配置「读-改-写」并发窗口（web_api 的 profiles/auto 开关）——
+    class _V13FakeLock(object):
+        def __init__(self):
+            self.depth = 0
+            self.seen = []
+
+        def __enter__(self):
+            self.depth += 1
+            return self
+
+        def __exit__(self, *exc_info):
+            self.depth -= 1
+            return False
+
+    _v13_lock = _V13FakeLock()
+    _v13_cfg = {"profiles": {}, "profiles_auto_switch": False}
+
+    def _v13_load():
+        _v13_lock.seen.append(("load", _v13_lock.depth))
+        return dict(_v13_cfg)
+
+    def _v13_save(cfg):
+        _v13_lock.seen.append(("save", _v13_lock.depth))
+        _v13_cfg.update(cfg)
+
+    _wa13.CONFIG_LOCK = _v13_lock
+    _wa13.logger = None
+    _wa13._load_config = _v13_load
+    _wa13._save_config = _v13_save
+    _wa13._validate_config = lambda cfg: []
+    _i13_status, _i13_body = _wa13.api_post_profiles_auto({"enabled": True})
+    check("维护 v2.1.3.13（I）：配置「读-改-写」窗口收口 —— 服务层 CONFIG_LOCK 覆盖读 + 写整段",
+          _i13_status == 200 and _v13_cfg.get("profiles_auto_switch") is True
+          and _v13_lock.seen == [("load", 1), ("save", 1)]
+          and _v13_lock.depth == 0,
+          repr((_i13_status, _v13_lock.seen, _v13_lock.depth)))
+finally:
+    _v13_restore()
+
+
+check("维护 v2.1.3.13（A）：成功响应路径 _send_json / _send_bytes 也把断开降级为 INFO",
+      "_is_client_disconnect(exc)" in src_web.split("def _send_json(", 1)[1].split("def _send_bytes(", 1)[0]
+      and "_is_client_disconnect(exc)" in src_web.split("def _send_bytes(", 1)[1].split("def _protocol(", 1)[0]
+      and src_web.count("_is_client_disconnect(exc)") >= 5,
+      "断开判据出现 %d 次" % src_web.count("_is_client_disconnect(exc)"))
+
+
+# —— C：P3-3 绝对路径上屏改「折叠路径 + title 全路径」——
+_v13_short_path = _js_func("shortPath")
+_v13_show_path = _js_func("showPath")
+check("维护 v2.1.3.13（C）：新增 shortPath（只留最后两级、前面用 … 折叠）",
+      bool(_v13_short_path) and "parts.length - 2" in _v13_short_path
+      and "parts.length - 1" in _v13_short_path and "…" in _v13_short_path,
+      _v13_short_path.replace("\n", " ")[:160])
+check("维护 v2.1.3.13（C）：showPath 是统一展示口 —— 折叠路径进内容、完整路径进 title",
+      bool(_v13_show_path) and "pathHtml(shortPath(p))" in _v13_show_path
+      and "el.title = String(p)" in _v13_show_path,
+      _v13_show_path.replace("\n", " ")[:160])
+check("维护 v2.1.3.13（C）：关于页 config_file / data_dir / log_file 三条绝对路径都走 showPath",
+      _page.count("showPath($('about-") == 4   # config / data / log(r.log_file) / log(权威 path)
+      and "showPath($('about-config'), r.config_file)" in _page
+      and "showPath($('about-data'), r.data_dir)" in _page
+      and "showPath($('about-log'), r.log_file)" in _page
+      and "showPath($('about-log'), p && p.path)" in _page,
+      "about 路径展示点 %d 处" % _page.count("showPath($('about-"))
+check("维护 v2.1.3.13（C）：/api/update/history 的 path 只显示折叠路径（后端字段保留不变）",
+      "shortPath(r.path)" in _page and "p.title = String(r.path)" in _page
+      and '"path": UPGRADE_LOG_FILE' in src_web,
+      "history path 断言")
+check("维护 v2.1.3.13（C）：前端不再把整条绝对路径直接交给 pathHtml",
+      "pathHtml(r." not in _page and "pathHtml(p.path)" not in _page,
+      "旧直传点已清零")
+
+
+# —— D：P3-7 日志文件列表 innerHTML 裸拼改 createElement + textContent ——
+_v13_loglist = _page.split("var box = $('log-list');", 1)[1].split(
+    "var refresh = $('btn-logs-refresh');", 1)[0]
+check("维护 v2.1.3.13（D）：日志文件列表 render 不再 innerHTML 裸拼（createElement + textContent）",
+      bool(_v13_loglist) and ".innerHTML" not in _v13_loglist
+      and "document.createElement('span')" in _v13_loglist
+      and "String(it.name)" in _v13_loglist
+      and "String(it.size_h)" in _v13_loglist
+      and "String(it.rotate_hint)" in _v13_loglist,
+      _v13_loglist.replace("\n", " ")[:200])
+
+
+# —— E：P3-13 日志轮询按 tab 启停（boot 不再无条件 start）——
+_v13_boot = _js_func("boot")
+_v13_activate = _js_func("activateTab")
+_v13_stop = _js_func("stopLogPolling")
+check("维护 v2.1.3.13（E）：boot 不再无条件启动日志轮询（状态 / 更新轮询仍在）",
+      "startLogPolling()" not in _v13_boot
+      and "startStatusPolling()" in _v13_boot and "startUpdatePolling()" in _v13_boot,
+      "boot 里 startLogPolling 出现 %d 次" % _v13_boot.count("startLogPolling()"))
+check("维护 v2.1.3.13（E）：activateTab 进入「日志」页开轮询、离开就停",
+      "startLogPolling()" in _v13_activate and "stopLogPolling()" in _v13_activate
+      and bool(_v13_stop) and "clearInterval(logTimer)" in _v13_stop
+      and "logTimer = null" in _v13_stop,
+      _v13_stop.replace("\n", " ")[:160])
+check("维护 v2.1.3.13（E）：回到前台只有「日志」页才补拉日志（不再任何页都拉）",
+      "if (currentTab === 'log') fetchLog(false);" in _page
+      and "var currentTab = 'status';" in _page,
+      "前台补拉断言")
+
+
+# —— F：P3-14 切配置页只发一次 /api/config ——
+_v13_loadcfg = _js_func("loadConfig")
+check("维护 v2.1.3.13（F）：切配置页只发一次 /api/config（升级字段合进 loadConfig，不再二次拉取）",
+      bool(_v13_loadcfg) and _v13_loadcfg.count("API.config()") == 1
+      and "auto_update_enabled" in _v13_loadcfg
+      and "update_check_interval_hours" in _v13_loadcfg
+      and "update_min_free_disk_mb" in _v13_loadcfg
+      and "var _origLoadConfig" not in _page,
+      repr((_v13_loadcfg.count("API.config()"), _page.count("API.config()"))))
+
+
+# —— H：P3-1 死代码 _read_json_body 已删除（零调用）——
+check("维护 v2.1.3.13（H）：死代码 _read_json_body 已删除（零调用，只保留 _read_json_body_safe）",
+      not re.findall(r"_read_json_body\(", src_web)
+      and "def _read_json_body_safe(payload)" in src_web,
+      "调用点 %r" % re.findall(r"_read_json_body\(", src_web))
+
+
 # ---- 隐私守卫（v2.0.4.0）：本机真机凭据不得进入任何被 git 跟踪的文件 ----
 # 这是「推上去之前」的最后一道闸：CI 上没有 password.txt / config.json，
 # 整段会自动 SKIP，不会误报；本地开发跑冒烟时才会真正扫描。
@@ -4915,7 +5302,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.12", version.VERSION == "2.1.3.12", version.VERSION)
+check("版本 = 2.1.3.13", version.VERSION == "2.1.3.13", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,

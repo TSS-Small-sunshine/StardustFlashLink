@@ -457,8 +457,13 @@ def remove(name):
     return {"ok": True, "count": len(profiles)}
 
 
+@_with_config_lock
 def auto_switch(ssid):
     """自动切换（每次检查时由 protocol 调用）。返回切到的方案名或 ``""``。
+
+    v2.1.3.13（审计 P3-11）：整段持 CONFIG_LOCK —— 以前「读配置判总开关 → 挑方案」
+    与 activate() 的写盘之间没有锁：用户刚关掉自动切换时，一次正在跑的检查仍可能
+    用旧配置切方案。activate() 内部再取同一把 RLock（可重入）不会死锁。
 
     三个条件全满足才动手：
         1. 总开关 `profiles_auto_switch` 打开（**默认关** —— 免得"我手动选的方案被系统改掉" ✗）；

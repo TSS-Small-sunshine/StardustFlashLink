@@ -2,7 +2,7 @@
 """web_api.py — HTTP 路由层（薄薄一层）。
 
 职责范围：
-    - HTTP 响应辅助（_send_json / _send_bytes / _read_json_body）
+    - HTTP 响应辅助（_send_json / _send_bytes / _read_json_body_safe）
     - 所有 api_* 函数（HTTP 路由处理）
     - _Handler 类（do_GET / do_POST 调度）
     - _HTML_PAGE（单页应用，全部内联 CSS/JS）
@@ -15,6 +15,7 @@
 依赖：仅 Python 3 标准库。
 """
 
+import errno
 import io
 import json
 import logging
@@ -228,42 +229,90 @@ def _drain_body(handler, length, cap=BODY_DRAIN_MAX_BYTES):
         remaining -= len(chunk)
 
 
+# ============================================================
+# 客户端提前断开：不是服务错误（v2.1.3.13 / 审计 P3 边角）
+# ============================================================
+# 真机证据（2026-11-21，logs/campus_login.log）：面板每 2 秒轮询 /api/metrics，
+# 用户切走页面 / 关标签 / 浏览器提前释放连接时，写响应会抛 WinError 10053
+# （WSAECONNABORTED，「你的主机中的软件中止了一个已建立的连接」）。当天出现 3 次：
+#     [ERROR] GET /api/metrics 异常: [WinError 10053] ...
+# 旧实现把它当服务错误记 ERROR，然后再写一次 500；第二次写同样失败
+# （ConnectionAbortedError）时 traceback 会直接打到 service_stderr.log ✗。
+# 这不是服务错误，也不该污染用户日志 —— 统一判定为「客户端提前断开」：
+# INFO 一行 + 静默收尾（不再写 500）。
+_DISCONNECT_WINERRORS = frozenset((10053, 10054, 10058, 10061))
+_DISCONNECT_ERRNOS = frozenset(
+    _code for _code in (
+        getattr(errno, "ECONNRESET", None),
+        getattr(errno, "EPIPE", None),
+        getattr(errno, "ESHUTDOWN", None),
+        getattr(errno, "ECONNABORTED", None),
+        10053, 10054, 10058, 10061,   # 非 Windows 上手工构造 OSError(10053) 也认
+    ) if isinstance(_code, int)
+)
+
+
+def _is_client_disconnect(exc):
+    """True = 客户端提前断开（不是服务错误）：调用方应静默收尾、不要再写 500。
+
+    判据：
+      1) 标准库的断连异常类型：ConnectionAbortedError / ConnectionResetError / BrokenPipeError；
+      2) 其它 OSError：winerror 是 10053 / 10054 / 10058 / 10061
+         （WSAECONNABORTED / WSAECONNRESET / WSAESHUTDOWN / WSAECONNREFUSED），
+         或 errno 是 ECONNRESET / EPIPE / ESHUTDOWN / ECONNABORTED。
+    **不**把 TimeoutError 当断开（本机读写超时更可能是服务侧问题，仍按 ERROR 处理）。
+    """
+    if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+        return True
+    if not isinstance(exc, OSError):
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if isinstance(winerror, int) and winerror in _DISCONNECT_WINERRORS:
+        return True
+    code = getattr(exc, "errno", None)
+    return isinstance(code, int) and code in _DISCONNECT_ERRNOS
+
+
 def _send_json(handler, status, payload, close=False):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    handler.send_response(status)
-    handler.send_header("Content-Type", "application/json; charset=utf-8")
-    handler.send_header("Content-Length", str(len(body)))
-    handler.send_header("Cache-Control", "no-store")
-    if close:
-        handler.send_header("Connection", "close")   # 顺带把 close_connection 置上 ✓
-    _add_security_headers(handler)
-    handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        if close:
+            handler.send_header("Connection", "close")   # 顺带把 close_connection 置上 ✓
+        _add_security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(body)
+    except OSError as exc:
+        # v2.1.3.13：成功响应的半路上客户端走了（切页面 / 关标签 / 连接重置）——
+        # 不是服务错误：INFO 一行、静默收尾，别让上层再记 ERROR / 再写 500。
+        if _is_client_disconnect(exc):
+            _log("响应 %s 时客户端提前断开（不是服务错误，已静默收尾）", status,
+                 level=logging.INFO)
+            return
+        raise
 
 
 def _send_bytes(handler, status, content_type, body, filename=None):
-    handler.send_response(status)
-    handler.send_header("Content-Type", content_type)
-    handler.send_header("Content-Length", str(len(body)))
-    if filename:
-        handler.send_header("Content-Disposition", 'attachment; filename="{}"'.format(filename))
-    handler.send_header("Cache-Control", "no-store")
-    _add_security_headers(handler)
-    handler.end_headers()
-    handler.wfile.write(body)
-
-
-def _read_json_body(handler):
-    length = int(handler.headers.get("Content-Length", "0") or "0")
-    if length <= 0:
-        return {}
-    if length > MAX_JSON_BODY_BYTES:
-        raise ValueError("请求体过大（上限 {} 字节）".format(MAX_JSON_BODY_BYTES))
-    raw = handler.rfile.read(length)
     try:
-        return json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise ValueError("请求体不是合法 JSON")
+        handler.send_response(status)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body)))
+        if filename:
+            handler.send_header("Content-Disposition", 'attachment; filename="{}"'.format(filename))
+        handler.send_header("Cache-Control", "no-store")
+        _add_security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(body)
+    except OSError as exc:
+        # 同 _send_json：下载 / 导出这类成功响应写一半被断开，也只记 INFO。
+        if _is_client_disconnect(exc):
+            _log("响应 %s（%s）时客户端提前断开（不是服务错误，已静默收尾）",
+                 status, content_type, level=logging.INFO)
+            return
+        raise
 
 
 def _protocol():
@@ -403,17 +452,23 @@ def api_post_profiles_delete(payload):
 
 
 def api_post_profiles_auto(payload):
-    """POST /api/profiles/auto — {enabled}：按 Wi-Fi 名自动切换方案的总开关。"""
+    """POST /api/profiles/auto — {enabled}：按 Wi-Fi 名自动切换方案的总开关。
+
+    v2.1.3.13（审计 P3-11）：「读配置 → 改开关 → 写盘」整段持服务层注入的
+    CONFIG_LOCK（RLock，与 profiles / 配置页保存 / 凭据保存共用同一把）——
+    以前这里是唯一一个没套锁的读-改-写：与配置页保存并发时可能把对方的改动覆盖掉。
+    """
     payload = payload if isinstance(payload, dict) else {}
     if not isinstance(payload.get("enabled"), bool):
         return 400, {"ok": False, "error": "enabled 必须是布尔值"}
     try:
-        cfg = dict(_load_config() or {})
-        cfg["profiles_auto_switch"] = payload["enabled"]
-        errors = _validate_config(cfg)
-        if errors:
-            return 400, {"ok": False, "error": "；".join(errors)}
-        _save_config(cfg)
+        with CONFIG_LOCK:
+            cfg = dict(_load_config() or {})
+            cfg["profiles_auto_switch"] = payload["enabled"]
+            errors = _validate_config(cfg)
+            if errors:
+                return 400, {"ok": False, "error": "；".join(errors)}
+            _save_config(cfg)
     except Exception as exc:  # noqa: BLE001
         logger.exception("切换自动方案开关失败: %s", exc)
         return 500, {"ok": False, "error": "保存失败：{}".format(exc)}
@@ -1031,7 +1086,7 @@ class _ServiceCtlProbe:
 
 
 def _restart_script_dir_candidates():
-    """执行器候选目录：**必须不含空格**（含空格的任务计划程序 /tr 会「成功但不执行」✗）。
+    r"""执行器候选目录：**必须不含空格**（含空格的任务计划程序 /tr 会「成功但不执行」✗）。
 
     真机 A/B（2026-11-20）：同一份 .cmd 放 `C:\Windows\Temp` → 1 秒内跑完；
     放 `D:\Program Files\DrcomAutoLogin\logs` → `schtasks /create` 与 `/run` 都返回成功，
@@ -1215,8 +1270,12 @@ def _restart_service_soon(probe=None, watchdog=None):
     return None
 
 
-def api_post_restart(handler):
-    """重启服务（P0-7 / v2.1.3.9 重写：调度一次性任务，由它 sc stop → sc start）。"""
+def api_post_restart():
+    """重启服务（P0-7 / v2.1.3.9 重写：调度一次性任务，由它 sc stop → sc start）。
+
+    v2.1.3.13（审计 P3-10）：形参 handler 从来没用过 —— 重启逻辑不需要 handler，
+    对外契约只有「返回 (status, body)」，这里去掉未使用形参，调用点同步。
+    """
     error = _restart_service_soon()
     if error:
         return 409, {"ok": False, "error": error}
@@ -1967,6 +2026,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             _send_json(self, 404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
+            # v2.1.3.13：客户端提前断开不是服务错误 —— 真机 /api/metrics 每 2 秒轮询，
+            # 切走页面时 3 次 [WinError 10053] 被当成 [ERROR] 打进 campus_login.log。
+            # 判定为断开 → INFO + 直接收尾，**不再尝试写 500**（第二次写必然再炸）。
+            if _is_client_disconnect(exc):
+                _log("GET %s 客户端提前断开（不是服务错误）", path, level=logging.INFO)
+                return
             # 审计 P2-1：这里以前裸用 logger —— 模块级没有 logger，只在 _attach() 里注入；
             # 在"只挂 web_api、没跑 _attach"的场景（冒烟 / 预览）会先 NameError 再把真正的
             # 异常盖住，客户端只看到连接被重置。do_POST 早已改用 _log，这里补齐。
@@ -1974,6 +2039,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 _send_json(self, 500, {"error": "internal: {}".format(exc)})
             except (ConnectionError, OSError):
+                # 500 也写不出去（连接已经断了）→ 静默：这里再抛只会把 traceback 打进 stderr
                 pass
 
     def do_POST(self):
@@ -1985,8 +2051,14 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 api_post_config_import(self)
             except Exception as exc:  # noqa: BLE001
+                if _is_client_disconnect(exc):
+                    _log("POST %s 客户端提前断开（不是服务错误）", path, level=logging.INFO)
+                    return
                 logger.exception("POST %s 异常: %s", path, exc)
-                _send_json(self, 500, {"ok": False, "error": "internal: {}".format(exc)})
+                try:
+                    _send_json(self, 500, {"ok": False, "error": "internal: {}".format(exc)})
+                except (ConnectionError, OSError):
+                    pass
             return
         try:
             length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1998,7 +2070,16 @@ class _Handler(BaseHTTPRequestHandler):
                                    "error": "请求体过大（上限 {} 字节）".format(MAX_JSON_BODY_BYTES)},
                        close=True)
             return
-        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            raw = self.rfile.read(length) if length > 0 else b""
+        except OSError as exc:
+            # 客户端发了 Content-Length 却在请求体发完之前走人（连接被重置）：
+            # 这里以前会一路冒出 do_POST（BaseHTTPRequestHandler 打 traceback 到 stderr）。
+            if _is_client_disconnect(exc):
+                _log("POST %s 客户端提前断开（读请求体时，不是服务错误）", path,
+                     level=logging.INFO)
+                return
+            raise
         try:
             payload = json.loads(raw.decode("utf-8")) if raw else {}
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -2024,7 +2105,7 @@ class _Handler(BaseHTTPRequestHandler):
                 _send_json(self, status, body)
                 return
             if path == "/api/restart":
-                status, body = api_post_restart(self)
+                status, body = api_post_restart()
                 _send_json(self, status, body)
                 return
             # —— 自动升级（v1.3 新增）——
@@ -2063,11 +2144,19 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             _send_json(self, 404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
+            # v2.1.3.13：客户端提前断开（写响应 / 读请求体途中）→ INFO 收尾，不写 500。
+            if _is_client_disconnect(exc):
+                _log("POST %s 客户端提前断开（不是服务错误）", path, level=logging.INFO)
+                return
             # 走模块自带的 _log（logger 没注入时静默）—— 直接写 `logger.exception` 的话，
             # 在「只挂了 web_api、没跑 _attach」的场景（冒烟测试）里会 NameError，
             # 把真正的异常盖住 ✗，客户端只看到「连接被重置」。
             _log("POST %s 异常: %s", path, exc, level=logging.ERROR)
-            _send_json(self, 500, {"ok": False, "error": "internal: {}".format(exc)})
+            try:
+                _send_json(self, 500, {"ok": False, "error": "internal: {}".format(exc)})
+            except (ConnectionError, OSError):
+                # 500 也写不出去（连接已经断了）→ 静默
+                pass
 
 
 # ============================================================
@@ -3888,6 +3977,27 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     return '<code class="path">' + html + '</code>';
   }
 
+  /* v2.1.3.13（审计 P3-3）：绝对路径不整条上屏 —— 只显示「…\最后两级」。
+     窄卡片里 D:\Program Files\DrcomAutoLogin\logs\campus_login.log 会被折成三四行、
+     甚至从文件名中间断开；完整路径放进 title（鼠标悬停 / 读屏可核对）。
+     所有展示路径的地方都走这一个 helper，别各写一套。 */
+  function shortPath(p) {
+    var s = (p === null || p === undefined) ? '' : String(p).trim();
+    if (!s) return '';
+    var sep = s.indexOf('\\') >= 0 ? '\\' : '/';
+    var parts = s.split(/[\\/]+/).filter(function (x) { return x; });
+    if (!parts.length) return '';
+    if (parts.length <= 2) return s;
+    return '…' + sep + parts[parts.length - 2] + sep + parts[parts.length - 1];
+  }
+
+  /* 统一的路径展示口：折叠路径进内容，完整路径进 title（后端字段名不变，I5）。 */
+  function showPath(el, p) {
+    if (!el || !p) return;
+    el.innerHTML = pathHtml(shortPath(p));
+    el.title = String(p);
+  }
+
   /* 窄格子里的日期值：把「日期」「时间」两段各自包成 .nb（nowrap，见 CSS），
      要折就折成两行，不再从 `-` 中间断开成三行。 */
   function isoValueHtml(iso) {
@@ -4320,6 +4430,14 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       $('cfg-guard-subnets').value = c.guard_allowed_subnets || '';
       loadWifi();                                   /* v2.1.1.0：顺便把当前 SSID 与候选名字读出来 */
       setPwdBadge(c.password_status);
+      /* v2.1.3.13（审计 P3-14）：升级设置以前在 loadConfig 之外再发一次 /api/config
+         （切一次配置页 = 两次请求）。现在合进同一次响应，只发一次。 */
+      var au = $('cfg-auto-update-enabled');
+      if (au) au.checked = !!c.auto_update_enabled;
+      var iv = $('cfg-update-interval');
+      if (iv) iv.value = String(c.update_check_interval_hours || 6);
+      var diskEl = $('cfg-update-disk');
+      if (diskEl) diskEl.value = String(c.update_min_free_disk_mb || 200);
       clearErrors();
       text($('config-state'), '已从服务端读取，修改后点击保存');
     }).catch(function () {
@@ -4596,6 +4714,14 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     logTimer = setInterval(function () { fetchLog(false); }, POLL_LOG_MS);
   }
 
+  /* v2.1.3.13（审计 P3-13）：离开「日志」页就停轮询 —— 以前 boot 无条件 start：
+     用户在「状态 / 配置 / 关于」页时面板不可见，仍然每 2 秒拉一次日志。 */
+  function stopLogPolling() {
+    if (!logTimer) return;
+    clearInterval(logTimer);
+    logTimer = null;
+  }
+
   var uptimeBase = null; /* { sec: 服务端返回的秒数, at: 本地读取时刻 } */
 
   function loadAbout() {
@@ -4608,15 +4734,16 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       uptimeBase = { sec: Number(r.service_uptime_sec) || 0, at: Date.now() };
       text($('about-uptime'), fmtDuration(uptimeBase.sec));
       if (r.install && r.install.mode) renderInstallMode(r.install);
-      if (r.config_file) $('about-config').innerHTML = pathHtml(r.config_file);
-      if (r.data_dir) $('about-data').innerHTML = pathHtml(r.data_dir);
-      if (r.log_file) $('about-log').innerHTML = pathHtml(r.log_file);
+      /* v2.1.3.13（P3-3）：三条绝对路径只上屏折叠路径（完整路径进 title） */
+      showPath($('about-config'), r.config_file);
+      showPath($('about-data'), r.data_dir);
+      showPath($('about-log'), r.log_file);
     }).catch(function () {
       text($('about-version'), '读取失败');
     }).then(function () {
       /* /api/log_file_path 提供日志文件的绝对路径，作为权威来源优先展示 */
       return API.logPath().then(function (p) {
-        if (p && p.path) $('about-log').innerHTML = pathHtml(p.path);
+        showPath($('about-log'), p && p.path);
       }).catch(function () { /* 关于信息已由 /api/about 兜底 */ });
     });
   }
@@ -4733,6 +4860,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   }
 
   /* —— 标签页（分段控件，支持键盘左右方向键） —— */
+  var currentTab = 'status';   /* v2.1.3.13（P3-13）：当前面板名，决定日志轮询启停 */
+
   function activateTab(name, focus) {
     var tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
     tabs.forEach(function (t) {
@@ -4745,9 +4874,12 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
       var p = $('panel-' + n);
       if (p) p.classList.toggle('active', n === name);
     });
+    /* v2.1.3.13（P3-13）：日志轮询跟着「日志」页走 —— 进入就开（顺手首拉），
+       离开就停；其它页（状态 / 配置 / 关于）不再白白每 2 秒拉一次日志。 */
+    if (name === 'log') startLogPolling();
+    else stopLogPolling();
     if (name === 'config') loadConfig();
     else if (name === 'about') { loadAbout(); renderAboutUpdate(); }
-    else if (name === 'log') reloadLog();
   }
 
   function bindTabs() {
@@ -4801,7 +4933,8 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     bindUpdate();
 
     startStatusPolling();
-    startLogPolling();
+    /* v2.1.3.13（P3-13）：日志轮询不在 boot 启动 —— 只在「日志」页可见时轮询
+       （参见 activateTab 的 startLogPolling / stopLogPolling）。 */
     startUpdatePolling();
     loadAbout();
     renderAboutUpdate();   /* 启动就把「更新」块的结论填上，切到「关于」不该先看到一排「-」 */
@@ -4819,7 +4952,10 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     }, 1000);
 
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) { pollStatus(); fetchLog(false); pollUpdate(); }
+      if (document.hidden) return;
+      pollStatus();
+      if (currentTab === 'log') fetchLog(false);   /* 只有日志页才补拉日志（P3-13） */
+      pollUpdate();
     });
   }
 
@@ -4983,8 +5119,13 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
         return;
       }
       if (r.path) {
+        /* v2.1.3.13（P3-10 / P3-3）：/api/update/history 的 path 字段保留不变，
+           前端只显示折叠路径（完整路径进 title）。 */
         var p = $('update-history-path');
-        if (p) p.textContent = '日志路径：' + r.path;
+        if (p) {
+          p.textContent = '日志路径：' + shortPath(r.path);
+          p.title = String(r.path);
+        }
       }
       var lines = r.lines || [];
       if (log) {
@@ -5080,24 +5221,9 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
     }
   }
 
-  /* —— 把升级字段纳入 loadConfig / collectConfig —— */
-  /* 复用原 loadConfig（已读 /api/config + 填好所有原表单），在它的 .then 末尾再补两项新字段。
-     不再发额外的 /api/config 请求。 */
-  var _origLoadConfig = loadConfig;
-  loadConfig = function () {
-    return _origLoadConfig().then(function () {
-      return API.config().then(function (c) {
-        if (!c || typeof c !== 'object') return;
-        var au = $('cfg-auto-update-enabled');
-        if (au) au.checked = !!c.auto_update_enabled;
-        var iv = $('cfg-update-interval');
-        if (iv) iv.value = String(c.update_check_interval_hours || 6);
-        var diskEl = $('cfg-update-disk');
-        if (diskEl) diskEl.value = String(c.update_min_free_disk_mb || 200);
-      }).catch(function () { /* 配置页：忽略二次拉取失败 */ });
-    });
-  };
-
+  /* —— 把升级字段纳入 collectConfig —— */
+  /* v2.1.3.13（P3-14）：升级字段的「读」已合进 loadConfig 的唯一一次 /api/config，
+     这里只剩「写」：保存时把三项拼进表单 payload。 */
   var _origCollectConfig = collectConfig;
   collectConfig = function () {
     var cfg = _origCollectConfig();
@@ -5245,13 +5371,24 @@ details.diag > summary:active .diag-caret { transform: scale(0.9); }
   (function () {
     var box = $('log-list');
     if (!box) return;
+    /* v2.1.3.13（审计 P3-7）：旧实现把 it.name / it.size_h / it.rotate_hint 直接拼进
+       innerHTML —— 文件名理论上来自磁盘，但这条路径没有转义，属于「裸拼 HTML」。
+       改成 createElement + textContent（不拼字符串、不解释 HTML），显示结果一字不差。 */
     function render(data) {
       var items = (data && data.ok && data.items) || [];
+      box.textContent = '';
       if (!items.length) { box.textContent = '暂无日志文件。'; return; }
-      box.innerHTML = '共 ' + ((data && data.total_h) || '?') + ' —— ' + items.map(function (it) {
-        return '<span style="margin-right:14px;white-space:nowrap;">' + it.name + '：' + it.size_h
-          + (it.rotate_hint ? '（上限 ' + it.rotate_hint + '）' : '') + '</span>';
-      }).join('');
+      var head = document.createElement('span');
+      head.textContent = '共 ' + ((data && data.total_h) || '?') + ' —— ';
+      box.appendChild(head);
+      items.forEach(function (it) {
+        var span = document.createElement('span');
+        span.style.marginRight = '14px';
+        span.style.whiteSpace = 'nowrap';
+        span.textContent = String(it.name) + '：' + String(it.size_h)
+          + (it.rotate_hint ? '（上限 ' + String(it.rotate_hint) + '）' : '');
+        box.appendChild(span);
+      });
     }
     function load() {
       box.textContent = '正在读取日志占用...';
