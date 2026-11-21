@@ -176,7 +176,8 @@ jobs:
 
           # ⑤ 用**自带 ZIP** 打包 ✓（CI 不需要外部 zip/tar ✓），再算 SHA256SUMS ✓
           mkdir -p dist
-          "$HOST_BIN" archive --out "dist/${NAME}.zip" "$STAGE"
+          # --prefix 固定包内顶层目录名：不再随输入目录名（pkg/staging）变化 ✓（审计 P3-16）
+          "$HOST_BIN" archive --out "dist/${NAME}.zip" --prefix "$NAME" "$STAGE"
           SUM=$("$HOST_BIN" checksum "dist/${NAME}.zip" | awk '{print $1}')
           printf '%s  %s\n' "$SUM" "${NAME}.zip" > dist/SHA256SUMS
 
@@ -220,6 +221,54 @@ jobs:
           echo "--- dist ---"
           ls -l dist
           cat dist/SHA256SUMS
+
+      # 审计 P2-7 / AGENTS.md §9.3「外部互验」：自己实现的东西必须拿第三方结果对一遍 ✓
+      # 我们自己的 checksum（自研 SHA-256）与 archive（自研 ZIP）不能在自家实现里自证 ✗
+      - name: 外部互验（Linux：sha256sum -c / unzip -t / dpkg-deb -I）
+        if: matrix.os == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # ① 校验和：coreutils 的 sha256sum 反查我们写的 SHA256SUMS ✓
+          sha256sum -c SHA256SUMS
+          # ② ZIP：Info-ZIP 的 unzip 做完整性测试（自研 zipwriter 的第三方对端 ✓）
+          for zip in *.zip; do
+            test -f "$zip" || { echo "::error::没有 zip 产物"; exit 1; }
+            unzip -t "$zip"
+          done
+          # ③ deb：dpkg-deb 读元数据（package.rs 生成 deb-control 的第三方对端 ✓）
+          for deb in *.deb; do
+            test -f "$deb" || { echo "::error::没有 deb 产物"; exit 1; }
+            dpkg-deb -I "$deb"
+          done
+
+      - name: 外部互验（Windows：Get-FileHash + Expand-Archive）
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location dist
+          # ① 校验和：PowerShell 的 Get-FileHash（SHA256）必须与 SHA256SUMS 逐行一致 ✓
+          foreach ($line in Get-Content SHA256SUMS) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "SHA256SUMS 行格式不对: $line" }
+            $want = $Matches[1]
+            $file = $Matches[2].Trim()
+            $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant()
+            if ($got -ne $want) { throw "$file 的 SHA256 与 SHA256SUMS 不一致" }
+            Write-Output "SHA256 OK  $file"
+          }
+          # ② ZIP：Expand-Archive（= .NET ZipFile）能完整解出来（自研 zipwriter 的第三方对端 ✓）
+          $zips = @(Get-ChildItem -Filter *.zip)
+          if ($zips.Count -lt 1) { throw "没有 zip 产物" }
+          foreach ($zip in $zips) {
+            $out = Join-Path $env:RUNNER_TEMP ("extract-" + $zip.BaseName)
+            if (Test-Path $out) { Remove-Item -Recurse -Force $out }
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath $out
+            $count = @(Get-ChildItem -Recurse -File $out).Count
+            if ($count -lt 1) { throw "$($zip.Name) 解压后没有文件" }
+            Write-Output "ZIP OK  $($zip.Name)（$count 个文件）"
+          }
 
       - name: 上传产物（预览版：只挂 workflow artifact，不发 Release ✓）
         uses: actions/upload-artifact@v4
