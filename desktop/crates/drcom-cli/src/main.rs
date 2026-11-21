@@ -19,7 +19,7 @@ use drcom_core::{
     logfile::RotatingLog,
     platform, portal, protocol,
     scheduler::Scheduler,
-    secret, service, session, timefmt, update, update_apply, Outcome, Status,
+    secret, service, session, timefmt, update, update_apply, Status,
 };
 use std::time::{Duration, SystemTime};
 
@@ -94,7 +94,7 @@ fn help_text() -> String {
          selfcheck                   内置自检\n  \
          login [--dry-run] [--host H] [--account A] [--suffix S]\n  \
          run [--once]                守护循环：按配置间隔检查、失败走退避；--once 退出码：成功/跳过 0、失败 1\n  \
-         profile list|save|activate|delete|auto   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）\n  \
+         profile list|save|activate|delete|auto|ssids   配置方案（校内公共场合=无尾缀、宿舍=@yd 等）；ssids = 当前 / 可见 Wi-Fi（只读）\n  \
          diagnostics [--out F] [--days N]        生成脱敏诊断包（ZIP，密码永不进包 ✓）\n  \
          portal [--url U] [--timeout N]         门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页）\n  \
          autostart on|off|status [--dry-run]    开机自启（当前用户级，免管理员 ✓；跑的是无界面循环）\n  \
@@ -105,7 +105,7 @@ fn help_text() -> String {
          update apply <安装包.zip> [--dry-run] [--no-restart]   用本地安装包自我替换（同目录 GUI+CLI 一起换，默认重启，不联网）\n  \
          update rollback [--version V] [--dry-run]   回滚到备份版本（备份在 安装目录/backup/<版本>/）\n  \
          update backups              列出所有备份版本（含每个版本备份了哪些程序）\n  \
-         package-files --out DIR [--target T] [--exe E] [--arch A]   写出该平台随包分发的说明文件\n  \
+         package-files --out DIR [--target T] [--exe E] [--arch A] [--install-bytes N]   写出该平台随包分发的说明文件（N = 包内二进制总字节，算 deb 的 Installed-Size）\n  \
          archive --out F.zip [--prefix 目录名] DIR...  打包目录成 ZIP（用自带实现 ✓；--prefix 固定包内顶层目录名）\n  \
          serve [--port N]            起本地控制 API（默认取配置 ui_port = {}，只绑 127.0.0.1）\n\n\
          配置目录: {}\n",
@@ -385,7 +385,7 @@ fn login(args: &[String]) -> i32 {
     println!("{}", summary);
     if let Err(e) = log_line(&drcom_core::metrics::log_line(
         SystemTime::now(),
-        kind_of(&report.outcome),
+        drcom_core::runtime::kind_of(&report.outcome),
         &summary,
     )) {
         eprintln!("（日志写不进去：{}）", e);
@@ -593,13 +593,28 @@ fn write_package_file(
     Ok(())
 }
 
-/// `package-files --out DIR`：写出该平台随包分发的说明文件 ✓。
+/// `package-files --out DIR [--install-bytes N]`：写出该平台随包分发的说明文件 ✓。
 ///
 /// CI 打包时会先调它 ✓ —— 于是 `.desktop` / `Info.plist` / `deb-control` 的内容
 /// 也就**受单测保护**了 ✓（比把这些字符串散在 YAML 里可控 ✓）。
 /// 第一行输出的是产物基名（`stardust-flash-link-<版本>-<目标>` ✓），脚本可以直接拿去用 ✓。
+///
+/// `--install-bytes N`（审计 P3-15）：**包内二进制总字节**（多程序包 = CLI + GUI 之和），
+/// deb 的 `Installed-Size` 用它 + 生成的 `.desktop` 字节算 ✓ —— 不传就退回「本程序自己的字节数」，
+/// 但**交叉编译 / 多程序包必须显式给**（宿主辅助程序量不出目标平台的 exe ✓）。
 fn package_files_cmd(args: &[String]) -> i32 {
     let out_dir = std::path::PathBuf::from(take_opt(args, "--out").unwrap_or_else(|| ".".to_string()));
+    // 先校验 --install-bytes（写文件之前就报用法错误 ✓）
+    let install_bytes_override = match take_opt(args, "--install-bytes") {
+        None => None,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(bytes) => Some(bytes),
+            Err(_) => {
+                eprintln!("--install-bytes 要一个字节数（数字），收到：{}", raw);
+                return 2;
+            }
+        },
+    };
     if let Err(e) = std::fs::create_dir_all(&out_dir) {
         eprintln!("创建 {} 失败: {}", out_dir.display(), e);
         return 1;
@@ -609,13 +624,14 @@ fn package_files_cmd(args: &[String]) -> i32 {
         .as_ref()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_else(|| "stardust-flash-link".to_string());
-    let size = current
+    let own_bytes = current
         .as_ref()
         .and_then(|p| std::fs::metadata(p).ok())
         .map(|meta| meta.len())
         .unwrap_or(0);
+    let binaries_bytes = install_bytes_override.unwrap_or(own_bytes);
     // 交叉编译时，宿主编出来的辅助程序会自报宿主目标 ✗ → 允许显式覆盖 ✓
-    let info = drcom_core::package::PackageInfo::current(&exe_name, size)
+    let info = drcom_core::package::PackageInfo::current(&exe_name, binaries_bytes)
         .with_overrides(
             take_opt(args, "--target").as_deref(),
             take_opt(args, "--exe").as_deref(),
@@ -1399,7 +1415,8 @@ fn diagnostics_cmd(args: &[String]) -> i32 {
         .clamp(1, 90);
     let now = SystemTime::now();
 
-    let business = RotatingLog::business(platform::log_dir().join("campus_login.log"));
+    // 业务日志落点只有一处（core::runtime）—— 诊断包 / 统计 / CLI / GUI 全读同一份 ✓
+    let business = drcom_core::runtime::business_log(&platform::log_dir());
     let lines = business.read_all_lines().unwrap_or_default();
     let upgrade = RotatingLog::upgrade(platform::log_dir().join("upgrade.log"));
     let upgrade_lines = upgrade.read_all_lines().unwrap_or_default();
@@ -1459,9 +1476,13 @@ fn diagnostics_cmd(args: &[String]) -> i32 {
 }
 
 /// 往业务日志里追加一行（轮转策略与 2.x 一致：5 MB × 3 ✓）。
+///
+/// 落点统一走 [`drcom_core::runtime::business_log`]（审计 P2-5）—— CLI / GUI / 诊断包
+/// 不会各写一个文件名 ✓。
 fn log_line(line: &str) -> Result<(), String> {
-    let log = RotatingLog::business(platform::log_dir().join("campus_login.log"));
-    log.append_line(line).map_err(|e| e.to_string())
+    drcom_core::runtime::business_log(&platform::log_dir())
+        .append_line(line)
+        .map_err(|e| e.to_string())
 }
 
 /// `run [--once]`：守护循环（按配置的间隔检查；失败走退避 ✓）。
@@ -1533,20 +1554,27 @@ fn run_loop(args: &[String]) -> i32 {
 
         let now = SystemTime::now();
         if first || scheduler.is_due(now) {
-            let (kind, summary) = one_check(&cfg);
+            // 一次检查走**共享入口**（审计 P2-5）：CLI 与 GUI 的后台检查同一条链路、
+            // 同一套等级与文案 —— 不再各写一份 guard → account → password → check_once ✗
+            let result =
+                drcom_core::runtime::check_once(&cfg, Duration::from_secs(DEFAULT_TIMEOUT_SEC));
             let finished = SystemTime::now();
-            scheduler.record(kind != drcom_core::metrics::Kind::Fail, &summary, finished);
-            let _ = log_line(&drcom_core::metrics::log_line(finished, kind, &summary));
+            scheduler.record(
+                result.kind != drcom_core::metrics::Kind::Fail,
+                &result.summary,
+                finished,
+            );
+            let _ = log_line(&drcom_core::metrics::log_line(finished, result.kind, &result.summary));
             println!(
                 "{} · 连续失败 {} 次 · 下次 {} 后",
-                summary,
+                result.summary,
                 scheduler.backoff.consecutive_failures,
                 timefmt::human_duration(scheduler.remaining(finished))
             );
             first = false;
             if once {
                 // 审计 P3-1：成功 / 跳过 = 0，失败 = 1（退出码语义表见 desktop/README.md ✓）
-                return once_exit_code(kind);
+                return once_exit_code(result.kind);
             }
         }
         // 5 秒醒一次看配置/到点没（很轻；不做网络请求 ✓）
@@ -1566,48 +1594,7 @@ fn once_exit_code(kind: drcom_core::metrics::Kind) -> i32 {
     }
 }
 
-/// 跑**一次**检查：守卫 → 账号/密码校验 → `session::check_once`，返回（等级, 文案）。
-///
-/// 等级口径（与统计一致 ✓）：**不在校园网 / 账号未设置 = `Skip`**（不算失败 ✓，
-/// 否则用户一回家就进退避 ✗）；网关不可达 / 密码错 = `Fail` ✓。
-fn one_check(cfg: &Config) -> (drcom_core::metrics::Kind, String) {
-    use drcom_core::metrics::Kind;
-    let timeout = Duration::from_secs(DEFAULT_TIMEOUT_SEC);
-    let probe = drcom_core::probe::snapshot();
-    let verdict = drcom_core::guard_allows(cfg, probe.ssid.as_deref(), &probe.ips);
-    if !verdict.allowed {
-        return (
-            Kind::Skip,
-            format!(
-                "{}（Wi-Fi: {}）",
-                verdict.reason,
-                probe.ssid.unwrap_or_else(|| "读不到".to_string())
-            ),
-        );
-    }
-    if !cfg.account_configured() {
-        return (Kind::Skip, "账号未设置，已跳过检查".to_string());
-    }
-    // 唯一实现：drcom_core::password（CLI 不再自己复制一份读法 ✗）
-    let password = drcom_core::password::read();
-    if password.is_empty() {
-        return (Kind::Fail, "密码是空的（去密码文件里写一行）".to_string());
-    }
-    let report = session::check_once(cfg, &password, &PlainHttp, timeout);
-    (kind_of(&report.outcome), report.outcome.summary_cn())
-}
-
-/// `Outcome` → 统计等级（口径只有这一处 ✓，免得两处不一致 ✗）。
-fn kind_of(outcome: &Outcome) -> drcom_core::metrics::Kind {
-    use drcom_core::metrics::Kind;
-    match outcome {
-        Outcome::SkippedNoAccount => Kind::Skip,
-        Outcome::AlreadyOnline | Outcome::LoggedIn { .. } => Kind::Ok,
-        _ => Kind::Fail,
-    }
-}
-
-/// `profile`：方案管理（list / save / activate / delete / auto）。
+/// `profile`：方案管理（list / save / activate / delete / auto / **ssids**）。
 ///
 /// 这就是「校内公共场合不带 @yd、宿舍带 @yd」的落地入口 —— **不用手改 config.json** ✓：
 /// ```text
@@ -1618,7 +1605,7 @@ fn kind_of(outcome: &Outcome) -> drcom_core::metrics::Kind {
 /// stardust-flash-link profile auto on
 /// ```
 fn profile_cmd(args: &[String]) -> i32 {
-    const ACTIONS: [&str; 5] = ["list", "save", "activate", "delete", "auto"];
+    const ACTIONS: [&str; 6] = ["list", "save", "activate", "delete", "auto", "ssids"];
     let action = args.first().map(String::as_str).unwrap_or("list");
     // 先校验子命令：这样「写错命令」不必先有配置文件就能给出正确提示 ✓
     if !ACTIONS.contains(&action) {
@@ -1629,6 +1616,12 @@ fn profile_cmd(args: &[String]) -> i32 {
     if matches!(action, "save" | "activate" | "delete") && args.get(1).is_none() {
         eprintln!("用法：profile {} <名字>", action);
         return 2;
+    }
+    // 审计 P3-7：`ssids` 是**纯只读探测**，不读配置也不写盘 —— 没有配置文件时也该能用 ✓
+    // （probe 的 known_ssids / visible_ssids 原来是死代码，注释还声称「设置界面能点选」✗；
+    //  现在给它们一个真出口：打印当前 / 保存过 / 可见的 Wi-Fi 名，用户复制到设置里 ✓）
+    if action == "ssids" {
+        return profile_ssids();
     }
 
     let cfg_path = platform::config_path();
@@ -1759,6 +1752,50 @@ fn profile_cmd(args: &[String]) -> i32 {
         }
     }
 }
+/// `profile ssids`：打印**当前 Wi-Fi** + 本机保存过 / 附近可见的 Wi-Fi 名（**纯只读** ✓）。
+///
+/// 审计 P3-7：`probe::known_ssids` / `visible_ssids` 原来是死代码（全仓库无调用），
+/// 注释却声称「设置界面里点一下就能填」✗。这里给它们一个真出口：不读配置、不写盘、
+/// 只调用只读探测 —— 用户把名字复制进「设置…」的白名单 / 方案匹配名即可 ✓。
+fn profile_ssids() -> i32 {
+    let current = drcom_core::probe::current_ssid();
+    let known = drcom_core::probe::known_ssids();
+    let visible = drcom_core::probe::visible_ssids();
+    print!("{}", ssids_report(current.as_deref(), &known, &visible));
+    0
+}
+
+/// **纯函数**：`profile ssids` 的输出文本（三个清单 → 文本，单测断言逐字结构 ✓）。
+fn ssids_report(current: Option<&str>, known: &[String], visible: &[String]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "当前 Wi-Fi: {}\n",
+        current.unwrap_or("读不到（没连 Wi-Fi / 系统工具不可用）")
+    ));
+    push_ssid_list(&mut out, "本机保存过的 Wi-Fi", known);
+    push_ssid_list(&mut out, "附近可见的 Wi-Fi", visible);
+    out.push_str(
+        "\n把名字填进「设置…」的位置守卫白名单 / 方案匹配名，或用 profile save <名字> --ssid <Wi-Fi名>\n\
+         （只读命令：不改配置、不动系统 ✓）\n",
+    );
+    out
+}
+
+/// 一个清单 → 文本 ✓（空清单**如实说读不到**，不编造名字 ✗）。
+fn push_ssid_list(out: &mut String, title: &str, names: &[String]) {
+    if names.is_empty() {
+        out.push_str(&format!(
+            "{}: 读不到（没连 Wi-Fi / 本平台没有读取入口）\n",
+            title
+        ));
+        return;
+    }
+    out.push_str(&format!("{}（{} 个）:\n", title, names.len()));
+    for name in names {
+        out.push_str(&format!("  - {}\n", name));
+    }
+}
+
 /// 取 `--key value` 形式的值（零依赖参数解析 ✓）。
 ///
 /// 审计 P3-3：下一个参数如果是另一个 **flag**（`--` 开头）就不算值 ✓ ——
@@ -1899,6 +1936,25 @@ mod tests {
             0,
             "多级目录也该自动创建 ✓"
         );
+        // 审计 P3-15：--install-bytes 是数字（写文件之前就报用法错误，退出码 2 ✓）
+        let dir_arg = dir.display().to_string();
+        assert_eq!(
+            package_files_cmd(&args_of(&["--out", &dir_arg, "--install-bytes", "不是数字"])),
+            2
+        );
+        // 给合法值能正常写出（多程序包 / 交叉编译就是这么用的 ✓）
+        let nested_arg = nested.display().to_string();
+        assert_eq!(
+            package_files_cmd(&args_of(&[
+                "--out",
+                &nested_arg,
+                "--install-bytes",
+                "1048576",
+                "--target",
+                "linux-x86_64",
+            ])),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1972,6 +2028,27 @@ mod tests {
     fn profile_subcommand_rejects_unknown_action_without_needing_config() {
         // 子命令校验在「读配置」之前 → 写错命令时不需要配置文件也能拿到正确提示 ✓
         assert_eq!(profile_cmd(&["nope".to_string()]), 2);
+    }
+
+    #[test]
+    fn profile_ssids_reports_three_lists_and_is_read_only() {
+        // 审计 P3-7：probe 的 known_ssids / visible_ssids 不再是死代码 —— 输出结构逐字断言 ✓
+        let report = ssids_report(
+            Some("Campus-WiFi"),
+            &["Campus-WiFi".to_string(), "Dorm-WiFi".to_string()],
+            &["Campus-WiFi".to_string()],
+        );
+        assert!(report.starts_with("当前 Wi-Fi: Campus-WiFi\n"), "{}", report);
+        assert!(report.contains("本机保存过的 Wi-Fi（2 个）:"), "{}", report);
+        assert!(report.contains("  - Dorm-WiFi"), "{}", report);
+        assert!(report.contains("附近可见的 Wi-Fi（1 个）:"), "{}", report);
+        assert!(report.contains("只读命令：不改配置、不动系统 ✓"), "{}", report);
+        // 读不到时如实写「读不到」，绝不编造名字 ✗
+        let empty = ssids_report(None, &[], &[]);
+        assert!(empty.contains("当前 Wi-Fi: 读不到"), "{}", empty);
+        assert_eq!(empty.matches("读不到（没连 Wi-Fi / 本平台没有读取入口）").count(), 2, "{}", empty);
+        // 子命令是纯只读 → 退出码 0（不需要配置文件；探测失败也 fail-open ✓）
+        assert_eq!(profile_cmd(&["ssids".to_string()]), 0);
     }
 
     #[test]

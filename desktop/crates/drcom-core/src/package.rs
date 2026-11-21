@@ -19,7 +19,10 @@ pub struct PackageInfo {
     pub target: String,
     /// 主程序文件名（Windows 带 `.exe` ✓）
     pub exe_name: String,
-    /// 人类可读名的尺寸（字节，写进 deb 的 `Installed-Size` ✓）
+    /// **包内会装到磁盘的二进制**总字节（多程序包 = 所有程序之和 ✓）。
+    ///
+    /// deb 的 `Installed-Size` = 它 + 生成的 `.desktop` 字节（见 [`installed_size_kb`]）——
+    /// 审计 P3-15：旧实现只算**一个** exe 的字节（多程序包 / 交叉编译下明显偏小 ✗）。
     pub size_bytes: u64,
     /// deb 架构名覆盖（**交叉编译时必须给** ✓：在 x86_64 runner 上给 armv7 打包时，
     /// 宿主自报是 `amd64` ✗ —— 那样打出来的包架构是错的 ✗）
@@ -101,6 +104,13 @@ pub fn sha256sums_line(digest_hex: &str, file_name: &str) -> String {
 }
 
 /// Linux 的 `.desktop` 桌面项 ✓。
+///
+/// 审计 P3-15 修了两处：
+///   1. **删掉 `X-GNOME-Autostart-enabled=false`** ✗ —— 那是「自启项（`~/.config/autostart/*.desktop`）」
+///      才有的字段；出现在普通应用桌面项里语义相反（看起来像「关掉自启」），完全没有作用；
+///   2. `Icon=` 改用**标准图标名** `network-wireless` ✓ —— 旧值 `stardust-flash-link` 是
+///      我们的 App ID，但打包流程**从不产出图标文件**，桌面环境只会显示空白图标 ✗。
+///      标准名在 Adwaita / hicolor 等主题里本来就有，零额外文件 ✓。
 pub fn desktop_entry(info: &PackageInfo) -> String {
     format!(
         "[Desktop Entry]\n\
@@ -109,15 +119,21 @@ pub fn desktop_entry(info: &PackageInfo) -> String {
          Name[en]=Stardust Flash Link\n\
          Comment=校园网认证网关自动登录：开机自启 + 周期自检\n\
          Exec={exe} run\n\
-         Icon={app}\n\
+         Icon=network-wireless\n\
          Terminal=false\n\
          Categories=Network;Utility;\n\
          Keywords=campus;network;login;\n\
-         X-GNOME-Autostart-enabled=false\n\
          Comment[zh_CN]=校园网认证网关自动登录：开机自启 + 周期自检\n",
-        exe = info.exe_name,
-        app = platform::APP_ID
+        exe = info.exe_name
     )
+}
+
+/// deb 的 `Installed-Size`（单位 KB，**向上取整** ✓ —— 这是 deb 的规矩）。
+///
+/// 审计 P3-15：口径 = **包内会装到磁盘的所有文件总字节**（二进制 + 生成的 `.desktop`），
+/// 不再只算一个 exe 的字节 ✗（多程序包 / 交叉编译时会明显偏小，用户看到的占用不对）。
+pub fn installed_size_kb(total_bytes: u64) -> u64 {
+    total_bytes.saturating_add(1023) / 1024
 }
 
 /// Debian 的 `control` ✓（`Installed-Size` 单位是 KB ✓ —— 这是 deb 的规矩 ✓）。
@@ -126,6 +142,9 @@ pub fn desktop_entry(info: &PackageInfo) -> String {
 /// Rust 的 `\` 续行会把行首空白吃掉 ✗ —— 真踩过：dpkg-deb 直接报
 /// `parsing file '…/control' near line 8 package '…'` ✗✓（所以这里用 `\x20` 显式写出那个空格 ✓）。
 pub fn deb_control(info: &PackageInfo) -> String {
+    // Installed-Size 的分子：二进制（可能多个）+ 会被装进 /usr/share/applications 的 .desktop ✓
+    // （README.txt / deb-control 不装到系统里，不算 —— 口径写进函数注释 ✓）
+    let install_bytes = info.size_bytes.saturating_add(desktop_entry(info).len() as u64);
     format!(
         "Package: {package}\n\
          Version: {version}\n\
@@ -139,7 +158,7 @@ pub fn deb_control(info: &PackageInfo) -> String {
         package = platform::APP_ID,
         version = info.version,
         architecture = info.deb_arch_name(),
-        size_kb = (info.size_bytes + 1023) / 1024
+        size_kb = installed_size_kb(install_bytes)
     )
 }
 
@@ -311,7 +330,33 @@ mod tests {
         }
         assert!(entry.contains("Exec=stardust-flash-link run"), "Exec 要能直接启动 ✓\n{}", entry);
         assert!(entry.contains("Terminal=false"), "不该弹终端窗口 ✗");
+        // 审计 P3-15：Icon 用**标准图标名**（打包从不产出图标文件，指向 App ID 只会显示空白 ✗）
+        assert!(entry.contains("Icon=network-wireless"), "{}", entry);
+        assert!(
+            !entry.contains(&format!("Icon={}", platform::APP_ID)),
+            "不许引用永不存在的图标文件 ✗\n{}",
+            entry
+        );
+        // 审计 P3-15：普通桌面项里不许出现「自启项」才有的字段（语义相反 ✗）
+        assert!(!entry.contains("X-GNOME-Autostart-enabled"), "{}", entry);
         assert!(entry.ends_with('\n'));
+    }
+
+    #[test]
+    fn deb_installed_size_counts_the_whole_package_not_just_the_exe() {
+        // 审计 P3-15：旧实现 = ceil(exe 字节)；现在 = ceil(二进制 + .desktop 字节) ✓
+        let info = PackageInfo { size_bytes: 10 * 1024, ..info() };
+        let doc_bytes = desktop_entry(&info).len() as u64;
+        assert!(doc_bytes > 0);
+        assert_eq!(installed_size_kb(10 * 1024), 10, "只算二进制 → 10 KB");
+        assert_eq!(installed_size_kb(10 * 1024 + doc_bytes), 11, "加上 .desktop 后进一位 ✓");
+        let control = deb_control(&info);
+        assert!(control.contains("Installed-Size: 11"), "{}", control);
+        // 向上取整 + 0 字节边界（不许 panic / 不许 0 除法 ✓）
+        assert_eq!(installed_size_kb(0), 0);
+        assert_eq!(installed_size_kb(1), 1);
+        assert_eq!(installed_size_kb(1024), 1);
+        assert_eq!(installed_size_kb(1025), 2);
     }
 
     #[test]
