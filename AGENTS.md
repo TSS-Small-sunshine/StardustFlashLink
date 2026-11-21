@@ -148,7 +148,7 @@ gh workflow run "Build Windows Installer" -R TSS-Small-sunshine/StardustFlashLin
 ```bash
 # 改完任何东西（哪怕只改注释）
 cd desktop
-cargo test --workspace          # 必须全绿 ✓（现在是 338 项单元 + 1 项文档测试）
+cargo test --workspace          # 必须全绿 ✓（现在是 342 项单元 + 1 项文档测试）
 
 # 改动过 .slint 或界面 Rust 代码 → 还必须重建 GUI 二进制 ✗
 cargo build -p drcom-ui         # 只跑 cargo test **不会**刷新 GUI 二进制 ✗（真踩过 ✓）
