@@ -79,7 +79,7 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | **M1** | 完整核心：登录/在线探测/**位置守卫**/方案/退避/日志轮转/指标/诊断包 | 与 2.x 行为对齐（`_smoke_*` 通过） |
 | **M2** | 桌面壳：托盘/窗口/单实例/自启/深色主题；UI 迁移 | 三平台可运行 App |
 | **M3** | 平台守护：Windows 服务(NSSM) / **systemd --user** / **launchd LaunchAgent**；打包矩阵 | 各平台安装包 + AppImage/dmg |
-| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 自动更新已完成（2026-11-21，preview.5）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；**审计 P2/P3 收尾**（CI 外部互验、plist 版本规范、卸载/关自启幂等、退出码语义、`--prefix` 打包，见 CHANGELOG preview.5）✓；便携版单文件 / 正式安装器 / 正式通道仍待做 |
+| **M4** | 自动更新（通道感知）+ **便携版单文件** | 🚧 自动更新已完成（2026-11-21，preview.5）：**检查 / 下载 / SHA256 校验**（`core/src/update.rs` + CLI `update check` / `update download`，预览通道感知、fail-closed）；**预览版 Release 发布**（CI 手动 dispatch 的 `publish-preview` job，prerelease）；**GUI「检查更新」+「下载并安装」**（后台线程、启动不联网）；**自我替换 / 回滚已完成**（Windows rename 舞步 + `backup/<版本>` 回滚，见下）；**审计 P2/P3 收尾**（CI 外部互验、plist 版本规范、卸载/关自启幂等、退出码语义、`--prefix` 打包，见 CHANGELOG preview.5）✓；**preview.6** 再收 5 条：**GUI 后台检查也写业务日志/指标**（`core::runtime` 共享入口，P2-5）、`profile ssids`（P3-7）、便携模式文档-实现一致（P3-8）、`.desktop` 自启字段/图标名 + deb `Installed-Size` 口径（P3-15）、统计兼容 2.x 旧日志格式（P3-13）✓；便携版单文件 / 正式安装器 / 正式通道仍待做 |
 
 ### M4 第二块：自我替换 / 回滚（2026-11-18 完成）
 
@@ -119,9 +119,9 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | 网络层 | `net`（CLI 与 GUI 共用；`HttpGet` trait 可在测试里注入假客户端 ✓） |
 | 位置守卫 | `guard` 六条分支与 2.x 逐条对齐（含 fail-open）；`probe` 探 Wi-Fi 名/本机 IP（三平台真实样本做单测 ✓）；`cidr` IPv4+IPv6 ✓ |
 | 方案 / 退避 | `profiles`（**含 `suffix`**：校内公共场合清空尾缀、宿舍带 `@yd` ✓；先全量校验再写盘；`adapt` 按 Wi-Fi 名自动切）；`backoff`（5/10/20/40/60 封顶）✓ |
-| 方案入口 | CLI `profile list/save/activate/delete/auto` —— 不用手改 `config.json` ✓（`--no-suffix` 规避 PowerShell 吃掉空参数的坑 ✗） |
+| 方案入口 | CLI `profile list/save/activate/delete/auto` —— 不用手改 `config.json` ✓（`--no-suffix` 规避 PowerShell 吃掉空参数的坑 ✗）；`profile ssids` 只读列出当前 / 保存过 / 可见的 Wi-Fi 名（审计 P3-7）✓ |
 | 调度 / 日志 | `scheduler`（退避优先、`next_check_at` 单写者、改间隔不跳倒计时）；`logfile`（业务 5 MB×3 / 升级 2 MB×2，读取最旧→最新）；`timefmt`（零依赖 UTC + 中文时长）✓ |
-| 指标 / 诊断 | `metrics`（日志行带 `[ok]/[fail]/[skip]` 等级；成功率 = ok/(ok+fail)、按天分桶、无样本显示 `—`）；`diagnostics` + `zipwriter`（**零依赖 ZIP**：store + CRC32 + 中央目录 ✓，账号打码、密码永不进包、逐行脱敏 ✓）—— 真机包用 **Python `zipfile.testzip()`** 外部校验通过 ✓ |
+| 指标 / 诊断 | `metrics`（日志行带 `[ok]/[fail]/[skip]` 等级；成功率 = ok/(ok+fail)、按天分桶、无样本显示 `—`；**也认 2.x 旧日志格式** `[YYYY-MM-DD HH:MM:SS] [LEVEL] …`，旧 `campus_login.log` 拷过来不是空面板 ✓，审计 P3-13）；`diagnostics` + `zipwriter`（**零依赖 ZIP**：store + CRC32 + 中央目录 ✓，账号打码、密码永不进包、逐行脱敏 ✓）—— 真机包用 **Python `zipfile.testzip()`** 外部校验通过 ✓ |
 | 守护循环 | CLI `run [--once]`：每轮重读配置 → 守卫 → 检查 → 写日志 → 按退避排下一次 ✓（服务化在 M3） |
 | **桌面界面（M2）** | **Slint 原生控件，零 WebView** ✓：深色星尘渐变 + 玻璃卡片 + 品牌色（`#0071e3` / `#2AA8FF→#3DDC97`）；主界面 5 个操作（立即检查 / 运行自检 / 打开数据目录 / 刷新状态 / **设置…**）；**设置窗口**：网关 / 端口 / 账号 / 后缀 / 密码 / 检查间隔（药丸选择）/ 等网络超时 / 位置守卫（开关 + 两个白名单）/ 自动升级 + 通道，带**实时校验与提示**、**测试连接**（用表单里的值试一次，不保存 ✓）、**密码留空 = 不修改** ✓ |
 | 界面可测性 | 界面**不做任何判断**：读配置、跑检查、自检都在 `drcom-ui::model` 里，`cargo test` 不弹窗口就能测 ✓ |
@@ -130,8 +130,8 @@ DrcomAutoLogin-Windows/            # 仓库名沿用（历史原因），3.0 起
 | 启动验证 | 真机启动 GUI，5 秒后进程仍存活（说明 winit 后端 + 软件渲染器初始化成功 ✓） |
 | 真机行为验证 | 守卫按白名单拦下并写出日志：`2026-09-28 13:30:48Z 不在校园网（…）（Wi-Fi: 6#119）` ✓ |
 
-> **当前测试数（2026-11-21，preview.5）**：`cargo test --workspace` **328 项单元 + 1 项文档测试全绿**、0 warning ✓
-> （core 266 / cli 28 / ui 34；体积与耗时以 CI 每版的「体积报告」为准 ✓）。
+> **当前测试数（2026-11-22，preview.6）**：`cargo test --workspace` **338 项单元 + 1 项文档测试全绿**、0 warning ✓
+> （core 274 / cli 29 / ui 35；体积与耗时以 CI 每版的「体积报告」为准 ✓）。
 
 > **体积说明**：GUI 7.83 MB vs headless 0.32 MB —— 差在窗口系统（winit）与渲染器。
 > 仍远小于 Electron（≈150 MB）；M3 会再试：
@@ -202,7 +202,7 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 | --- | --- | --- |
 | 主窗口（Slint 原生） | ✅ 完成 | 深色星尘主题，零 WebView ✓ |
 | 设置窗口 | ✅ 完成 | 账号/后缀/密码/间隔/守卫/通道 + 实时校验 + 测试连接 ✓；**配置方案页**：列表（含「使用中」标记与后缀/匹配说明）、应用 / 删除、按 Wi-Fi 自动切换开关，**新建方案取的是表单当前值** ✓ |
-| 配置方案 UI | ✅ 完成 | 核心逻辑沿用 2.x（`profiles.rs`：全量校验后才写、删当前方案只清标记 ✓）；界面只做展示与调用 ✓；空列表、名字非法、后缀非法都有对应中文提示 ✓ |
+| 配置方案 UI | ✅ 完成 | 核心逻辑沿用 2.x（`profiles.rs`：全量校验后才写、删当前方案只清标记 ✓）；界面只做展示与调用 ✓；空列表、名字非法、后缀非法都有对应中文提示 ✓。**Wi-Fi 名不用手打**：CLI `profile ssids` 打印当前 / 保存过 / 附近可见三个清单（纯只读，审计 P3-7；设置界面本身没有点选控件，文档不再宣称有 ✗） |
 | **单实例** | ✅ 完成 | 占 `127.0.0.1:47653`：第二个实例把第一个的窗口叫到前面后自己退出 ✓（真机验证：进程数 1 ✓）。**不用锁文件** ✗ —— 进程崩溃不会留下假锁 ✓ |
 | 开机自启 | ✅ 完成 | `autostart on\|off\|status [--dry-run]`：Windows `HKCU\...\Run` / Linux `systemd --user` / macOS LaunchAgent —— **全程当前用户级，一次管理员权限都不要** ✓；跑的是**无界面循环**（`run` ✓，不开机弹窗 ✗）。含「纯函数产出命令/文件内容 + 薄执行层」两层，命令逐字有单测 ✓（连「路径带空格要加引号」「plist 里 `&<>` 要转义」都测了 ✓） |
 | **系统托盘** | ⛔ 暂时做不了 | Slint 1.18 有 `system-tray` feature，但**只有 Qt 等后端实现** —— 查过 `i-slint-backend-winit-1.18.1` 源码，**零处引用 SystemTray** ✗。我们用 winit 后端 ⇒ 做出来也是个摆设 ✗，**不能给用户一个点不动的托盘**，故推迟到 M3（届时用平台原生 API：Windows `Shell_NotifyIcon`、Linux `libayatana-appindicator`、macOS `NSStatusItem`） |
@@ -259,8 +259,8 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 
 | 生成物 | 用在哪 |
 | --- | --- |
-| `.desktop` | Linux 桌面项（`Exec=… run`、`Terminal=false`、Network 分类 ✓） |
-| `deb-control` | Debian 元数据（**架构名换算** `x86_64→amd64` / `aarch64→arm64` / `armv7→armhf` ✓，体积换算成 KB ✓） |
+| `.desktop` | Linux 桌面项（`Exec=… run`、`Terminal=false`、Network 分类 ✓；**Icon = 标准名 `network-wireless`** —— 打包流程不产出图标文件，不许指向不存在的文件 ✗；普通桌面项里**不写** `X-GNOME-Autostart-enabled`（那是自启项字段，放这里语义相反 ✗）—— 审计 P3-15） |
+| `deb-control` | Debian 元数据（**架构名换算** `x86_64→amd64` / `aarch64→arm64` / `armv7→armhf` ✓；**`Installed-Size` = 包内二进制 + `.desktop` 的总字节**向上取整成 KB ✓ —— 旧实现只算一个 exe、多程序包明显偏小 ✗；CI 把 GUI + CLI 的字节和用 `--install-bytes` 传进来 ✓，审计 P3-15） |
 | `Info.plist` | macOS `.app`（BundleIdentifier / Executable / `CFBundlePackageType=APPL` ✓；版本规范化为 **1–3 段纯数字** —— Apple 只认这个，四段 + 预发布后缀不合规 ✗，审计 P2-8 ✓） |
 | `README.txt` | 包里那封「怎么用」说明（**首句就写清是预览版** ✓，命令清单 + 配置兼容说明 ✓） |
 | 产物命名 | `stardust-flash-link-<版本>-<目标>.zip` ✓（无空格无斜杠 ✓ 有单测 ✓） |
@@ -270,8 +270,10 @@ http://172.16.80.3/a79.htm?mac=241C-0408-BDD3&rul=http://9.9.9.9/
 用法（也就是 CI 里跑的那三步 ✓）：
 
 ```bash
-stardust-flash-link package-files --out pkg --target linux-aarch64 --exe stardust-flash-link
-                 # ↑ 第一行输出产物基名；**交叉编译时必须显式 --target** ✗（宿主自报目标是错的 ✓）
+stardust-flash-link package-files --out pkg --target linux-aarch64 --exe stardust-flash-link \
+                 --install-bytes <包内二进制总字节>
+                 # ↑ 第一行输出产物基名；**交叉编译时必须显式 --target / --install-bytes** ✗
+                 #   （宿主自报目标和体积都是错的 ✓；Installed-Size = 它 + .desktop 字节）
 stardust-flash-link archive --out dist/<基名>.zip --prefix <基名> pkg
                  # ↑ --prefix 固定包内顶层目录名（不给 = 取输入目录名，旧行为兼容 ✓；审计 P3-16）
 stardust-flash-link checksum dist/<基名>.zip      # → "<hex>  <文件>" / sha256sum 兼容 ✓

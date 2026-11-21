@@ -11,6 +11,11 @@
 //! 现在**等级是结构化字段**，中文文案怎么改都不影响统计 ✓；老格式（没标记）算 `Other`，
 //! 不计入成功率 ✓（既不吹高也不压低 ✓）。
 //!
+//! **也认 2.x 的旧日志格式**（审计 P3-13）：`[YYYY-MM-DD HH:MM:SS] [LEVEL] 正文`
+//! （2.x 的 `logging.Formatter` 口径，本地时区、等级在正文里）。把旧 `campus_login.log`
+//! 拷过来看统计时，面板不再是空的 ✓；2.x 的结局行按 2.x `metrics.py` 的常量表归类
+//! （见 [`parse_line`] 的说明 ✓）。
+//!
 //! 口径：**success_rate = ok / (ok + fail)** —— `skip`（不在校园网 / 账号未设置）不算失败 ✓。
 
 use std::time::{Duration, SystemTime};
@@ -44,7 +49,7 @@ impl Kind {
 pub struct Record {
     /// `2026-09-28`（字典序 = 时间序 ✓）
     pub date: String,
-    /// 完整时间戳 `2026-09-28 15:14:15Z`
+    /// 完整时间戳（3.0 带 `Z`；2.x 旧日志原样不带 —— 只用于排序与显示 ✓）
     pub stamp: String,
     pub kind: Kind,
     /// 标记之后的正文（界面直接显示 ✓）
@@ -52,20 +57,39 @@ pub struct Record {
 }
 
 /// 解析一行日志；认不出时间戳 → `None` ✓（静默跳过，不让统计炸掉 ✓）。
+///
+/// 认**两种**格式（审计 P3-13）：
+///   1. 3.0：`2026-09-28 15:14:15Z [ok] 已在线，无需登录`（UTC、等级是结构化字段 ✓）
+///   2. 2.x：`[2026-09-28 07:28:05] [INFO] 已在线，无需登录`（`logging.Formatter` 的
+///      `[%(asctime)s] [%(levelname)s] %(message)s`，本地时区；等级从**正文**归类 ✓）
+///
+/// 2.x 的正文按 2.x `metrics.py` 的常量表归类（同一份口径 ✓）：
+///   - `已在线，无需登录` / `登录成功:` → ok
+///   - `登录失败:` → fail（**带冒号才算一次结局** —— 紧跟在后面的
+///     `登录失败，进入退避：…` 不会被重复计成第二次失败 ✓）
+///   - `网络位置不在白名单` / `密码未设置，跳过登录` / `账号未设置，跳过登录` → skip
+///   - 其它（`开始检查 (reason=…)` / `等待 Ns 后 … 仍不可达` / 自动切方案 …）→ `Other`
+///     （不计入成功率 —— 宁可少算，不算错 ✓）
 pub fn parse_line(line: &str) -> Option<Record> {
     let line = line.trim_end();
+    parse_v3_line(line).or_else(|| parse_v2_line(line))
+}
+
+/// 3.0 格式：`YYYY-MM-DD HH:MM:SSZ [ok|fail|skip] 正文`
+fn parse_v3_line(line: &str) -> Option<Record> {
     // 时间戳固定 20 字符：`YYYY-MM-DD HH:MM:SSZ`
     if line.len() < 21 {
         return None;
     }
-    let stamp = &line[..20];
+    // 用 get 而不是切片：坏行里若有中文跨过第 20 个字节，切片会 panic ✗（诊断包不许崩 ✓）
+    let stamp = line.get(..20)?;
     if stamp.as_bytes().get(4) != Some(&b'-')
         || stamp.as_bytes().get(10) != Some(&b' ')
         || !stamp.ends_with('Z')
     {
         return None;
     }
-    let date = stamp[..10].to_string();
+    let date = stamp.get(..10)?.to_string();
     if !date
         .chars()
         .enumerate()
@@ -73,7 +97,7 @@ pub fn parse_line(line: &str) -> Option<Record> {
     {
         return None;
     }
-    let rest = line[20..].trim_start();
+    let rest = line.get(20..)?.trim_start();
     let (kind, text) = match rest.split_once(']') {
         Some((head, tail)) if head.starts_with('[') => {
             let name = head.trim_start_matches('[').trim();
@@ -88,6 +112,55 @@ pub fn parse_line(line: &str) -> Option<Record> {
         _ => (Kind::Other, rest.to_string()),
     };
     Some(Record { date, stamp: stamp.to_string(), kind, text })
+}
+
+/// 2.x 格式：`[YYYY-MM-DD HH:MM:SS] [LEVEL] 正文`（本地时区、无 `Z`）
+fn parse_v2_line(line: &str) -> Option<Record> {
+    let rest = line.strip_prefix('[')?;
+    let (stamp, after) = rest.split_once(']')?;
+    if !is_plain_stamp(stamp) {
+        return None;
+    }
+    let after = after.trim_start();
+    let level_body = after.strip_prefix('[')?;
+    let (_level, body) = level_body.split_once(']')?;
+    let text = body.trim();
+    Some(Record {
+        date: stamp.get(..10)?.to_string(),
+        stamp: stamp.to_string(),
+        kind: classify_v2(text),
+        text: text.to_string(),
+    })
+}
+
+/// `YYYY-MM-DD HH:MM:SS`（19 字符，**无 Z** —— 2.x 的本地时间戳 ✓）
+fn is_plain_stamp(stamp: &str) -> bool {
+    let bytes = stamp.as_bytes();
+    if bytes.len() != 19 {
+        return false;
+    }
+    bytes.iter().enumerate().all(|(index, byte)| match index {
+        4 | 7 => *byte == b'-',
+        10 => *byte == b' ',
+        13 | 16 => *byte == b':',
+        _ => byte.is_ascii_digit(),
+    })
+}
+
+/// 2.x 正文 → 等级（与 2.x `metrics.py` 的 `EV_*` 常量逐字对齐 ✓）。
+fn classify_v2(text: &str) -> Kind {
+    /// 2.x `metrics.py` 的 `EV_SKIP` 三条（守卫跳过 / 密码未设置 / 账号未设置）✓
+    const SKIP_PREFIXES: [&str; 3] =
+        ["网络位置不在白名单", "密码未设置，跳过登录", "账号未设置，跳过登录"];
+    if text.starts_with("已在线，无需登录") || text.starts_with("登录成功:") {
+        Kind::Ok
+    } else if text.starts_with("登录失败:") {
+        Kind::Fail
+    } else if SKIP_PREFIXES.iter().any(|prefix| text.starts_with(prefix)) {
+        Kind::Skip
+    } else {
+        Kind::Other
+    }
 }
 
 /// 一天的统计。
@@ -245,6 +318,102 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_real_two_x_log_format() {
+        // 夹具取自 2.x 仓库的**真实日志形状**（不是拍脑袋编的）：
+        // 时间戳/等级格式见 2.x `联网_service.py:253-255` 的 logging.Formatter
+        // （`[%(asctime)s] [%(levelname)s] %(message)s`，`%Y-%m-%d %H:%M:%S`）；
+        // 正文文案见 2.x `protocol.py:432-517` 与 `_smoke_static.py:371-377` /
+        // `_smoke_http.py:123-131` 的样本 ✓
+        let online = parse_line("[2026-09-28 07:00:00] [INFO] 已在线，无需登录").unwrap();
+        assert_eq!(online.kind, Kind::Ok);
+        assert_eq!(online.date, "2026-09-28");
+        assert_eq!(online.stamp, "2026-09-28 07:00:00", "2.x 时间戳原样保留（不带 Z）✓");
+        assert_eq!(online.text, "已在线，无需登录");
+
+        let login_ok =
+            parse_line("[2026-09-28 07:28:06] [INFO] 登录成功: Portal协议认证成功！").unwrap();
+        assert_eq!(login_ok.kind, Kind::Ok);
+
+        let fail =
+            parse_line("[2026-09-28 07:28:05] [ERROR] 登录失败: 账号不存在或账号未绑定宽带").unwrap();
+        assert_eq!(fail.kind, Kind::Fail);
+
+        let skip = parse_line(
+            "[2026-09-28 07:28:05] [INFO] 网络位置不在白名单（SSID=6#119 / IP=172.16.80.77），跳过本次检查",
+        )
+        .unwrap();
+        assert_eq!(skip.kind, Kind::Skip);
+        assert!(skip.text.contains("SSID=6#119"), "{}", skip.text);
+
+        // 「登录失败，进入退避」不是第二次失败（2.x metrics.py 也只认带冒号的结局 ✓）
+        let backoff = parse_line(
+            "[2026-09-28 07:28:05] [WARNING] 登录失败，进入退避：连续 1 次，下次重试 5 分钟后（…）",
+        )
+        .unwrap();
+        assert_eq!(backoff.kind, Kind::Other);
+
+        // 2.x metrics.py 的 EV_SKIP 两条（密码 / 账号未设置）
+        assert_eq!(
+            parse_line("[2026-09-28 07:31:00] [WARNING] 密码未设置，跳过登录。请通过 Web UI 设置密码。")
+                .unwrap()
+                .kind,
+            Kind::Skip
+        );
+        assert_eq!(
+            parse_line("[2026-09-28 07:31:00] [WARNING] 账号未设置，跳过登录。请在 Web UI 的「配置 → 账户」里填写学号 / 工号。")
+                .unwrap()
+                .kind,
+            Kind::Skip
+        );
+
+        // 周期开始 / 可达探测 / 等待不可达：都不是结局 → Other（不计入成功率 ✓）
+        for line in [
+            "[2026-09-28 07:28:05] [INFO] 开始检查 (reason=periodic)",
+            "[2026-09-28 07:30:00] [INFO] 网络已可达（第 1 次尝试，耗时 0.02s）",
+            "[2026-09-28 07:31:00] [WARNING] 等待 60s 后 172.16.80.3:80 仍不可达",
+        ] {
+            assert_eq!(parse_line(line).unwrap().kind, Kind::Other, "{}", line);
+        }
+
+        // 空正文的 2.x 行也是合法日志（logging.info("")）→ Other，不是坏行 ✓
+        let empty_body = parse_line("[2026-09-28 07:00:00] [INFO]").unwrap();
+        assert_eq!(empty_body.kind, Kind::Other);
+        assert_eq!(empty_body.text, "");
+
+        // 3.0 自己那套格式照旧（两种格式同时认 ✓）
+        assert_eq!(parse_line("2026-09-28 15:14:15Z [ok] 已在线，无需登录").unwrap().kind, Kind::Ok);
+        // 2.x 的「缺新字段老行」也要认（v2.0.8.0 前后格式没变过 ✓）
+        assert_eq!(
+            parse_line("[2026-09-28 07:00:00] [INFO] 已在线，无需登录").unwrap().kind,
+            Kind::Ok
+        );
+    }
+
+    #[test]
+    fn a_copied_two_x_log_shows_real_numbers_instead_of_an_empty_panel() {
+        // 审计 P3-13 的目的：把 2.x 的旧 logs 拷过来 → 统计不再全 0 ✓
+        let report = collect(
+            &lines(&[
+                "[2026-09-28 07:00:00] [INFO] 已在线，无需登录",
+                "[2026-09-28 07:00:01] [INFO] 开始检查 (reason=periodic)",
+                "[2026-09-28 07:10:00] [INFO] 网络位置不在白名单（SSID=6#119 / IP=172.16.80.77），跳过本次检查",
+                "[2026-09-28 07:20:00] [INFO] 登录成功: Portal协议认证成功！",
+                "[2026-09-28 07:30:00] [ERROR] 登录失败: 账号不存在或账号未绑定宽带",
+                "[2026-09-28 07:30:00] [WARNING] 登录失败，进入退避：连续 1 次，下次重试 5 分钟后（…）",
+                "[2026-09-28 07:40:00] [WARNING] 密码未设置，跳过登录。请通过 Web UI 设置密码。",
+            ]),
+            7,
+            at(1_790_630_400), // 2026-09-28 21:20 UTC ✓（这些行都在窗口内）
+        );
+        assert_eq!((report.ok, report.fail, report.skip, report.unmarked), (2, 1, 2, 2));
+        assert_eq!(report.rate_text(), "66.7%", "2/(2+1)，skip 与 unmarked 不进成功率 ✓");
+        assert_eq!(report.first_at.as_deref(), Some("2026-09-28 07:00:00"));
+        assert_eq!(report.days.len(), 1);
+        assert_eq!(report.days[0].date, "2026-09-28");
+        assert!(!report.is_empty(), "旧日志不再是空面板 ✓");
+    }
+
+    #[test]
     fn garbage_lines_are_ignored_not_misclassified() {
         for bad in [
             "",
@@ -253,6 +422,10 @@ mod tests {
             "2026-09-28 15:14:15Z [weird] 未知标记",
             "not-a-date 15:14:15Z [ok] x",
             "20260928 15:14:15Z [ok] x",
+            // 中文行（每字 3 字节）在第 20 个字节处不是字符边界 —— 切片会 panic，get() 不会 ✓
+            "一二三四五六七八九十",
+            "[2026-09-28 7:00:00] [INFO] 时间戳位数不对",
+            "2026-09-28 07:00:00] [INFO] 少了左括号（不是 2.x 格式）",
         ] {
             assert!(parse_line(bad).is_none(), "不该解析成功：{:?}", bad);
         }

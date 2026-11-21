@@ -116,7 +116,7 @@ stardust-flash-link service install            # Windows 走 NSSM / Linux system
 | `selfcheck` | 内置自检（版本一致性 / 配置 / 协议解析 / 路径可写 ✓） |
 | `login` | 跑一次登录检查（`--dry-run` 只打印**脱敏后**的 URL ✓） |
 | `run` | 常驻循环（失败指数退避 `5 → 10 → 20 → 40 → 60` 分钟封顶 ✓） |
-| `profile` | 位置方案（`save` / `activate` / `delete` / `auto` ✓） |
+| `profile` | 位置方案（`save` / `activate` / `delete` / `auto` ✓）；`profile ssids` 打印当前 / 可见 Wi-Fi 名（纯只读 ✓） |
 | `diagnostics` | 生成**脱敏**诊断包（ZIP ✓，密码永不进包 ✓） |
 | `serve` | 起本地控制 API（只绑 `127.0.0.1` ✓） |
 | `portal` | 门户检测：是不是被校园网门户拦住了（未认证会被 302 到登录页 ✓） |
@@ -159,7 +159,7 @@ Linux `~/.local/share/stardust-flash-link`、macOS `~/Library/Application Suppor
 
 ```bash
 cd desktop
-cargo test --workspace                  # 328 项测试（核心 266 / 命令行 28 / 界面 34 / doctest 1 ✓）
+cargo test --workspace                  # 338 项测试（核心 274 / 命令行 29 / 界面 35 / doctest 1 ✓）
 cargo build --release -p drcom-cli      # 命令行
 cargo build --release -p drcom-ui       # 桌面界面
 ```

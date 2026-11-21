@@ -84,12 +84,17 @@ pub fn local_ips() -> Vec<String> {
     out
 }
 
-// ---------------- Wi-Fi 名清单（设置界面「从列表里选」用 ✓） ----------------
+// ---------------- Wi-Fi 名清单（CLI `profile ssids` 的只读出口 ✓） ----------------
 
 /// 本机**保存过**的 Wi-Fi 名 ✓（跨多条网络用过的那几个 ✓）。
 ///
-/// 用途：设置界面里点一下就能填进「允许的 Wi-Fi」或方案的匹配名 ✓ —— 不用手打 ✗
-/// （手打最容易错一个字母，然后守卫就一直不生效 ✗）。
+/// 出口：CLI 的 **`stardust-flash-link profile ssids`**（纯只读 ✓）把它们连同
+/// 「当前 Wi-Fi / 附近可见」一起打印 —— 用户复制到「设置…」的白名单或方案的匹配名里，
+/// 不用手打 ✗（手打最容易错一个字母，然后守卫就一直不生效 ✗）。
+///
+/// 审计 P3-7：旧注释写的是「设置界面里点一下就能填」✗ —— 那个界面从来没做，
+/// 于是这两个函数成了死代码。现在接了 CLI 出口；**设置界面仍然没有点选**，
+/// 文档也如实写「先用 profile ssids 查名字」✓。
 pub fn known_ssids() -> Vec<String> {
     let attempts: &[(&str, &[&str], fn(&str) -> Vec<String>)] = if cfg!(target_os = "windows") {
         &[(
@@ -113,9 +118,10 @@ pub fn known_ssids() -> Vec<String> {
     collect_ssids(attempts)
 }
 
-/// 附近**当前可见**的 Wi-Fi 名 ✓。
+/// 附近**当前可见**的 Wi-Fi 名 ✓（`profile ssids` 的第二个清单）。
 ///
-/// macOS 从 14 起拿掉了 `airport` ✗，命令行没有官方入口 → 那边返回空 ✓（设置界面照常能用「当前 Wi-Fi」✓）。
+/// macOS 从 14 起拿掉了 `airport` ✗，命令行没有官方入口 → 那边返回空 ✓
+/// （「当前 Wi-Fi」照常能读，够填白名单了 ✓；`profile ssids` 会如实写「读不到」✗ 不编造）。
 pub fn visible_ssids() -> Vec<String> {
     let attempts: &[(&str, &[&str], fn(&str) -> Vec<String>)] = if cfg!(target_os = "windows") {
         &[(

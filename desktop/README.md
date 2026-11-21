@@ -4,11 +4,11 @@
 > （Windows / Linux AMD64·ARMv8·ARMv7 / macOS Intel·Apple Silicon），
 > 并且**不依赖浏览器** —— GUI 外壳在 M2 接到这个核心上。
 
-## 现在的状态（M4 收尾 · preview.5，2026-11-21）
+## 现在的状态（M4 收尾 · preview.6，2026-11-22）
 
 | 项 | 值 |
 | --- | --- |
-| 单元测试 | **328 项全绿**（核心 266 + 可执行 28 + 界面 34；另有 1 项文档测试）—— Windows 实测；Unix 平台多 1 项文件权限测试（329）✓ |
+| 单元测试 | **338 项全绿**（核心 274 + 可执行 29 + 界面 35；另有 1 项文档测试）—— Windows 实测；Unix 平台多 1 项文件权限测试（339）✓ |
 | headless 可执行 | **0.32 MB**（preview.4 CI 实测；每版由 CI「体积报告」打印 ✓） |
 | Slint GUI | **7.83 MB**（preview.4 CI 实测，Windows x86_64；零 WebView，真机可启动 ✓） |
 | 依赖 | 核心只 2 个（`serde`/`serde_json`）；GUI 另加 Slint（软件渲染器 ✓） |
@@ -178,6 +178,14 @@ stardust-flash-link diagnostics --out diag.zip   # 忽略路径则放数据目�
 包里是：`说明.txt`、`status.json`、`config.sanitized.json`（**账号只留前 4 位**）、
 `metrics.json`（近 N 天成功率）、`logs/campus_login.log`（最多 400 行，**逐行脱敏** ✓）。
 
+> **只用界面的用户现在也有这两份数据了** ✓（审计 P2-5）：GUI 自带的后台检查每次**真正检查**后
+> 都会往 `logs/campus_login.log` 追加一行（与 CLI / `run` **逐字同格式**：
+> `2026-11-22 03:12:00Z [ok] 已在线，无需登录`），`metrics.json` 就是从同一份日志现算的 ✓。
+> 以前界面只把结果画在窗口里、从不落盘 ✗ —— 只开 GUI 的机器上诊断包里的日志永远是空的、
+> 统计全是 0。现在两条路径都调 **同一个** `drcom_core::runtime::check_once`
+> （守卫 → 账号 → 密码 → 一次检查），等级 / 文案不再有第二套口径 ✓。
+> 注意：`auto_check_enabled` 关掉或配置读不出来时**不写日志**（那不是一次检查，别刷屏 ✗）。
+
 铁律：**密码永远不进包** ✓；日志里任何 URL 都会被擦成 `<url>` ✓（有单测 + 真机双向验证 ✓；
 包用第三方工具校验为**标准 ZIP** ✓：本机验证用 Python `zipfile.testzip()`，CI 里 Linux 用
 `unzip -t`、Windows 用 `Expand-Archive`（.NET `ZipFile`）；`SHA256SUMS` 还会被 `sha256sum -c` /
@@ -216,8 +224,14 @@ stardust-flash-link profile save 校内公共场合 --ssid Campus-WiFi --no-suff
 stardust-flash-link profile auto on
 # 4) 看看现状
 stardust-flash-link profile list
+stardust-flash-link profile ssids  # 当前 / 保存过 / 附近可见的 Wi-Fi 名（纯只读 ✓，照抄用）
 stardust-flash-link run --once     # 日志里会写：位置自适应：切到方案「…」（后缀 …）
 ```
+
+> 💡 **Wi-Fi 名不用手打**：`profile ssids` 会列「当前 Wi-Fi / 本机保存过 / 附近可见」三个清单
+> （**纯只读**：不读配置、不写盘 ✓；macOS 上「附近可见」读不到会如实写读不到 ✗ 不编造），
+> 复制进 `--ssid` 或设置里即可。设置界面本身**没有**「点选 Wi-Fi」的控件（审计 P3-7 把
+> 旧注释里那个不存在的承诺纠正了 ✗），所以这个只读命令就是正式出口 ✓。
 
 > ⚠️ **已知坑**：`--suffix ""` 在 PowerShell 里**传不进去**（空参数被吃掉 ✗）——
 > 所以清空后缀请用 `--no-suffix`，或 `--suffix 空` / `suffix none` / `--suffix -` ✓。
@@ -232,7 +246,8 @@ crates/drcom-core/     平台无关核心（无 UI、无平台框架）
   config.rs            配置（键名与 2.x 逐字对齐，未知字段原样保留）
   protocol.rs          Dr.COM 协议：拼 URL / 解析 JSONP（纯函数）
   secret.rs            凭据脱敏（2.1.0.0 P7-2 的 Rust 版）
-  platform.rs          数据/配置/日志目录、服务方式、便携模式判定
+  platform.rs          数据/配置/日志目录、服务方式、便携模式判定（**只认 portable.marker** ✓）
+  runtime.rs           一次检查的**共享入口**（CLI / GUI 后台检查同一条链路 + 业务日志落点 ✓）
   net.rs               自写 HTTP（明文，零依赖）+ 系统 curl 的 HTTPS（更新用，见 CurlHttp）
   update.rs            自动更新第一块：解析 /releases、挑平台资产、有界下载 + SHA256 校验
   update_apply.rs      自动更新第二块 + M4 收尾：自我替换 / 回滚（多程序一起换、全有或全无、rename 舞步、stale 清理、拉起新进程）

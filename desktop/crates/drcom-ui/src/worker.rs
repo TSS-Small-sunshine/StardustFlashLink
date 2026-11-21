@@ -13,14 +13,19 @@
 //!      服务停了它会自己接手 ✓（每 60 秒复核一次 ✓）。
 //!   ② 线程只在窗口活着时跑 ✓（退出前主线程会调 [`Worker::stop`] ✓）。
 //!
-//! 判定逻辑（[`should_run`]）是纯函数 → 单测覆盖 ✓；真正的检查复用 CLI 那条链路
-//! （`guard_allows` → `session::check_once` ✓），所以两边行为一致 ✓。
+//! 判定逻辑（[`should_run`]）是纯函数 → 单测覆盖 ✓；真正的检查复用**共享入口**
+//! `drcom_core::runtime::check_once`（守卫 → 账号 → 密码 → `session::check_once` ✓），
+//! 所以界面与 CLI 的判定 / 等级 / 文案完全同源 ✓（审计 P2-5 / R7）。
+//!
+//! **每次真正检查都会写一行业务日志** ✓（与 CLI 同格式的 `…Z [ok|fail|skip] …`）——
+//! 只用界面的用户，诊断包里的 `logs/campus_login.log` 与 `metrics.json` 不再是空的 ✓；
+//! 而「自动检查关闭 / 读配置失败」这类**没真正检查**的情况不写日志（不刷屏 ✓）。
 
-use drcom_core::{net::PlainHttp, netwatch, service, session};
+use drcom_core::{netwatch, service};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// 检查一次的超时（与 CLI 一致 ✓）。
 const TIMEOUT: Duration = Duration::from_secs(12);
@@ -113,34 +118,50 @@ fn set_last_at(state: &Arc<Mutex<WorkerState>>, at: String) {
 /// 日志用的是 `timefmt::format_utc`（UTC，带 Z），两者差 8 小时；而且「本地 = UTC+8」
 /// 只在无夏令时的中国时区成立，Linux/macOS 的海外用户会全错 ✗。
 /// 现在统一交给 [`drcom_core::timefmt::clock_utc`]，口径只有一处 ✓。
-fn now_clock() -> String {
-    drcom_core::timefmt::clock_utc(std::time::SystemTime::now())
+fn now_clock(finished: SystemTime) -> String {
+    drcom_core::timefmt::clock_utc(finished)
 }
 
-/// 跑一次检查（与 CLI 同一条链路 ✓）。
-fn check_once() -> String {
+/// 一次「到点」的后台动作：**真正检查了没有** ✓。
+///
+/// 为什么要分开：只有 [`TickOutcome::Checked`] 才该写业务日志 ✓ ——
+/// 「自动检查关闭」「读配置失败」不是一次检查，每来个检查间隔就写一行会把日志刷成噪音 ✗
+/// （审计 P2-5：early-return 不刷日志）。
+pub(crate) enum TickOutcome {
+    /// 没真正检查（自动检查关闭 / 读配置失败）→ 只更新界面，**不写业务日志** ✗
+    NotChecked(String),
+    /// 真跑了一次检查 → 调用方负责写一行业务日志 ✓
+    Checked(drcom_core::runtime::CheckResult),
+}
+
+impl TickOutcome {
+    /// 该不该往 `campus_login.log` 追加一行 ✓（**纯函数**，单测锁死「early-return 不刷日志」）。
+    pub(crate) fn should_write_business_log(&self) -> bool {
+        matches!(self, TickOutcome::Checked(_))
+    }
+
+    /// 界面那一行显示什么 ✓（两种情况的文案都已就绪）。
+    pub(crate) fn display_summary(&self) -> &str {
+        match self {
+            TickOutcome::NotChecked(line) => line,
+            TickOutcome::Checked(result) => &result.summary,
+        }
+    }
+}
+
+/// 跑一次后台检查：配置 Gate → **共享入口** `drcom_core::runtime::check_once` ✓。
+///
+/// 配置 / 账号 / 密码 / 守卫 / 登录判定**全在 core**（R7）—— 界面这层只做「读配置 + 调入口」。
+fn background_check() -> TickOutcome {
     // 读配置走 legacy 兼容层（审计 P1-3）：3.0 没有配置、2.x 有时只读沿用 2.x 的账号/网关 ✓
     let cfg = match drcom_core::legacy::load_config() {
         Ok(read) => read.config,
-        Err(e) => return format!("读配置失败：{}", e),
+        Err(e) => return TickOutcome::NotChecked(format!("读配置失败：{}", e)),
     };
     if !cfg.auto_check_enabled {
-        return "自动检查已在设置里关闭".to_string();
+        return TickOutcome::NotChecked("自动检查已在设置里关闭".to_string());
     }
-    if !cfg.account_configured() {
-        return "还没填账号 —— 去「设置…」里填一个 ✓".to_string();
-    }
-    let password = drcom_core::password::read();
-    if password.is_empty() {
-        return "还没设密码 —— 去「设置…」里填一个 ✓".to_string();
-    }
-    let probe = drcom_core::probe::snapshot();
-    let verdict = drcom_core::guard_allows(&cfg, probe.ssid.as_deref(), &probe.ips);
-    if !verdict.allowed {
-        return format!("跳过：{}", verdict.reason);
-    }
-    let report = session::check_once(&cfg, &password, &PlainHttp, TIMEOUT);
-    report.outcome.summary_cn()
+    TickOutcome::Checked(drcom_core::runtime::check_once(&cfg, TIMEOUT))
 }
 
 /// 「一次性后台任务 + 回调」骨架：**起线程 → 跑会阻塞的事 → 结果交给回调** ✓。
@@ -236,13 +257,33 @@ fn run_loop(state: Arc<Mutex<WorkerState>>, stop: Arc<AtomicBool>) {
                 .trigger()
                 .map(|trigger| trigger.summary_cn())
                 .unwrap_or_else(|| "到检查时间".to_string());
-            let summary = check_once();
-            let clock = now_clock();
-            let line = format!("{}（{}）· {}", summary, why, clock);
+            let outcome = background_check();
+            let finished = SystemTime::now();
+            let clock = now_clock(finished);
+            // 只有**真正检查**了才写业务日志（审计 P2-5）—— 格式与 CLI 逐字同源，
+            // diagnostics / metrics::collect 直接能用 ✓；「自动检查关闭」这类 early-return
+            // 不写，免得每到检查点就刷一行噪音 ✗（不是一次检查）。
+            let checked = outcome.should_write_business_log();
+            if checked {
+                if let TickOutcome::Checked(result) = &outcome {
+                    if let Err(e) = drcom_core::runtime::append_business_log(
+                        &drcom_core::platform::log_dir(),
+                        finished,
+                        result.kind,
+                        &result.summary,
+                    ) {
+                        // 日志写不进去不该影响这次检查的结果显示 ✓
+                        eprintln!("[后台检查] {}", e);
+                    }
+                }
+            }
+            let line = format!("{}（{}）· {}", outcome.display_summary(), why, clock);
             // 界面没有控制台 ✗ —— 但这行在「重定向 stderr」时能救排障 ✓（冒烟测试也靠它 ✓）
             eprintln!("[后台检查] {}", line);
-            set_last_at(&state, clock);
-            set_line(&state, line, true);
+            if checked {
+                set_last_at(&state, clock);
+            }
+            set_line(&state, line, checked);
             last_check = Instant::now();
         }
     }
@@ -260,7 +301,7 @@ mod tests {
 
     #[test]
     fn clock_is_hh_mm_ss_utc_with_z() {
-        let clock = now_clock();
+        let clock = now_clock(std::time::SystemTime::now());
         // 审计 P2-9：必须带 Z（UTC），且与日志 timefmt::format_utc 同一口径 ✓
         assert_eq!(clock.len(), 9, "{}", clock);
         assert!(clock.ends_with('Z'), "界面时钟必须是 UTC 口径（带 Z）✓: {}", clock);
@@ -293,6 +334,21 @@ mod tests {
         assert!(state.line.contains("启动"), "{}", state.line);
         assert_eq!(state.last_at, None);
         assert!(!state.active);
+    }
+
+    #[test]
+    fn only_a_real_check_merits_a_business_log_line() {
+        // 审计 P2-5：真正检查 → 写一行业务日志 ✓；自动检查关闭 / 读配置失败 → 不写（别刷屏 ✗）
+        let not_checked = TickOutcome::NotChecked("自动检查已在设置里关闭".to_string());
+        assert!(!not_checked.should_write_business_log(), "early-return 不写日志 ✗");
+        assert!(not_checked.display_summary().contains("关闭"));
+
+        let checked = TickOutcome::Checked(drcom_core::runtime::CheckResult::new(
+            drcom_core::metrics::Kind::Ok,
+            "已在线，无需登录",
+        ));
+        assert!(checked.should_write_business_log(), "真正检查必须写业务日志 ✓");
+        assert_eq!(checked.display_summary(), "已在线，无需登录");
     }
 
     #[test]
