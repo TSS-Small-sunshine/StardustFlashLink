@@ -2975,7 +2975,7 @@ def _consume_restart_marker():
 
 
 def _tray_already_running():
-    """本登录会话里托盘是否已经在跑：CreateMutexW(Local\DrcomAutoLoginTray) 已存在即算 ✓。
+    r"""本登录会话里托盘是否已经在跑：CreateMutexW(Local\DrcomAutoLoginTray) 已存在即算 ✓。
 
     为什么要它：重启时托盘**未必**真被杀掉（例如 NSSM 没杀进程树 / 用户自己开的托盘）。
     这时再拉一个只会被单实例互斥体挡掉并立刻退出，日志却会误报「已拉起 pid=…」✗。

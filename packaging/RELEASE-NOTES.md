@@ -1,34 +1,39 @@
 Windows 安装程序 **v{{VERSION}} "{{CODENAME}}"（{{CODENAME_CN}}）** · {{DATE}} · Inno Setup 自动构建（内嵌 Python，目标机无需预装）
-<!-- RELEASE-TITLE: v{{VERSION}} — 门户 AC 自动识别增强 + 文档链接修复 -->
+<!-- RELEASE-TITLE: v{{VERSION}} — 客户端断开降噪 + Web 面板 P3 收尾 -->
 
-> **一句话**：把「自动分析校园门户 AC」做得更稳、更可见 —— 探测地址扩到 5 个、两种门户吐参数形态都认、
-> 发现/未发现都写日志、并支持 config.json 手动兜底；同时修掉 README 里 5 个「点了没反应」的目录锚点
-> 和一个被行内 `|` 撑破的表格。接口、配置结构（只增两个可选键）、服务名与 `AppId`、安装路径**都没动** ✓。
+> **一句话**：面板轮询时客户端提前断开（切页面 / 关标签）不再被当成服务错误刷 `[ERROR]`、
+> 也不再在「写 500 失败」时把 traceback 打进 `service_stderr.log`；顺手清掉一批 P3 ——
+> SyntaxWarning 清零、绝对路径只显示折叠路径、日志轮询按页启停、切配置页只发一次请求。
+> 接口、配置结构、服务名与 `AppId`、安装路径**都没动** ✓。
 
 ## 🛠 本版修复
 
-### ① 门户 AC 自动识别增强（学校里有多个版本的 AC）
-- **探测地址扩到 5 个**：`msftconnecttest` / `connectivitycheck.gstatic.com` / `captive.apple.com` /
-  `detectportal.firefox.com` / `9.9.9.9` —— 有的门户只拦其中某个域名，多试几个才稳。
-- **两种形态都解析**：302 的 `Location` query，以及 200 页面里把参数写进 JS 变量的形态
-  （`var wlanacip='…'` / `"wlanacname":"…"`）；值仍过 IP / 名称 / MAC 形状白名单。
-- **日志可诊断**：发现时写一行 `门户参数发现（来源=location/body）：wlanacip=… wlanacname=… …`；
-  找不到时写 `门户参数未发现（5 个探测地址都没拿到…）` 并提示手动兜底 —— 能分清「没发现参数」和「参数不对」。
-- **手动兜底**：`config.json` 新增两个**可选**键 `wlan_ac_ip` / `wlan_ac_name`（默认空 = 自动发现）。
-  按门户跳转 URL 填上即可自救；Web UI 保存配置不会清掉它们。
+### ① 客户端提前断开不再当服务错误（真机日志降噪）
+- **真机证据**：2026-11-21 本机 `logs\campus_login.log` 出现 3 次
+  `[ERROR] GET /api/metrics 异常: [WinError 10053]` —— 面板每 2 秒轮询 /api/metrics，
+  切走页面 / 关标签 / 浏览器提前释放连接时服务端写响应会抛 `WinError 10053`。
+- **新判据**：`ConnectionAbortedError` / `ConnectionResetError` / `BrokenPipeError`，
+  以及带 `WinError` 10053 / 10054 / 10058 / 10061 的 `OSError` → 判为「客户端提前断开」。
+- **降级行为**：GET / POST 兜底分支记一行 INFO「客户端提前断开（不是服务错误）」后直接收尾，
+  **不再写 500**；非断开异常仍是 ERROR + 500，且 500 写失败时静默，不把二次异常冒到 stderr。
+- **成功响应**：`_send_json` / `_send_bytes` 写一半被断开也只记 INFO（正常响应行为不变）。
 
-### ② README 文档修复
-- 5 个目录锚点点了没反应：GitHub 会去掉标题里的 emoji 但保留空格，`## 📸 截图` 的锚点是 `#-截图`
-  而目录写的是 `#截图` → 已去掉 10 个标题行首的装饰 emoji，锚点恢复正常。
-- 版本记录表格里行内代码 `% ! ^ & | < >` 的裸 `|` 会把表格撑多一列 → 已转义；
-  `[Run]` 改为行内代码；顶部 3.0 横幅状态更新到 M4 收尾完成 / preview.4。
-- 新增文档自检断言（锚点全解析 / 表格列数一致），以后同类问题冒烟会直接拦下。
+### ② SyntaxWarning 清零 + Web 面板 P3 收尾
+- **非法转义**：`web_api.py` / `auto_update.py` 的 Windows 路径 docstring 改 raw string，
+  全仓 `.py` 编译零 SyntaxWarning（冒烟新增扫描断言）。
+- **P3-3 路径上屏**：前端只显示折叠路径（如 `…\logs\campus_login.log`），完整路径放进悬停提示；
+  「关于」页、日志路径、升级历史路径统一走一个 helper；后端 JSON 字段名不变。
+- **P3-7**：日志文件列表不再 innerHTML 裸拼，改 `createElement` + `textContent`。
+- **P3-13**：日志轮询只在「日志」页启停（boot 不再无条件启动，离开页面即停）。
+- **P3-14**：切配置页只发一次 `/api/config`（升级设置字段合进同一次请求）。
+- **P3-10 / P3-1 / P3-11**：去掉未使用的接口形参；删除零调用死代码；配置「读-改-写」全部纳入
+  同一把 `CONFIG_LOCK`（含方案自动切换的读-判-切）。
 
 ## ⚠️ 升级前须知
 
 - **升级不覆盖用户数据**：`config.json`、`password.txt`（含方案专属 `password.<方案名>.txt`）与 `logs\` 都保留。
 - **服务名与安装路径不变**：仍是 `DrcomAutoLogin` 与 `%ProgramFiles%\DrcomAutoLogin`。
-- 默认行为与上一版一致（自动识别门户参数）；只有新增的两个可选配置键需要时才填。
+- 默认行为与上一版一致；本版只是降噪与界面 / 并发收尾，没有需要迁移的配置项。
 
 ## 📦 安装包
 
