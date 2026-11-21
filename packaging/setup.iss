@@ -1,14 +1,14 @@
 ; ============================================================
 ;   setup.iss - 星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录 Inno Setup 6 脚本
-;   版本: v2.1.3.14
+;   版本: v2.1.3.15
 ;   编码: UTF-8 + BOM（ISCC 推荐 UTF-8 BOM）
-;   目标: 生成 StardustFlashLink-Setup-v2.1.3.14.exe
+;   目标: 生成 StardustFlashLink-Setup-v2.1.3.15.exe
 ; ============================================================
 
 #define MyAppName "星尘闪连 (Stardust Flash Link)"
 ; 允许 CI 用 ISCC /DMyAppVersion=x.y 覆盖；本地直接编译时用下面的默认值
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.3.14"
+  #define MyAppVersion "2.1.3.15"
 #endif
 ; 版本线代号（MAJOR.MINOR 级别，规则见 docs/VERSIONING.md）
 #ifndef MyAppCodename
@@ -26,7 +26,10 @@ LicenseFile=branding\EULA.rtf
 DefaultDirName={autopf}\DrcomAutoLogin
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
-AppMutex=DrcomAutoLogin-mutex-v2
+; 审计 J4（v2.1.3.15）：这里原本有一行 AppMutex=DrcomAutoLogin-mutex-v2，是死配置 ——
+; 全仓库没有任何进程创建这个互斥体（服务单实例用的是 Local\DrcomAutoLoginService，
+; 见 联网_service.py 的运行时单实例锁），Inno 的「安装器已在运行」检查永远查不到它。
+; 删除，免得后人误以为这里还有第二道单实例保护。
 AppId={{A8F2E3D1-7C4B-4F89-9D5E-1A2B3C4D5E6F}
 OutputBaseFilename=StardustFlashLink-Setup-v{#MyAppVersion}
 OutputDir=output
@@ -123,6 +126,9 @@ Filename: "{app}\python\pythonw.exe"; Parameters: """{app}\tray.py"""; \
 Type: filesandordirs; Name: "{app}\logs"
 Type: filesandordirs; Name: "{app}\tools"
 Type: filesandordirs; Name: "{app}\branding"
+; 审计 J5（v2.1.3.15）：{app}\启动UI.bat 是 [Code] 的 CreateLauncherBat() 在安装时生成的，
+; 不在 [Files] 清单里 → Inno 默认不会删，卸载后会留下一个指向已删服务的死启动器。这里显式登记。
+Type: files; Name: "{app}\启动UI.bat"
 ; v2.0.11.0：升级前备份（回滚用）。卸载时一起清掉，别在 Program Files 里留一堆旧代码。
 Type: filesandordirs; Name: "{app}\backup"
 
