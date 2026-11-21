@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   uninstall.bat - 移除 星尘闪连 (Stardust Flash Link) 服务 (v2.1.3.14)
+REM   uninstall.bat - 移除 星尘闪连 (Stardust Flash Link) 服务 (v2.1.3.15)
 REM   修复: UTF-8 BOM + chcp 65001（修复 cmd 中文编码问题）
 REM   ⚠️ 已知限制（v2.1.0.0 记录，未修）：脚本用 setlocal EnableDelayedExpansion（需要 !VAR!），
 REM      因此**安装路径里不能含 `!`**（会被当成变量展开吃掉）。请放在不含 `!` 的目录下。
@@ -30,7 +30,7 @@ set "LOG_DIR=!SCRIPT_DIR!\logs"
 
 echo.
 echo ============================================================
-echo   星尘闪连 (Stardust Flash Link) 服务 - 卸载 (v2.1.3.14)
+echo   星尘闪连 (Stardust Flash Link) 服务 - 卸载 (v2.1.3.15)
 echo ============================================================
 echo   脚本目录: !SCRIPT_DIR!
 echo ============================================================
@@ -83,6 +83,18 @@ if errorlevel 1 (
 )
 
 REM ============================================================
+REM   删除安装器生成的 {app}\启动UI.bat（审计 J5）
+REM   这个文件是 Inno 安装器在安装时用 [Code] 写出来的，不在 [Files] 清单里 →
+REM   安装器卸载不会自动删，源码方式的卸载脚本以前也不管它，卸载后会留下死启动器。
+REM ============================================================
+if exist "!SCRIPT_DIR!\启动UI.bat" (
+    del /F /Q "!SCRIPT_DIR!\启动UI.bat"
+    echo [INFO] 已删除启动器: !SCRIPT_DIR!\启动UI.bat
+) else (
+    echo [INFO] 启动器 启动UI.bat 不存在，跳过
+)
+
+REM ============================================================
 REM   询问：是否同时删除配置 / 密码 / 日志
 REM ============================================================
 echo.
@@ -91,6 +103,7 @@ echo   是否同时删除以下用户数据?
 echo     - config.json     (运行配置)
 echo     - password.txt    (校园网密码)
 echo     - logs\           (所有日志)
+echo     - backup\         (升级备份目录，里面也有一份 config.json 副本)
 echo.
 echo   选择:
 echo     Y = 是，一并删除
@@ -107,12 +120,17 @@ if "!REMOVE_DATA!"=="1" (
     if exist "!SCRIPT_DIR!\config.json" del /F /Q "!SCRIPT_DIR!\config.json"
     if exist "!SCRIPT_DIR!\password.txt" del /F /Q "!SCRIPT_DIR!\password.txt"
     if exist "!LOG_DIR!" rd /s /q "!LOG_DIR!"
+    REM 审计 J2（v2.1.3.15）：自动升级每次都会把 config.json 副本备份进 backup\ 目录，
+    REM 只删根目录配置会把它留下 → 一并删除整个备份目录（保留分支不删，只提示）。
+    if exist "!SCRIPT_DIR!\backup" rd /s /q "!SCRIPT_DIR!\backup"
     echo [INFO] 用户数据已删除
 ) else (
     echo [INFO] 用户数据已保留
     if exist "!SCRIPT_DIR!\config.json" echo        - !SCRIPT_DIR!\config.json
     if exist "!SCRIPT_DIR!\password.txt" echo       - !SCRIPT_DIR!\password.txt
     if exist "!LOG_DIR!" echo                       - !LOG_DIR!\
+    if exist "!SCRIPT_DIR!\backup" echo [WARN] 备份目录里也有 config.json 副本: !SCRIPT_DIR!\backup\
+    if exist "!SCRIPT_DIR!\backup" echo [WARN] 如需彻底删除配置，请手动删除上述备份目录
 )
 
 echo.

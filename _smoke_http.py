@@ -144,8 +144,13 @@ try:
     _mdir = tempfile.mkdtemp(prefix="drcom_metrics_")
     _now = _time.time()
 
+    # v2.1.3.15：夹具时间必须落在**今天** —— 旧写法用「now − 100/200/300 秒」，零点后约 5 分钟内
+    # 这几行会落到「昨天」，而断言看的是 series[-1]（今天）→ 必红（2026-11-22 00:00 真踩到）。
+    # 改成「今天 12:00:00」为基准再减偏移：同一天内，与运行时刻无关，CI 在 UTC 任何时间都稳 ✓。
+    _today_noon = _time.mktime(tuple(_time.localtime(_now)[:3]) + (12, 0, 0, 0, 0, -1))
+
     def _ts(offset_sec):
-        return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(_now - offset_sec))
+        return _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(_today_noon - offset_sec))
 
     _log_lines = [
         "[%s] [INFO] 开始检查 (reason=periodic)" % _ts(300),
