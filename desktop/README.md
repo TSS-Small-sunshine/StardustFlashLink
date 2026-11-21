@@ -4,13 +4,13 @@
 > （Windows / Linux AMD64·ARMv8·ARMv7 / macOS Intel·Apple Silicon），
 > 并且**不依赖浏览器** —— GUI 外壳在 M2 接到这个核心上。
 
-## 现在的状态（M0 完成 · M2 起步）
+## 现在的状态（M4 收尾 · preview.5，2026-11-21）
 
 | 项 | 值 |
 | --- | --- |
-| 单元测试 | **306 项全绿**（核心 254 + 可执行 24 + 界面 28；另有 1 项文档测试） |
-| headless 可执行 | **0.32 MB**（单文件，无运行时依赖 ✓） |
-| Slint GUI | **7.83 MB**（Windows x86_64；零 WebView，真机可启动 ✓） |
+| 单元测试 | **326 项全绿**（核心 266 + 可执行 28 + 界面 32；另有 1 项文档测试）—— Windows 实测；Unix 平台多 1 项文件权限测试（327）✓ |
+| headless 可执行 | **0.32 MB**（preview.4 CI 实测；每版由 CI「体积报告」打印 ✓） |
+| Slint GUI | **7.83 MB**（preview.4 CI 实测，Windows x86_64；零 WebView，真机可启动 ✓） |
 | 依赖 | 核心只 2 个（`serde`/`serde_json`）；GUI 另加 Slint（软件渲染器 ✓） |
 | 覆盖平台 | 交叉编译矩阵见 `.github/workflows/preview-3.0.yml`（6 目标；GUI 在原生 runner 上编译） |
 
@@ -22,7 +22,7 @@ cargo test --workspace          # 全部单测
 cargo run -p drcom-cli -- version      # 版本 / 通道 / 平台 / 架构
 cargo run -p drcom-cli -- selfcheck    # 内置自检（行为级，和 2.x 的 _smoke_*.py 一个思路）
 cargo run -p drcom-cli -- status       # 状态 JSON（与本地 API 同一份数据）
-cargo run -p drcom-cli -- serve        # 起本地控制 API（http://127.0.0.1:8848）
+cargo run -p drcom-cli -- serve        # 起本地控制 API（默认端口取配置 ui_port，默认 8848）
 cargo run -p drcom-cli -- login --dry-run   # 只打印「脱敏后的」登录 URL ✓
 cargo run -p drcom-cli -- run --once        # 跑一次守护循环（含位置自适应 + 写日志）
 cargo run -p drcom-cli -- diagnostics        # 生成「脱敏诊断包」（ZIP；密码永不进包 ✓）
@@ -33,6 +33,22 @@ cargo run -p drcom-cli -- update apply out.zip             # 自我替换（备�
 cargo run -p drcom-cli -- update rollback                  # 回滚到最新备份
 cargo run -p drcom-cli -- update backups                   # 列出所有备份版本
 ```
+
+> **密码只从 `password.txt` 读** ✓ —— CLI **不再接受 `--password`** ✗（写在命令行里会进 shell
+> 历史与进程列表，同机其他用户/进程都能看到；审计 P2-11）。`login --password x` 会返回
+> **用法错误（退出码 2）** 并提示密码文件路径 ✓。
+
+### 退出码（脚本 / 服务入口依赖它）
+
+| 退出码 | 含义 | 出现的命令 |
+| --- | --- | --- |
+| **0** | 成功（含「跳过」：不在校园网 / 账号未设置 —— 跳过不算失败 ✓） | 全部命令；`run --once` 的 Ok / Skip |
+| **1** | 失败（登录被拒 / 网关不可达 / 文件读写失败 / 校验失败） | `login` 失败、`run --once` 的 Fail、`checksum` 等 |
+| **2** | 用法错误（未知命令 / 参数写错 / 端口不合法 / 未知子命令） | 所有子命令 |
+
+> `run --once`（审计 P3-1）：**成功 / 跳过 → 0，失败 → 1** ✓ —— 作为 systemd 单元、
+> 计划任务或 CI 脚本入口时，「这次登录失败了」必须能传递出去 ✗（旧实现永远 0 ✗）。
+> `login` 同样：成功 0 / 失败 1 / 守卫跳过 0；参数写错是 2 ✓。
 
 ### 桌面界面（GUI）
 
@@ -70,7 +86,7 @@ cargo run -p drcom-ui        # 主界面：状态卡 + 立即检查 / 自检 / �
 stardust-flash-link autostart status               # 看现在开没开
 stardust-flash-link autostart on --dry-run         # 只打印将要执行的命令（不动系统 ✓）
 stardust-flash-link autostart on                   # 开启（**当前用户级，免管理员** ✓）
-stardust-flash-link autostart off                  # 关掉（幂等 ✓）
+stardust-flash-link autostart off                  # 关掉（幂等 ✓：本来就没开 → 直接成功、不跑删除命令 ✓）
 ```
 
 自启跑的是**无界面循环**（`… run`）✓ —— 开机不弹窗 ✗；落点：Windows 注册表
@@ -83,7 +99,7 @@ stardust-flash-link service status                      # 常驻方式 + 状态 
 stardust-flash-link service install --dry-run           # 只打印将执行的命令（不动系统 ✓）
 stardust-flash-link service install                     # 注册并启动
 stardust-flash-link service start|stop|restart          # 启停 / 重启
-stardust-flash-link service uninstall                   # 注销（幂等 ✓）
+stardust-flash-link service uninstall                   # 注销（幂等 ✓：没装 → 直接成功、不跑 nssm remove ✓）
 ```
 
 - Windows 走 **NSSM 托管的服务**，服务名是 **`DrcomAutoLogin`** —— 与 2.x **故意共用** ✓，
@@ -163,7 +179,9 @@ stardust-flash-link diagnostics --out diag.zip   # 忽略路径则放数据目�
 `metrics.json`（近 N 天成功率）、`logs/campus_login.log`（最多 400 行，**逐行脱敏** ✓）。
 
 铁律：**密码永远不进包** ✓；日志里任何 URL 都会被擦成 `<url>` ✓（有单测 + 真机双向验证 ✓；
-包用 Python `zipfile.testzip()` 校验为**标准 ZIP** ✓）。
+包用第三方工具校验为**标准 ZIP** ✓：本机验证用 Python `zipfile.testzip()`，CI 里 Linux 用
+`unzip -t`、Windows 用 `Expand-Archive`（.NET `ZipFile`）；`SHA256SUMS` 还会被 `sha256sum -c` /
+`Get-FileHash` 外部复核 ✓ —— 自研 SHA-256 / ZIP 绝不在自家实现里自证 ✓（审计 P2-7）。
 
 ### 看看「是不是被校园网门户拦住了」
 
