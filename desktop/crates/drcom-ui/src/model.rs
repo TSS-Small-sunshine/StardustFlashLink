@@ -389,6 +389,23 @@ pub fn format_install_result(result: &Result<InstalledUpdate, String>) -> (Strin
     }
 }
 
+/// 进程内单调递增序号：让「下载并安装」的临时目录名在同一纳秒内也不会重复 ✓。
+///
+/// 为什么不能只靠 pid + 纳秒：macOS 上 `SystemTime::now()` 的纳秒值**可能在同一 tick 内
+/// 被两个线程读到同一个**（preview.5 的 macOS CI 就是这样撞车：两个并列用例共用一个
+/// staging 目录，先完成的 `remove_dir_all` 把另一个的 `.part` 删掉 → rename ENOENT）。
+/// 序号用 `std::sync::atomic`（零新依赖 ✓）。
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_staging_seq() -> u64 {
+    STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// **纯函数**：GUI「下载并安装」的临时目录名（pid + 纳秒 + 序号，任何一项不同都不同 ✓）。
+fn staging_dir_name(pid: u32, nonce: u128, seq: u64) -> String {
+    format!("sfl-gui-update-{}-{}-{}", pid, nonce, seq)
+}
+
 /// 「下载并安装」的**可注入**入口：单测传假 HTTP（同时实现 GET 与下载）→ **完全离线** ✓。
 ///
 /// 流程全部复用 core（R7：界面不做判断 ✓）：
@@ -419,10 +436,14 @@ pub fn install_update_with<H: HttpGet + HttpDownload>(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    let staging_dir = std::env::temp_dir().join(format!(
-        "sfl-gui-update-{}-{}",
+    // 审计收尾（preview.5 补丁）：临时目录名除 pid + 纳秒外**再加进程内单调序号** ——
+    // macOS 上 `SystemTime::now()` 在同一 tick 内可能被两个线程读到同一个值（真机 CI 踩过：
+    // 两个并列用例撞同一个 staging 目录，先完成的那个 `remove_dir_all` 把另一个的 `.part`
+    // 删掉 → rename ENOENT），加序号后**并列调用也一定互不干扰** ✓。
+    let staging_dir = std::env::temp_dir().join(staging_dir_name(
         std::process::id(),
-        nonce
+        nonce,
+        next_staging_seq(),
     ));
     let dest = staging_dir.join(&asset.name);
     let result = (|| {
@@ -1607,6 +1628,85 @@ mod tests {
             .iter()
             .any(|url| url == drcom_core::update::RELEASES_URL));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staging_dirs_are_unique_even_within_the_same_tick() {
+        // preview.5 的 macOS CI 偶发：两个并列用例在同一个 tick 里拿到同一个纳秒值 →
+        // 共用 staging 目录 → 先完成的 remove_dir_all 把另一个的 .part 删掉 → rename ENOENT。
+        // 现在名字里叠了进程内单调序号，任何两项都不同 ✓。
+        assert_eq!(staging_dir_name(1, 2, 3), "sfl-gui-update-1-2-3");
+        assert_ne!(staging_dir_name(1, 2, 3), staging_dir_name(1, 2, 4));
+        assert_ne!(staging_dir_name(1, 2, 3), staging_dir_name(1, 3, 3));
+        assert_ne!(staging_dir_name(1, 2, 3), staging_dir_name(2, 2, 3));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            handles.push(std::thread::spawn(|| {
+                let mut names = Vec::new();
+                for _ in 0..64 {
+                    // 故意用**同一个 nonce**：唯一性必须来自序号，而不是「运气好没撞纳秒」✓
+                    names.push(staging_dir_name(std::process::id(), 123, next_staging_seq()));
+                }
+                names
+            }));
+        }
+        let mut all: Vec<String> = Vec::new();
+        for handle in handles {
+            all.extend(handle.join().expect("线程不许 panic ✓"));
+        }
+        let mut unique = std::collections::HashSet::new();
+        for name in &all {
+            assert!(
+                unique.insert(name.clone()),
+                "同一 tick 下临时目录名重复 ✗: {}",
+                name
+            );
+            assert!(
+                name.starts_with(&format!("sfl-gui-update-{}-123-", std::process::id())),
+                "命名格式不对 ✗: {}",
+                name
+            );
+        }
+        assert_eq!(unique.len(), 512, "512 个名字必须全部唯一 ✓");
+    }
+
+    /// 并列调用「下载并安装」：各自的 staging 目录、各自装到自己的安装目录、互不干扰 ✓。
+    /// （preview.5 的 macOS CI 就是这样红的；修复后这条在任意并发调度下都应稳定通过。）
+    #[test]
+    fn concurrent_offline_installs_do_not_share_staging_dirs() {
+        let mut handles = Vec::new();
+        for index in 0..4 {
+            handles.push(std::thread::spawn(move || {
+                let dir = ui_temp_dir(&format!("install-parallel-{}", index));
+                let exe_name = update_apply::expected_exe_name();
+                let installed = dir.join(exe_name);
+                std::fs::write(&installed, ui_fake_exe(b"OLD")).unwrap();
+                let new_bytes = ui_fake_exe(b"NEW");
+                let zip = ui_package_zip(exe_name, &new_bytes, "9.9.9.9");
+                let digest = drcom_core::checksum::sha256_hex(&zip);
+                let asset_name = format!(
+                    "stardust-flash-link-9.9.9.9-{}.zip",
+                    drcom_core::platform::target_label()
+                );
+                let body = release_body_with(&asset_name, zip.len() as u64, &digest);
+                let http = FakeUpdateHttp::with_download(&body, &zip);
+                let result = install_update_with(&http, &installed);
+                let outcome = match result {
+                    Ok(_) => std::fs::read(&installed).map(|bytes| bytes == new_bytes),
+                    Err(_) => Ok(false),
+                };
+                let _ = std::fs::remove_dir_all(&dir);
+                outcome.unwrap_or(false)
+            }));
+        }
+        for (index, handle) in handles.into_iter().enumerate() {
+            assert!(
+                handle.join().expect("线程不许 panic ✓"),
+                "并列第 {} 个安装失败 ✗（临时目录撞车 / 安装目录串了？）",
+                index
+            );
+        }
     }
 
     #[test]
