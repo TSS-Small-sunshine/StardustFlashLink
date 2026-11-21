@@ -5,6 +5,33 @@
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/) 规范。
 
+## v2.1.3.14 (hotfix) — 2026-11-21 · 代号 `Vega`（织女星）
+
+> 主题：**补上 v2.1.3.13 没盖住的那半个「客户端断开」** —— 请求读取阶段的连接重置
+> （`handle_one_request` 读请求行时抛 `ConnectionResetError`）仍会让 socketserver 把 traceback
+> 打进 `service_stderr.log`。本版用同一个断开判据把它也收掉。
+> 接口路径 / 字段名、配置结构、服务名、安装路径**都没动** ✓；仍零第三方依赖 ✓。
+
+### 🔇 ① 请求读取阶段的断开也不打 traceback（真机证据）
+- **v2.1.3.13 装好后真机复验**：连续制造 12 次「发完请求立刻 RST」后，`logs\campus_login.log`
+  正确出现 `[INFO] 响应 200 时客户端提前断开（不是服务错误，已静默收尾）` ✓，
+  但 `logs\service_stderr.log` 又多出几段
+  `Exception occurred during processing of request from ('127.0.0.1', …)` →
+  `http\server.py line 404, in handle_one_request` → `ConnectionResetError: [WinError 10054]` ✗。
+- **根因**：`do_GET` / `do_POST` 的兜底只在「路由之后」生效；`BaseHTTPRequestHandler` 在
+  **读请求行 / 请求头** 阶段就会抛 `ConnectionResetError`，异常一路冒到
+  `socketserver.process_request_thread` 的 `handle_error`（直接把 traceback 写进 stderr）✗。
+- **修复**：`_Handler` 覆盖 `handle_one_request()`，调用父类实现并捕 `ConnectionError` / `OSError`；
+  命中同一个 `_is_client_disconnect()` → 记一行 INFO「请求读取阶段客户端提前断开」+
+  `close_connection = True` 静默收尾；**非断开异常照旧抛出去**（不吞真正的 bug）✓。
+- **防回归**：`_smoke_static.py` +3 条 —— 覆盖存在性；假 `rfile` 抛 `ConnectionResetError`
+  时被静默收尾（`close_connection=True`、不抛）；假 `rfile` 抛 `ValueError` 时仍冒出来 ✓。
+
+### 🧪 自检
+- 静态 `_smoke_static.py` **629 项**（基线 626，+3）；HTTP `_smoke_http.py` **63 项** ✓；
+- 渲染器 `--self-test`、PR 机器人自测、发布说明 dry-run 全绿 ✓；
+- 真机复验（发布后）：同样的 RST 探针不再让 `service_stderr.log` 出现新 traceback。
+
 ## v2.1.3.13 (fix) — 2026-11-21 · 代号 `Vega`（织女星）
 
 > 主题：**真机日志降噪 + Web 面板剩余 P3 收尾** —— 客户端提前断开（切页面 / 关标签）不再被当成
