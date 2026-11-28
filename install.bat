@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableDelayedExpansion
 
 REM ============================================================
-REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.16)
+REM   install.bat - 星尘闪连 (Stardust Flash Link) 服务安装脚本 (v2.1.3.17)
 REM   编码: UTF-8（无 BOM）+ 首行 chcp 65001 —— cmd 才能正确显示中文。
 REM   ⚠️ 不要给本文件加 BOM：BOM 会变成第一行的字节，首行 @echo off 成为乱码命令，
 REM      cmd 会先报错或回显命令行，脚本行为全乱（实测过，不要加）。
@@ -38,7 +38,7 @@ set "LOG_DIR=!SCRIPT_DIR!\logs"
 
 echo.
 echo ============================================================
-echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.16)
+echo   星尘闪连 (Stardust Flash Link) - Windows 服务安装 (v2.1.3.17)
 echo ============================================================
 echo   脚本目录: !SCRIPT_DIR!
 echo ============================================================
@@ -199,7 +199,7 @@ if errorlevel 1 (
 
 "!NSSM!" set DrcomAutoLogin AppDirectory "!SCRIPT_DIR!"
 "!NSSM!" set DrcomAutoLogin DisplayName "Dr.COM 校园网自动登录"
-"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.16）"
+"!NSSM!" set DrcomAutoLogin Description "星尘闪连 (Stardust Flash Link) - Dr.COM 校园网自动登录（v2.1.3.17）"
 "!NSSM!" set DrcomAutoLogin Start SERVICE_AUTO_START
 "!NSSM!" set DrcomAutoLogin AppStdout "!LOG_DIR!\service_stdout.log"
 "!NSSM!" set DrcomAutoLogin AppStderr "!LOG_DIR!\service_stderr.log"

@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading   # 审计 G1：启动钩子的延迟复核线程（daemon）
@@ -187,6 +188,13 @@ GITHUB_DOWNLOAD_MIRRORS = (
 GITHUB_API_REQUEST_TIMEOUT_SEC = 15  # 镜像 fallback 时单次超时
 GITHUB_DOWNLOAD_REQUEST_TIMEOUT_SEC = 60  # 镜像 fallback 时下载单段超时
 
+# v2.1.3.17：暂时性失败（DNS 未就绪 / 超时 / 网络抖动）的重试节奏。
+# 真机证据：2026-11-23 21:13:15 服务刚起、21:13:45 首次检查就撞上 `getaddrinfo failed`
+# （DNS 还没就绪）→ 旧实现直接按 update_check_interval_hours(6h) 等下一轮，
+# 界面「GitHub 不可达」就这么挂了一整天。现在先隔 10 分钟重试，最多 3 次再回落。
+AUTO_UPDATE_RETRY_SEC = 600
+AUTO_UPDATE_RETRY_MAX = 3
+
 
 
 # ============================================================
@@ -338,6 +346,66 @@ def _check_disk_free_mb():
         return None
 
 
+# ============================================================
+# v2.1.3.17：GitHub 检查失败的「可读原因」
+# ============================================================
+# 真机证据（2026-11-23 21:13 / 2026-11-28 14:14，都发生在刚开机或刚换网之后）：
+#   campus_login.log 里是 `<urlopen error [Errno 11001] getaddrinfo failed>`，
+#   但 upgrade.log 与界面只有「GitHub 检查失败 / GitHub 不可达或返回异常」——
+#   用户既看不懂、也判不了要不要管；后台线程还会按 6 小时周期把界面焊在 error 上。
+# 现在：失败时把「为什么」归类成中文短语写进状态与升级日志；
+#       其中 DNS / 超时 / 网络类算暂时性失败，由 _auto_update_loop 用较短间隔重试。
+_LAST_GITHUB_ERROR = {"kind": "", "text": ""}
+_GITHUB_TRANSIENT_KINDS = ("dns", "timeout", "network")
+
+
+def _note_github_error(kind, text):
+    """记下最近一次检查失败的归类与中文说明（空串 = 清空）。"""
+    _LAST_GITHUB_ERROR["kind"] = kind
+    _LAST_GITHUB_ERROR["text"] = text
+
+
+def _short_exc_text(exc):
+    """把异常压成一句短话（不含 URL / 不含凭据，最多 80 字）。"""
+    raw = getattr(exc, "reason", exc) or exc
+    text = (str(raw) or "").strip().splitlines()
+    first = text[0] if text else ""
+    return first[:80] or exc.__class__.__name__
+
+
+def classify_github_failure(exc):
+    """把一次检查失败归类成 `(kind, 中文说明)`。纯函数，便于单测。
+
+    kind：`dns` 域名解析失败 / `timeout` 超时 / `http` HTTP 状态异常 /
+          `network` 其它网络异常 / `other` 应答内容不对。
+          前三种是**暂时性**的 —— 过几分钟重试很可能就好了。
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        code = getattr(exc, "code", 0) or 0
+        if code in (403, 429):
+            return "http", "GitHub 返回 HTTP {}（访问受限或限流）".format(code)
+        return "http", "GitHub 返回 HTTP {}".format(code)
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, socket.gaierror) or isinstance(exc, socket.gaierror):
+        return "dns", "域名解析失败（本机 DNS 或网络可能还没就绪）"
+    if isinstance(reason, (socket.timeout, TimeoutError)) or isinstance(
+            exc, (socket.timeout, TimeoutError)):
+        return "timeout", "连接 GitHub 超时"
+    if isinstance(exc, ValueError):
+        return "other", "GitHub 应答无法解析"
+    return "network", "网络异常（{}）".format(_short_exc_text(exc))
+
+
+def _describe_github_failure():
+    """最近一次检查失败的中文说明（没有记录时给兜底文案）。"""
+    return _LAST_GITHUB_ERROR["text"] or "GitHub 不可达或返回异常"
+
+
+def _github_failure_retryable():
+    """这次失败值不值得隔几分钟重试（DNS / 超时 / 网络类 = 值得）。"""
+    return _LAST_GITHUB_ERROR["kind"] in _GITHUB_TRANSIENT_KINDS
+
+
 def _check_github_latest():
     """依次尝试 GitHub 主源 + 镜像拉 releases/latest API。
 
@@ -366,18 +434,23 @@ def _check_github_latest():
                 "primary" if mirror is None else mirror,
                 exc,
             )
+            # v2.1.3.17：顺手留下「为什么失败」的可读版本（供状态 / 升级日志使用）
+            _note_github_error(*classify_github_failure(exc))
             continue
         try:
             data = json.loads(raw)
         except (ValueError, json.JSONDecodeError) as exc:
             logger.warning("GitHub API JSON 解析失败 (%s): %s", target, exc)
+            _note_github_error("other", "GitHub 应答无法解析")
             continue
         if not isinstance(data, dict):
             logger.warning("GitHub API 返回非 dict: %s", target)
+            _note_github_error("other", "GitHub 应答格式不对")
             continue
         tag = data.get("tag_name")
         if not isinstance(tag, str) or not tag:
             logger.warning("GitHub API 返回无 tag_name: %s", target)
+            _note_github_error("other", "GitHub 应答里没有版本号")
             continue
         version = tag.strip().lstrip("v").lstrip("V")
         assets = data.get("assets") or []
@@ -400,8 +473,10 @@ def _check_github_latest():
                     break
         if not asset_url:
             logger.warning("GitHub API 返回无 .exe asset: %s", target)
+            _note_github_error("other", "GitHub 应答里没有安装包（.exe）")
             continue
         published = data.get("published_at")
+        _note_github_error("", "")   # 成功 → 清掉上一次的失败原因
         return version, asset_url, digest, size, published
     return None
 
@@ -2405,8 +2480,9 @@ def _do_update_now():
         # 2d. GitHub API 可达
         latest = _check_github_latest()
         if latest is None:
-            msg = "GitHub releases/latest 不可达或返回异常"
-            _set_update_state(update_state="error", update_progress=0, update_progress_message=msg)
+            msg = "GitHub 更新检查失败：{}".format(_describe_github_failure())
+            _set_update_state(update_state="error", update_progress=0,
+                              update_progress_message=msg, update_last_error=msg)
             _log_upgrade("ERROR", msg)
             return {"ok": False, "error": msg}
         remote_ver, asset_url, digest, asset_size, published = latest
@@ -2577,12 +2653,16 @@ def _do_check_now():
         _set_update_state(update_progress_message="检查 GitHub 最新版本...")
         latest = _check_github_latest()
         if latest is None:
+            # v2.1.3.17：把「为什么失败」写清楚（DNS 未就绪 / 超时 / HTTP 限流 …），
+            # 而不是让界面与升级日志只剩一句「GitHub 不可达」。
+            detail = _describe_github_failure()
+            msg = "GitHub 更新检查失败：{}".format(detail)
             _set_update_state(update_state="error", update_progress=0,
-                              update_progress_message="GitHub 不可达或返回异常",
-                              update_last_error="GitHub releases/latest 不可达",
+                              update_progress_message=msg,
+                              update_last_error=detail,
                               update_last_check_at=_now_iso())
-            _log_upgrade("WARN", "GitHub 检查失败")
-            return {"ok": False, "error": "GitHub 不可达或返回异常"}
+            _log_upgrade("WARN", msg)
+            return {"ok": False, "error": msg, "retryable": _github_failure_retryable()}
 
         remote_ver, asset_url, digest, size, published = latest
         # 审计 B2-①：远端版本串白名单（与 _do_update_now 共用 _valid_remote_version）。
@@ -2721,6 +2801,8 @@ def _auto_update_loop():
     """
     global _auto_update_disabled_logged
     logger.info("自动升级后台线程启动")
+    # v2.1.3.17：暂时性失败（DNS / 超时 / 网络）的连续次数，成功即清零。
+    transient_fails = 0
     # 首次启动延迟 30 秒（让服务先稳定 + Web UI 就绪）
     if STOP_EVENT.wait(30):
         return
@@ -2780,7 +2862,19 @@ def _auto_update_loop():
                 return
             continue
 
-        if STOP_EVENT.wait(interval_sec):
+        # v2.1.3.17：暂时性失败（DNS 未就绪 / 超时 / 网络抖动）不该让界面按 6 小时节奏
+        # 挂着「GitHub 不可达」—— 先隔 AUTO_UPDATE_RETRY_SEC 重试，最多 AUTO_UPDATE_RETRY_MAX
+        # 次，仍不行再回落到正常周期（避免被一个长期不可达的源拖成每分钟都在打请求）。
+        wait_sec = interval_sec
+        if isinstance(result, dict) and result.get("ok") is False and result.get("retryable"):
+            if transient_fails < AUTO_UPDATE_RETRY_MAX:
+                transient_fails += 1
+                wait_sec = AUTO_UPDATE_RETRY_SEC
+                logger.info("更新检查失败（暂时性，第 %d/%d 次），%d 秒后重试",
+                            transient_fails, AUTO_UPDATE_RETRY_MAX, AUTO_UPDATE_RETRY_SEC)
+        else:
+            transient_fails = 0
+        if STOP_EVENT.wait(wait_sec):
             return
 
 
