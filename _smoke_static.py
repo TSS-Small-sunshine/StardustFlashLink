@@ -2490,6 +2490,82 @@ check("维护 R2-B2：版本白名单抽成 _valid_remote_version()，_do_update
       and src_upd.count("_valid_remote_version(") >= 3,
       str(src_upd.count("_valid_remote_version(")))
 
+# —— R14-P2（v2.1.3.17）：更新检查失败要说明「为什么」，暂时性失败要短间隔重试 ——
+# 真机证据：2026-11-23 21:13:45（服务刚起 30 秒）与 2026-11-28 14:14 的首次检查都撞上
+# `getaddrinfo failed`（DNS 未就绪）。旧实现只在 campus_login.log 留 urllib 原文，
+# upgrade.log 与界面只有一句「GitHub 检查失败」→ 用户看不懂，error 状态还挂满 6 小时。
+import socket as _socket14
+import urllib.error as _urlerr14
+_r14_dns = _urlerr14.URLError(_socket14.gaierror(11001, "getaddrinfo failed"))
+_r14_timeout = _urlerr14.URLError(_socket14.timeout("timed out"))
+_r14_http = _urlerr14.HTTPError("https://api.github.com/x", 403, "Forbidden", {}, None)
+_r14_k_dns, _r14_t_dns = au.classify_github_failure(_r14_dns)
+_r14_k_to, _r14_t_to = au.classify_github_failure(_r14_timeout)
+_r14_k_http, _r14_t_http = au.classify_github_failure(_r14_http)
+check("维护 R14-P2：DNS 失败归「域名解析失败」并说人话",
+      _r14_k_dns == "dns" and "域名解析失败" in _r14_t_dns, repr((_r14_k_dns, _r14_t_dns)))
+check("维护 R14-P2：超时 / HTTP 403 各有各的说法（403 点明限流）",
+      _r14_k_to == "timeout" and "超时" in _r14_t_to
+      and _r14_k_http == "http" and "403" in _r14_t_http and "限流" in _r14_t_http
+      and "getaddrinfo" not in _r14_t_dns,
+      repr((_r14_k_to, _r14_t_to, _r14_k_http, _r14_t_http)))
+
+_r14_urlopen = au.urllib.request.urlopen
+_r14_saved_chk = au._check_github_latest
+try:
+    au.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(_r14_dns)
+    au._set_update_state(update_state=None, update_last_error=None, update_available=False)
+    _r14_none = au._check_github_latest()
+    _r14_res = au._do_check_now()
+    _r14_msg = au._get_update_field("update_progress_message") or ""
+    _r14_err = au._get_update_field("update_last_error") or ""
+    _r14_avail = au._get_update_field("update_available")
+finally:
+    au.urllib.request.urlopen = _r14_urlopen
+    au._check_github_latest = _r14_saved_chk
+check("维护 R14-P2：真失败时状态 / 升级日志写明原因（不再只有「不可达」）",
+      _r14_none is None
+      and isinstance(_r14_res, dict) and _r14_res.get("ok") is False
+      and _r14_res.get("retryable") is True
+      and "域名解析失败" in _r14_msg and "域名解析失败" in _r14_err
+      and "GitHub 更新检查失败" in _r14_msg,
+      repr((_r14_msg[:50], _r14_err[:50], _r14_res)))
+check("维护 R14-P2：失败不臆造「有更新」（update_available 保持原值、不被翻成 True）",
+      _r14_avail is False, repr(_r14_avail))
+
+# 成功一次要清掉上次的失败原因（否则界面会一直挂着旧病）
+class _R14Resp(object):
+    def __init__(self, body):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_r14_payload = au.json.dumps({
+    "tag_name": "v9.9.9",
+    "assets": [{"name": "x.exe", "browser_download_url": "https://example.invalid/x.exe",
+                "digest": "sha256:" + "0" * 64, "size": 1}],
+    "published_at": "2026-11-28T00:00:00Z",
+}).encode("utf-8")
+try:
+    au._note_github_error("dns", "域名解析失败（本机 DNS 或网络可能还没就绪）")
+    au.urllib.request.urlopen = lambda *a, **k: _R14Resp(_r14_payload)
+    _r14_ok_res = au._check_github_latest()
+finally:
+    au.urllib.request.urlopen = _r14_urlopen
+check("维护 R14-P2：检查成功后清掉上一次的失败原因（界面不挂旧病）",
+      _r14_ok_res is not None and _r14_ok_res[0] == "9.9.9"
+      and au._LAST_GITHUB_ERROR == {"kind": "", "text": ""}
+      and au._describe_github_failure() == "GitHub 不可达或返回异常",
+      repr((_r14_ok_res, au._LAST_GITHUB_ERROR)))
+
 # —— E4 / I9：安装包暂存名与 setup.iss 的产物名一致，清理前缀同步 ——
 check("维护 R2-E4：暂存名改成 StardustFlashLink-Setup-v{ver}.exe（I9 实际产物名）",
       au.INSTALLER_FILENAME_PATTERN.format(ver="2.1.4.0") == "StardustFlashLink-Setup-v2.1.4.0.exe"
@@ -2916,6 +2992,45 @@ check("维护 R2-F3：关闭时等待改成 300 秒；启用时仍按 update_che
       and _r2_stop_enabled.waits == [30, 6 * 3600],
       repr((_r2_stop_disabled.waits, _r2_stop_enabled.waits)))
 
+# —— R14-P2：暂时性失败用 600 秒重试（最多 3 次）后回落正常周期，不再一失败就等 6 小时 ——
+_r14_loop_keys = ("logger", "_load_config", "_do_check_now", "STOP_EVENT")
+_r14_loop_saved = {k: au.__dict__.get(k, _R2_MISSING) for k in _r14_loop_keys}
+_r14_loop_logger = _R2Logger()
+try:
+    au.logger = _r14_loop_logger
+    au._load_config = lambda: {"auto_update_enabled": True, "update_check_interval_hours": 6}
+    au._do_check_now = lambda: {"ok": False, "error": "dns", "retryable": True}
+    _r14_stop_transient = _R2Stop([False, False, False, False])
+    au.STOP_EVENT = _r14_stop_transient
+    au._auto_update_loop()
+finally:
+    for _k4, _v4 in _r14_loop_saved.items():
+        if _v4 is _R2_MISSING:
+            au.__dict__.pop(_k4, None)
+        else:
+            au.__dict__[_k4] = _v4
+check("维护 R14-P2：暂时性失败先 600 秒重试 ×3，之后回落 6 小时周期",
+      au.AUTO_UPDATE_RETRY_SEC == 600 and au.AUTO_UPDATE_RETRY_MAX == 3
+      and _r14_stop_transient.waits == [30, 600, 600, 600, 6 * 3600],
+      repr(_r14_stop_transient.waits))
+
+_r14_loop_saved2 = {k: au.__dict__.get(k, _R2_MISSING) for k in _r14_loop_keys}
+try:
+    au.logger = _r14_loop_logger
+    au._load_config = lambda: {"auto_update_enabled": True, "update_check_interval_hours": 6}
+    au._do_check_now = lambda: {"ok": False, "error": "应答不对", "retryable": False}
+    _r14_stop_hard = _R2Stop([False])
+    au.STOP_EVENT = _r14_stop_hard
+    au._auto_update_loop()
+finally:
+    for _k5, _v5 in _r14_loop_saved2.items():
+        if _v5 is _R2_MISSING:
+            au.__dict__.pop(_k5, None)
+        else:
+            au.__dict__[_k5] = _v5
+check("维护 R14-P2：非暂时性失败（应答不对）不空转重试，直接按正常周期等",
+      _r14_stop_hard.waits == [30, 6 * 3600], repr(_r14_stop_hard.waits))
+
 # —— C1：SHA256 校验挪进镜像循环（每镜像下完即校验，不符换下一个）——
 _r2_saved_download = au._download_installer
 _r2_saved_do_download = au._do_download_installer
@@ -3022,6 +3137,73 @@ check("维护 R2-C08：退避到期至少等一个 tick（不再 0 秒空转刷�
 check("维护 R2-C08：退避未到期时按剩余时间等（不会被 interval 吃掉）",
       abs(svc.compute_periodic_wait_sec(1800, _future2) - 60) < 5,
       repr(svc.compute_periodic_wait_sec(1800, _future2)))
+
+# —— R14-P1（v2.1.3.17）：退避到期后的那次重试若「没给出结论」，退避要被消费掉 ——
+# 否则 compute_periodic_wait_sec 每圈都判「已到期」→ 每 5 秒一轮空转。
+# 真机证据：2026-11-23 一天 1571 次检查 / 4831 行日志（正常日 25–59 次 / 130–250 行）；
+# 2026-11-28 14:58 换到热点后又进入同样节奏。
+import time as _time14
+_svc_r14_backoff = dict(svc.BACKOFF)
+try:
+    _past14 = (_dtm2.datetime.now() - _dtm2.timedelta(minutes=10)).isoformat(timespec="seconds")
+    svc.BACKOFF["until"] = _past14
+    svc.BACKOFF["consecutive_failures"] = 2
+    check("维护 R14-P1：已过期退避仍先「尽快重试一次」（C-08 语义不变）",
+          svc.compute_periodic_wait_sec(1800, svc._backoff_until()) == svc.NETWATCH_TICK_SEC)
+    _r14_consumed = svc._consume_expired_backoff()
+    check("维护 R14-P1：重试过后消费掉过期退避 → 下一圈回到正常间隔（不再 5 秒）",
+          _r14_consumed is True and svc._backoff_until() is None
+          and svc.compute_periodic_wait_sec(1800, svc._backoff_until()) == 1800,
+          repr((_r14_consumed, svc._backoff_until())))
+    _fut14 = (_dtm2.datetime.now() + _dtm2.timedelta(minutes=5)).isoformat(timespec="seconds")
+    svc.BACKOFF["until"] = _fut14
+    svc.BACKOFF["consecutive_failures"] = 1
+    check("维护 R14-P1：未到期的退避一个字节都不动",
+          svc._consume_expired_backoff() is False
+          and svc._backoff_until() == _fut14
+          and svc.BACKOFF["consecutive_failures"] == 1)
+finally:
+    svc.BACKOFF.clear()
+    svc.BACKOFF.update(_svc_r14_backoff)
+
+
+# 行为级：真跑 run_periodic —— 过期退避 + 速退（不计失败）→ 只该问一次，然后回到间隔
+class _R14QuietLogger(object):
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+    def exception(self, *a, **k):
+        pass
+
+
+_svc_r14_saved = {k: getattr(svc, k) for k in
+                  ("NETWATCH_TICK_SEC", "_load_config", "run_once", "logger", "STOP_EVENT")}
+_svc_r14_backoff2 = dict(svc.BACKOFF)
+_r14_calls = []
+try:
+    svc.NETWATCH_TICK_SEC = 0.05   # 把 5 秒压成 50ms，不占冒烟时间
+    svc._load_config = lambda: {"auto_check_enabled": True, "auto_check_interval_min": 30,
+                                "host": "10.0.0.1", "port": 80}
+    svc.run_once = lambda reason: _r14_calls.append(reason)
+    svc.logger = _R14QuietLogger()
+    svc.STOP_EVENT = threading.Event()
+    svc.BACKOFF["until"] = (_dtm2.datetime.now()
+                            - _dtm2.timedelta(minutes=10)).isoformat(timespec="seconds")
+    _th_r14 = threading.Thread(target=svc.run_periodic, daemon=True)
+    _th_r14.start()
+    _time14.sleep(0.6)
+    svc.STOP_EVENT.set()
+    _th_r14.join(3)
+finally:
+    for _k3, _v3 in _svc_r14_saved.items():
+        setattr(svc, _k3, _v3)
+    svc.BACKOFF.clear()
+    svc.BACKOFF.update(_svc_r14_backoff2)
+check("维护 R14-P1：过期退避 + 速退时 0.6 秒内只重试一次（修复前是 9 次）",
+      _r14_calls == ["periodic"], repr(_r14_calls))
 
 # —— R2-G3：升级启动钩子挪到 HTTP 绑定之后（不再拖慢 /api/health 首轮探测）——
 _main_src2 = src_svc[src_svc.index("def main():"):]
@@ -5352,7 +5534,7 @@ for _rel in ("password.txt", "config.json", "logs/campus_login.log",
 import version
 iss = pathlib.Path("packaging/setup.iss").read_text(encoding="utf-8", errors="replace")
 check("版本一致 version.py vs setup.iss", ('#define MyAppVersion "%s"' % version.VERSION) in iss)
-check("版本 = 2.1.3.16", version.VERSION == "2.1.3.16", version.VERSION)
+check("版本 = 2.1.3.17", version.VERSION == "2.1.3.17", version.VERSION)
 check("v2.1.0.0 代号跟着版本线走（2.1 = Vega 织女星，且 setup.iss 同步）",
       version.VERSION.startswith("2.1.") and version.CODENAME == "Vega"
       and version.CODENAME_CN == "织女星" and '#define MyAppCodename "Vega"' in iss,
@@ -5558,9 +5740,9 @@ check("v2.1.3.16 版本：联网_service.py 文件头同步",
       ("Web UI 配置版 v%s" % version.VERSION) in _svc_v216)
 check("v2.1.3.16：CHANGELOG 有 v2.1.3.16 段",
       ("## v%s" % version.VERSION) in _changelog_v216)
-check("v2.1.3.16：RELEASE-NOTES.md 模板头部已重写且保留占位符（不写死版本号）",
+check("发布说明模板：仍由占位符渲染，不写死版本号（每次发版只换内容，不换机制）",
       "{{VERSION}}" in _notes_v216 and "{{CODENAME_CN}}" in _notes_v216
-      and "uninstall.bat --check" in _notes_v216
+      and "{{SHA256}}" in _notes_v216 and "{{COMPARE_URL}}" in _notes_v216
       and version.VERSION not in _notes_v216)
 
 print("\n结果：%d 项失败 / %d 项检查" % (len(FAILS), TOTAL[0]))

@@ -2,7 +2,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 """
-联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.16）
+联网_service.py — 星尘闪连 (Stardust Flash Link) — Dr.COM 校园网自动登录（Web UI 配置版 v2.1.3.17）
 
 架构
     主线程：阻塞在 ThreadingHTTPServer 上，提供 Web UI 与 REST API。
@@ -642,6 +642,34 @@ def _backoff_until():
         return BACKOFF.get("until")
 
 
+def _consume_expired_backoff():
+    """把「**已经过期**、且这一轮重试没给出新结论」的退避清掉。返回是否清了。
+
+    v2.1.3.17（真机 P1）：`compute_periodic_wait_sec` 对已到期的退避只表达一件事 ——
+    「尽快重试一次」（返回 NETWATCH_TICK_SEC=5 秒）。但重试若走的是**不计失败**的早退
+    路径（守卫跳过 / 在线状态未知 / 账号密码未设置），退避既不会被重设、也不会被清 →
+    下一圈仍判「已到期」→ 又来一个 5 秒 → **每 5 秒一轮空转**。
+
+    真机证据：2026-11-23 一天 1571 次检查 / 4831 行日志（正常日 25–59 次 / 130–250 行）；
+    2026-11-28 14:58 换到热点后同样进入 5 秒一轮。
+
+    只清「确已过期」的：未到期、或刚被 run_once 重新拉长的，一律不动 ✓。
+    """
+    with BACKOFF_LOCK:
+        until = BACKOFF.get("until")
+    if not until:
+        return False
+    try:
+        expired = datetime.fromisoformat(until) <= datetime.now()
+    except ValueError:
+        # 坏值按「过期」处理：留着它只会让每圈都算出一个短等待（与 compute 同口径）
+        expired = True
+    if not expired:
+        return False
+    _reset_backoff()   # 复用单一口径（连续失败数 / 档位 / until 一起归零）
+    return True
+
+
 # ============================================================
 # 网络操作 / run_once 已迁移到 protocol.py（v2.0.2 解耦）
 # ============================================================
@@ -865,12 +893,17 @@ def run_periodic():
                 )
                 # reason 带 netwatch 前缀：日志里一眼能看出这次是「变化触发的」✓
                 run_once("netwatch")
+                _consume_expired_backoff()   # v2.1.3.17：见函数注释（治 5 秒一轮空转）
                 continue
 
             if STOP_EVENT.is_set():
                 return
 
             run_once("periodic")
+            # v2.1.3.17（真机 P1）：这一轮已经把「已到期的退避」消费掉了 —— 若它没有给出新
+            # 结论（守卫跳过 / 在线未知 / 账号未设置都不计失败），就把这条陈旧退避清掉，
+            # 让下一圈回到正常间隔；否则 compute 会一直算出 NETWATCH_TICK_SEC → 每 5 秒空转。
+            _consume_expired_backoff()
         except Exception as exc:  # noqa: BLE001  周期线程绝不能死：停一会儿再来
             logger.exception("周期自检循环异常（线程继续活着，%s 秒后重试）: %s",
                              PERIODIC_ERROR_BACKOFF_SEC, exc)
